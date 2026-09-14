@@ -49,7 +49,7 @@
 #include <calobase/RawTowerGeom.h>
 #include <caloreco/RawTowerCalibration.h>
 #include <calowaveformsim/CaloWaveformSim.h>
-#include "/sphenix/u/patsfan753/thesisAnalysis/install/include/caloreco/PhotonClusterBuilder.h"
+#include <caloreco/PhotonClusterBuilder.h>
 #include <jetbase/Jet.h>
 #include <g4jets/TruthJetInput.h>
 
@@ -961,9 +961,8 @@ class ScaledTriggerStudyReco : public SubsysReco
   }
 
   std::string m_outFile;
-  std::string m_runListPath =
-    "/sphenix/u/patsfan753/scratch/thesisAnalysis/dst_lists_auau/"
-    "scaledEffRuns_MBD_NS_geq_2_vtx_lt_150__Pho10_12.list";
+  // Optional scaled-trigger QA run list; set RJ_SCALED_TRIGGER_RUNLIST to use it.
+  std::string m_runListPath;
   std::vector<uint64_t> m_selectedRuns;
   double m_vzMaxCm = 30.0;
   bool m_enableCentrality = false;
@@ -1085,15 +1084,15 @@ namespace yamlcfg
         std::vector<int> centrality_edges = {0, 10, 20, 40, 60, 80, 100};
         
         bool vertex_reweight_on_pp = true;
-        std::string vertex_reweight_file_pp = "/sphenix/user/shuhangli/ppg12/efficiencytool/truth_vertex_reweight/output/0mrad/reweight.root";
+        std::string vertex_reweight_file_pp;    // set in analysis_config.yaml
         std::string vertex_reweight_hist_pp = "h_w_iterative";
 
         bool vertex_reweight_on_auau = false;
-        std::string vertex_reweight_file_auau = "/sphenix/u/bseidlitz/work/pj_auau/reweightingDer/output/vtxz_reweighting.root";
+        std::string vertex_reweight_file_auau;  // set in analysis_config.yaml
         std::string vertex_reweight_hist_auau = "data_over_MC_ratios/h_zvtx_ratio_data_over_photonJet";
         
         bool centrality_reweight_on = false;
-        std::string centrality_reweight_file = "/sphenix/u/bseidlitz/work/pj_auau/reweightingDer/output/centrality_reweighting.root";
+        std::string centrality_reweight_file;   // set in analysis_config.yaml
         std::string centrality_reweight_hist = "nom_cent_rw_hist";
         
         double isoA = 0.490;

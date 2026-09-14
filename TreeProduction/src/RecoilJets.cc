@@ -7371,7 +7371,7 @@ int RecoilJets::process_event(PHCompositeNode* topNode)
         ? (ppg12PhotonSliceXsecPb(ppPhotonSlice) / kPPG12Photon20CrossPb)
         : (ppg12InclusiveJetSliceXsecPb(ppInclusiveJetSliceForWeight) / kPPG12Jet50CrossPb);
 
-    // THE-134 V13 diagnostic-only pre-weight truth-label observer.
+    // V13 diagnostic-only pre-weight truth-label observer.
     //
     // The V12 foreground diagnostic intentionally ran without the canonical
     // PPG12 yield/period-weight contract, so accepted PhotonJet20 stitch
@@ -7537,7 +7537,7 @@ int RecoilJets::process_event(PHCompositeNode* topNode)
         }
       }
     }
-    // End THE-134 V13 diagnostic-only pre-weight truth-label observer.
+    // End V13 diagnostic-only pre-weight truth-label observer.
 
     if (!configurePPG12SimEventWeight(sliceFactor, laneCode))
     {

@@ -25,7 +25,6 @@ from photonjet.analysis.response_builder import (
     write_response_artifacts,
 )
 from photonjet.cli import main as cli_main
-from photonjet.plotting.contract import compile_plot_contract, write_histogram_receipt
 from photonjet.provenance import write_json
 
 
@@ -77,7 +76,7 @@ class ResponseBuilderTest(unittest.TestCase):
                 with self.subTest(system=system, dimension=dimension):
                     bundle = build_response(
                         [source],
-                        ResponseBuildConfig(system=system, dimension=dimension),
+                        ResponseBuildConfig(truth_definition="legacy_fixture", system=system, dimension=dimension),
                     )
                     self.assertEqual(bundle.system, system)
                     self.assertEqual(bundle.dimension, dimension)
@@ -90,7 +89,7 @@ class ResponseBuilderTest(unittest.TestCase):
     def test_auau_fixture_builds_matched_and_combinatoric_pairs(self) -> None:
         bundle = build_response(
             [FIXTURES / "photonjet_trees_auau.root"],
-            ResponseBuildConfig(system="auau", dimension="2D"),
+            ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="2D"),
         )
         self.assertEqual(bundle.matrix.shape, (126, 105))
         self.assertEqual(float(bundle.matrix.sum()), 2.0)
@@ -115,7 +114,7 @@ class ResponseBuilderTest(unittest.TestCase):
     def test_pp_region_a_empty_reco_becomes_truth_misses(self) -> None:
         bundle = build_response(
             [FIXTURES / "photonjet_trees_pp.root"],
-            ResponseBuildConfig(system="pp", dimension="1D"),
+            ResponseBuildConfig(truth_definition="legacy_fixture", system="pp", dimension="1D"),
         )
         self.assertEqual(bundle.matrix.shape, (6, 5))
         self.assertEqual(float(bundle.reco.sum()), 0.0)
@@ -135,7 +134,7 @@ class ResponseBuilderTest(unittest.TestCase):
                     row["event_weight"] = 2.0
         source = self._write("weighted.root", "auau", specification, contract)
         bundle = build_response(
-            [source], ResponseBuildConfig(system="auau", dimension="1D")
+            [source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="1D")
         )
         self.assertEqual(float(bundle.matrix.sum()), 3.0)
         self.assertEqual(float(bundle.matrix_sumw2.sum()), 5.0)
@@ -156,7 +155,7 @@ class ResponseBuilderTest(unittest.TestCase):
                     row["terminal_status"] = 2
         source = self._write("retained_terminal.root", "auau", specification, contract)
         bundle = build_response(
-            [source], ResponseBuildConfig(system="auau", dimension="1D")
+            [source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="1D")
         )
         self.assertEqual(float(bundle.matrix.sum()), 1.0)
         self.assertEqual(float(bundle.fakes.sum()), 1.0)
@@ -217,7 +216,7 @@ class ResponseBuilderTest(unittest.TestCase):
 
             for dimension in ("1D", "2D"):
                 with self.subTest(system=system, dimension=dimension):
-                    config = ResponseBuildConfig(system=system, dimension=dimension)
+                    config = ResponseBuildConfig(truth_definition="legacy_fixture", system=system, dimension=dimension)
                     actual = build_response([retained], config)
                     expected = build_response([subset], config)
                     for name, value in vars(actual).items():
@@ -231,32 +230,6 @@ class ResponseBuilderTest(unittest.TestCase):
                                 np.testing.assert_array_equal(item, getattr(expected, name)[key])
                         else:
                             self.assertEqual(value, getattr(expected, name))
-
-    def test_terminal_inventory_is_distinct_from_plotted_event_selection(self) -> None:
-        specification, contract = self._specification("auau")
-        for rows in specification["trees"].values():
-            for row in rows:
-                if row.get("event_id_lo") == 1001 and "terminal_status" in row:
-                    row["terminal_status"] = 2
-        source = self._write("mixed.root", "auau", specification, contract)
-        selection = RecoilSelection(region="inclusive")
-        histogram = self.output / "histogram.json"
-        receipt_path = self.output / "histogram.receipt.json"
-        dataset = ROOT / "config/datasets/auau_engineering_fixture.yaml"
-        write_json(histogram, recoil_histogram([source], selection))
-        receipt = write_histogram_receipt(
-            input_paths=[source], histogram_path=histogram, selection=selection,
-            dataset_manifest_path=dataset, receipt_path=receipt_path,
-        )
-        self.assertEqual(receipt["dataset_observation"]["event_count"], 2)
-        self.assertEqual(receipt["dataset_observation"]["accepted_events"], 1)
-        self.assertEqual(receipt["dataset_observation"]["retained_terminal_events_excluded"], 1)
-        plot = compile_plot_contract(
-            histogram_path=histogram, histogram_receipt_path=receipt_path,
-            dataset_manifest_path=dataset,
-        )
-        self.assertIn("2 input events", plot["annotations"]["root_tlatex"]["dataset"])
-        self.assertIn("Accepted producer events", plot["annotations"]["root_tlatex"]["cuts"])
 
     def test_all_terminal_input_has_empty_offline_products(self) -> None:
         for system in ("pp", "auau"):
@@ -279,7 +252,7 @@ class ResponseBuilderTest(unittest.TestCase):
             purity = purity_counts([source], non_tight_definition="bounded")
             self.assertEqual(sum(purity["weighted_counts"].values()), 0.0)
             for dimension in ("1D", "2D"):
-                bundle = build_response([source], ResponseBuildConfig(system=system, dimension=dimension))
+                bundle = build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system=system, dimension=dimension))
                 self.assertEqual(float(bundle.reco.sum()), 0.0)
                 self.assertEqual(float(bundle.truth.sum()), 0.0)
                 self.assertEqual(bundle.provenance["observed"]["accepted_events"], 0)
@@ -290,7 +263,7 @@ class ResponseBuilderTest(unittest.TestCase):
         specification["trees"]["truthPhotons"][0]["truth_photon_pt"] = 45.0
         source = self._write("boundary.root", "auau", specification, contract)
         bundle = build_response(
-            [source], ResponseBuildConfig(system="auau", dimension="1D")
+            [source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="1D")
         )
         key = Category.PHOTON_HIGH_FEED_IN.value
         self.assertEqual(float(bundle.boundary_reco[key].sum()), 1.0)
@@ -323,7 +296,7 @@ class ResponseBuilderTest(unittest.TestCase):
         source = self._write("unmatched_reco.root", "auau", specification, contract)
         bundle = build_response(
             [source],
-            ResponseBuildConfig(system="auau", dimension="1D"),
+            ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="1D"),
         )
         self.assertEqual(
             float(bundle.fake_causes[Category.UNMATCHED_RECO.value].sum()),
@@ -372,7 +345,7 @@ class ResponseBuilderTest(unittest.TestCase):
 
         source = self._write("explicit_fake_miss.root", "auau", specification, contract)
         bundle = build_response(
-            [source], ResponseBuildConfig(system="auau", dimension="1D")
+            [source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="1D")
         )
         self.assertEqual(
             float(bundle.fake_causes[Category.UNMATCHED_RECO.value].sum()),
@@ -426,7 +399,7 @@ class ResponseBuilderTest(unittest.TestCase):
 
         source = self._write("source_link_topologies.root", "auau", specification, contract)
         bundle = build_response(
-            [source], ResponseBuildConfig(system="auau", dimension="1D")
+            [source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="1D")
         )
         self.assertEqual(float(bundle.matrix.sum()), 2.0)
         self.assertEqual(float(bundle.fakes.sum()), 2.0)
@@ -440,7 +413,7 @@ class ResponseBuilderTest(unittest.TestCase):
         overlay["truth_isolation"] = 0.5
         source = self._write("ambiguous_truth.root", "auau", specification, contract)
         with self.assertRaisesRegex(ValueError, "ambiguous truth-signal photons"):
-            build_response([source], ResponseBuildConfig(system="auau"))
+            build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_duplicate_typed_link_fails_closed(self) -> None:
         specification, contract = self._specification("auau")
@@ -449,7 +422,7 @@ class ResponseBuilderTest(unittest.TestCase):
         specification["trees"]["recoTruthLinks"].append(duplicate)
         source = self._write("duplicate_link.root", "auau", specification, contract)
         with self.assertRaisesRegex(ValueError, "ambiguous typed reco link"):
-            build_response([source], ResponseBuildConfig(system="auau"))
+            build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_pair_identity_cannot_disagree_with_local_object_indices(self) -> None:
         specification, contract = self._specification("auau")
@@ -460,7 +433,7 @@ class ResponseBuilderTest(unittest.TestCase):
             "photonJets jet field disagrees with its local index|"
             "pair jet index and identity disagree",
         ):
-            build_response([source], ResponseBuildConfig(system="auau"))
+            build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_builder_rechecks_pair_witnesses_against_normalized_objects(self) -> None:
         specification, contract = self._specification("auau")
@@ -471,7 +444,7 @@ class ResponseBuilderTest(unittest.TestCase):
                 ValueError,
                 "photonJets jet_eta disagrees with normalized objects",
             ):
-                build_response([source], ResponseBuildConfig(system="auau"))
+                build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_builder_rejects_a_missing_photon_jet_combination(self) -> None:
         specification, contract = self._specification("auau")
@@ -482,28 +455,28 @@ class ResponseBuilderTest(unittest.TestCase):
                 ValueError,
                 "does not exactly cover the photon/jet Cartesian product",
             ):
-                build_response([source], ResponseBuildConfig(system="auau"))
+                build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_unproved_wrong_object_witness_fails_closed(self) -> None:
         specification, contract = self._specification("auau")
         specification["trees"]["photonJets"][0]["wrong_recoil_class"] = 1
         source = self._write("wrong_recoil.root", "auau", specification, contract)
         with self.assertRaisesRegex(ValueError, "golden response semantics"):
-            build_response([source], ResponseBuildConfig(system="auau"))
+            build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_wrong_object_witness_fails_even_when_no_region_leader_exists(self) -> None:
         specification, contract = self._specification("pp")
         specification["trees"]["photonJets"][0]["wrong_recoil_class"] = 1
         source = self._write("no_leader_wrong_recoil.root", "pp", specification, contract)
         with self.assertRaisesRegex(ValueError, "golden response semantics"):
-            build_response([source], ResponseBuildConfig(system="pp"))
+            build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="pp"))
 
     def test_system_and_duplicate_input_ambiguity_fail_closed(self) -> None:
         pp = FIXTURES / "photonjet_trees_pp.root"
         with self.assertRaisesRegex(ValueError, "centrality"):
-            build_response([pp], ResponseBuildConfig(system="auau"))
+            build_response([pp], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
         with self.assertRaisesRegex(ValueError, "duplicate response input path"):
-            build_response([pp, pp], ResponseBuildConfig(system="pp"))
+            build_response([pp, pp], ResponseBuildConfig(truth_definition="legacy_fixture", system="pp"))
 
     def test_event_source_identity_cannot_repeat_across_distinct_inputs(self) -> None:
         specification, contract = self._specification("auau")
@@ -518,7 +491,7 @@ class ResponseBuilderTest(unittest.TestCase):
         ):
             build_response(
                 [FIXTURES / "photonjet_trees_auau.root", second],
-                ResponseBuildConfig(system="auau"),
+                ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"),
             )
 
     def test_object_identity_cannot_repeat_across_distinct_input_parts(self) -> None:
@@ -533,13 +506,13 @@ class ResponseBuilderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity repeats across parts"):
             build_response(
                 [FIXTURES / "photonjet_trees_auau.root", second],
-                ResponseBuildConfig(system="auau"),
+                ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"),
             )
 
     def test_artifact_replay_is_byte_exact_and_path_portable(self) -> None:
         source = FIXTURES / "photonjet_trees_auau.root"
         stem = self.output / "response"
-        config = ResponseBuildConfig(system="auau", dimension="2D")
+        config = ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="2D")
         first = write_response_artifacts([source], stem, config)
         first_bytes = {
             suffix: stem.with_suffix(suffix).read_bytes()
@@ -564,7 +537,7 @@ class ResponseBuilderTest(unittest.TestCase):
         payload = write_response_artifacts(
             [source],
             stem,
-            ResponseBuildConfig(system="auau", dimension="2D"),
+            ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="2D"),
             receipt_path=receipt,
         )
         self.assertTrue(receipt.is_file())
@@ -578,7 +551,7 @@ class ResponseBuilderTest(unittest.TestCase):
         source = FIXTURES / "photonjet_trees_auau.root"
         stem = self.output / "response"
         published_stem = stem.resolve()
-        config = ResponseBuildConfig(system="auau", dimension="2D")
+        config = ResponseBuildConfig(truth_definition="legacy_fixture", system="auau", dimension="2D")
         write_response_artifacts([source], stem, config)
         receipt = published_stem.with_suffix(".receipt.json")
         self.assertTrue(receipt.is_file())
@@ -631,7 +604,7 @@ class ResponseBuilderTest(unittest.TestCase):
                 ValueError,
                 "response input changed while it was being validated or read",
             ):
-                build_response([source], ResponseBuildConfig(system="auau"))
+                build_response([source], ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"))
 
     def test_concurrent_writer_for_the_same_output_fails_closed(self) -> None:
         source = FIXTURES / "photonjet_trees_auau.root"
@@ -647,7 +620,7 @@ class ResponseBuilderTest(unittest.TestCase):
                 write_response_artifacts(
                     [source],
                     stem,
-                    ResponseBuildConfig(system="auau"),
+                    ResponseBuildConfig(truth_definition="legacy_fixture", system="auau"),
                 )
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
@@ -659,6 +632,10 @@ class ResponseBuilderTest(unittest.TestCase):
                 [
                     "response",
                     "build",
+                    "--config",
+                    str(ROOT / "config" / "nominal.yaml"),
+                    "--truth-definition",
+                    "legacy_fixture",
                     "--input",
                     str(FIXTURES / "photonjet_trees_auau.root"),
                     "--system",

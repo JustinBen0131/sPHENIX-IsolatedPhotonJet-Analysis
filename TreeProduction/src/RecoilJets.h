@@ -1756,7 +1756,7 @@ private:
   std::string m_ppPhotonIDSourceRole = "auto";  // auto, signal, background, all
 
   bool m_ppg12TableQAEnabled = false;
-  // THE-119 canary-only, selection-neutral witness for the loose replay
+  // Canary-only, selection-neutral witness for the loose replay
   // capture population. It never sets a tag or source-ownership decision.
   bool m_replayFoundationCaptureWitnessEnabled = false;
   bool m_ppg12TableQANPBDataTaggingEnabled = false;

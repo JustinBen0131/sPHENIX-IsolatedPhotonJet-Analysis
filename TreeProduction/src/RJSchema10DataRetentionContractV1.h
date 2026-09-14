@@ -10,7 +10,7 @@ namespace Schema10DataRetentionContractV1
 {
 // Two named data retention profiles exist and they retain different event
 // populations.  `sparse_photon_analysis_v1` is the profile every already
-// produced THE-236 schema-10 data row was written under: an event is retained
+// Produced schema-10 data row was written under: an event is retained
 // when any stored photon candidate is inside the kinematic window.
 // `sparse_photon_analysis_v2` additionally requires that candidate to pass the
 // active loose-photon preselection.  v2 therefore drops every event whose

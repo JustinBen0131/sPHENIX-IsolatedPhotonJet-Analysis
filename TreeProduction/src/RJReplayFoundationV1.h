@@ -716,7 +716,7 @@ inline std::vector<RecoTruthLinkRow> buildDeterministicJetLinks(
 struct Metadata
 {
   std::string schema_sha256,semantic_sha256,source_sha256,model_sha256,config_sha256,code_sha256;
-  // Optional for protected historical writers, mandatory in the THE-121/122
+  // Optional for protected historical writers, mandatory in the
   // packet/terminal contract.  This permits old evidence to remain readable
   // while new production binds one campaign-level reconstruction manifest.
   std::string provenance_manifest_sha256;

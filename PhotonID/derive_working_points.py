@@ -42,7 +42,7 @@ def signal_candidates(path: Path, config: dict[str, Any]) -> dict[str, np.ndarra
         photons = root["photons"].arrays(
             ["source_file_index", "candidate_id_hi", "candidate_id_lo", "photon_et", "photon_eta",
              "centrality", "event_weight", "bdt_score"], library="np")
-        truth = root["truthPhotons"].arrays(library="np")
+        truth = root["truthPhotons"].arrays(list(root["truthPhotons"].keys()), library="np")
         links = root["recoTruthLinks"].arrays(
             ["source_file_index", "reco_id_hi", "reco_id_lo", "truth_id_hi", "truth_id_lo",
              "reco_type", "truth_type", "link_class"], library="np")

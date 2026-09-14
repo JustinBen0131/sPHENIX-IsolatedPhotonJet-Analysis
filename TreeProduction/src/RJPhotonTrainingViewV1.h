@@ -1,7 +1,7 @@
 #ifndef RJ_PHOTON_TRAINING_VIEW_V1_H
 #define RJ_PHOTON_TRAINING_VIEW_V1_H
 
-// Opt-in, normalized photon-ID training rows for the seven THE-134 shower
+// Opt-in, normalized photon-ID training rows for the seven shower
 // definitions.  This is deliberately a separate ROOT artifact: it does not
 // add a tree to ReplayFoundationV1 and does not alter the legacy
 // AuAuPhotonIDTrainingTree contract.

@@ -38,7 +38,7 @@
 #include <string>
 #include <vector>
 
-R__LOAD_LIBRARY(/sphenix/u/patsfan753/thesisAnalysis/install/lib/libcalo_reco.so)
+R__LOAD_LIBRARY(libcalo_reco.so)
 R__LOAD_LIBRARY(libffamodules.so)
 R__LOAD_LIBRARY(libfun4allutils.so)
 R__LOAD_LIBRARY(libCaloStatusSkimmer.so)

@@ -6,8 +6,10 @@
 # changing a threshold regenerates flags and histograms without retraining a
 # model or re-reading a DST.  A `null` threshold means "not yet derived"; the
 # stages stop with an explicit message rather than substituting a value.
+# Sample normalisation (cross sections, stitching, centrality maps) is in
+# samples.yaml next to this file.
 
-selection_version: nominal-v2-draft-1
+selection_version: nominal-v2-draft-2
 
 # Truth photon definition used both as the training signal and as the
 # selected truth photon in simulation.  A truth photon is a signal photon when
@@ -16,7 +18,7 @@ selection_version: nominal-v2-draft-1
 truth_signal:
   require_geant_photon: true            # g4_photon_valid == 1 (PID 22 in Geant)
   require_generator_association: true   # hepmc_association_valid == 1
-  valid_prompt_classes: [-1, 0, 1, 2]   # PPG12 photon classes; class 3 and above are rejected
+  valid_prompt_classes: [-1, 0, 1, 2]   # photon classes; 3 (decay) is rejected
   truth_isolation_cone_radius: 0.3
   truth_isolation_max_gev: 4.0          # truth_isolation_r03 < 4 GeV
   abs_eta_max: 0.7
@@ -49,7 +51,8 @@ recoil:
 abcd:
   non_tight_definition: bounded
 
-# Per-system photon-identification model and working points.
+# Per-system photon-identification model, working points, training recipe and
+# correction settings.
 # `features` is the ordered model input list as stored in the trees
 # (bdt_input_00 ... bdt_input_NN).  A model file must be a TMVA RBDT ROOT file
 # trained on exactly this ordered list; `model_sha256` pins it.
@@ -88,6 +91,28 @@ systems:
       nontight_high: null
       isolated_max_gev: null                  # iso_r03 < isolated_max_gev
       nonisolated_min_gev: null               # iso_r03 > nonisolated_min_gev
+    # Established p+p training recipe (the reference photon-identification model).
+    training:
+      et_window_gev: [6.0, 40.0]             # rows used for training; weights are computed on all rows first
+      weighting: {eta_range: [-0.7, 0.7], bins: 20, et_cap: 800.0}
+      low_et_background_flattening: {enabled: true, et_max_gev: 15.0, bins: 20, seed: 42}
+      split: {test_fraction: 0.20, validation_fraction: 0.10, seed: 42}
+      xgboost:
+        n_estimators: 750
+        max_depth: 5
+        learning_rate: 0.1
+        subsample: 0.5
+        colsample_bytree: 0.6
+        colsample_bylevel: 1.0
+        reg_alpha: 5.0
+        reg_lambda: 0.3
+        grow_policy: lossguide
+        max_bin: 256
+        tree_method: hist
+        random_state: 42
+    corrections:
+      subtract_combinatoric: false            # not applied in p+p in the maintained analysis
+      purity_strategy: per_pt                 # one ABCD solve per photon-pT bin
   auau:
     features:
       - cluster_Et
@@ -117,10 +142,34 @@ systems:
       nontight_high: null
       isolated_max_gev: null
       nonisolated_min_gev: null
+    # Established Au+Au training recipe (14-input model, trained in the 15-35 GeV window).
+    training:
+      et_window_gev: [15.0, 35.0]
+      weighting: {eta_range: [-0.7, 0.7], bins: 20, et_cap: 800.0}
+      low_et_background_flattening: {enabled: false}
+      split: {test_fraction: 0.10, validation_fraction: 0.0, seed: 13}
+      xgboost:
+        n_estimators: 450
+        max_depth: 4
+        learning_rate: 0.035
+        subsample: 0.85
+        colsample_bytree: 0.85
+        reg_alpha: 5.0
+        reg_lambda: 0.3
+        grow_policy: lossguide
+        max_bin: 256
+        tree_method: hist
+        random_state: 13
+    corrections:
+      subtract_combinatoric: true             # simulated unmatched recoil scaled to the data photon count
+      purity_strategy: integrated_15_35_transfer  # one background transfer from the 15-35 GeV ABCD population
 
-# Unfolding configuration.  The iteration count is selected by the maintained
-# refold/toy scan; until that scan has run on the nominal samples it is null
-# and FinalAnalysis/run_corrections.py requires --iterations explicitly.
+# Unfolding: iterative Bayes.  With `iterations: null` the correction driver
+# scans the candidates, applies the maintained gate and score to each and
+# keeps the minimum score (scan_toys per candidate, final_toys for the result).
 unfolding:
   method: iterative_bayes
   iterations: null
+  candidates: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  scan_toys: 300
+  final_toys: 3000

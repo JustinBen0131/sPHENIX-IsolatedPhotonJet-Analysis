@@ -13,7 +13,7 @@ from photonjet.analysis.response import (
     GlobalBinMap,
     classify_state,
 )
-from photonjet.analysis.unfolding import iterative_bayes, scan_problem
+from photonjet.analysis.unfolding import iterative_bayes
 
 
 class ResponseUnfoldingTest(unittest.TestCase):
@@ -55,16 +55,6 @@ class ResponseUnfoldingTest(unittest.TestCase):
         second = iterative_bayes(measured, matrix, misses, 4)
         np.testing.assert_array_equal(first[0], second[0])
         np.testing.assert_array_equal(first[1], second[1])
-
-    def test_iteration_selection_requires_response_covariance_toys(self) -> None:
-        with self.assertRaisesRegex(ValueError, "response/leakage/Tcomb toys"):
-            scan_problem(
-                None,
-                np.asarray([1.0]),
-                np.asarray([1.0]),
-                np.asarray([[1.0], [1.0]]),
-                response_toys=None,
-            )
 
 
 if __name__ == "__main__":

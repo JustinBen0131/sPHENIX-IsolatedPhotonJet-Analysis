@@ -7,31 +7,34 @@ stages that hand off through documented files:
 ```text
 DST                      TreeProduction/   Fun4All producer + tree builder
   -> collaborator trees  PhotonID/         train, score, derive working points
-  -> scored trees        TreeToHists/      nominal selection, ABCD and xJ histograms
-  -> histograms          FinalAnalysis/    purity correction, unfolding, overlay
+  -> scored trees        TreeToHists/      nominal selection, weights, ABCD and xJ histograms
+  -> histograms          FinalAnalysis/    responses, purity correction, unfolding, overlay
   -> final xJgamma comparison plot
 ```
 
-One configuration file, `config/nominal.yaml`, holds the physics choices shared
-by every stage: the truth-photon definition, the R = 0.3 isolation cone, the
-photon and jet kinematic windows, the per-system model inputs and the
-working-point thresholds.  Changing a threshold regenerates flags and
-histograms without retraining a model or re-reading a DST.
+Two files hold the physics choices shared by every stage: `config/nominal.yaml`
+(truth-photon definition, R = 0.3 isolation, kinematic windows, model inputs,
+working-point thresholds, training recipe, correction settings) and
+`config/samples.yaml` (cross sections, stitching windows, centrality maps).
+Changing a threshold regenerates flags and histograms without retraining a
+model or re-reading a DST.  `docs/ANALYSIS.md` explains the physics behind
+every choice; `docs/STATUS.md` says what is validated and what is pending.
 
-Status: **first-pass candidate.**  Every stage has a real command and the
-Python stages are exercised end to end on the small fixture trees in
-`tests/fixtures`.  Models and working points for the nominal selection are
-not yet derived (see *What is still needed*), so the configuration ships with
-`null` thresholds and the stages stop with an explicit message until they are
-filled in.
+Status: **first-pass candidate, downstream stages complete, inputs pending.**
+Every stage has a real command and the Python stages are exercised end to end
+on synthetic inputs and the small fixture trees in `tests/`.  Models and
+working points for the nominal selection are not yet derived, and the
+producer in `TreeProduction/` will be refreshed from the frozen production
+source when the current Au+Au production completes.
 
 ## Physics definitions
 
 * **Signal photon (truth).**  A Geant photon with a valid generator
-  association, PPG12 photon class in {-1, 0, 1, 2}, truth isolation energy in
-  a cone of R = 0.3 below 4 GeV and |eta| < 0.7.  Missing associations are
-  never admitted as signal.  This one definition is the BDT training target and
-  the selected truth photon in simulation.
+  association, photon class in {-1, 0, 1, 2} (direct, fragmentation, and
+  unclassified; decay photons are class 3 and rejected), truth isolation
+  energy in a cone of R = 0.3 below 4 GeV and |eta| < 0.7.  Missing
+  associations are never admitted as signal.  This one definition is the BDT
+  training target and the selected truth photon in simulation.
 * **Reconstructed isolation.**  Cone R = 0.3 (`iso_r03` in the trees), with the
   established estimator and underlying-event subtraction from the producer.
   R = 0.4 values are kept in the trees as a control.
@@ -51,16 +54,16 @@ filled in.
 * **Recoil jets.**  Anti-kT R = 0.4, pT > 5 GeV, |eta| < 0.7, back to back
   (delta phi > 7pi/8).  xJgamma is histogrammed in three photon-pT bins
   (15-20, 20-25, 25-35 GeV).
-* **Weights.**  The stored `event_weight` is applied exactly once per event
-  (photon counts) or pair (recoil spectra); Sumw2 is carried everywhere.
+* **Weights.**  One complete weight per event, producer weight times source
+  factor times centrality factor, applied exactly once; Sumw2 is its square.
 
 ## Requirements
 
 * sPHENIX software environment with ROOT >= 6.26 and TMVA (PyROOT is used for
   scoring, working points and ROOT histogram output).
 * Python 3.10+ with the packages in `requirements.txt`
-  (`pip install -r requirements.txt`).  `xgboost` and `scikit-learn` are only
-  needed for training.
+  (`pip install -r requirements.txt`).  `xgboost`, `scikit-learn` and `scipy`
+  are only needed for training.
 * Building the producer needs the sPHENIX `coresoftware` install
   (`Fun4All`, `calobase`, `caloreco`, `jetbase`, `calotrigger`, `centrality`).
 
@@ -68,7 +71,8 @@ Every command below is run from the repository root.
 
 ## 1. TreeProduction: DST to collaborator trees
 
-Build the two analysis modules once in an sPHENIX shell:
+Build the two analysis modules once in an sPHENIX shell (see
+`TreeProduction/README.md` for the environment and the external inputs):
 
 ```bash
 cd TreeProduction/src && ./autogen.sh --prefix=$MYINSTALL && make -j4 install && cd ../..
@@ -93,24 +97,22 @@ python TreeProduction/validate_photonjet_collaboration_tree.py --system pp trees
 
 The output contains eight trees (`events`, `eventTree`, `photons`, `jets`,
 `photonJets`, `truthPhotons`, `truthJets`, `recoTruthLinks`); the branch
-contract is in `contracts/photonjet_trees_v1_branches.json`.  See
-`TreeProduction/README.md` for the producer options and the site paths that
-must be edited before building elsewhere.
+contract is in `contracts/photonjet_trees_v1_branches.json`.
 
 ## 2. PhotonID: train, score, derive working points
 
 ```bash
 # Train one model per system from photon+jet (signal) and inclusive-jet
-# (background) simulation trees.  Needs xgboost and scikit-learn.
+# (background) simulation trees with the established recipe.
 python PhotonID/train_photon_bdt.py --system pp --config config/nominal.yaml \
     --signal trees/pp_photonjet_sim.root --background trees/pp_inclusive_sim.root \
     --output-dir models/pp
 
-# Score data and simulation with the same per-system model; flags are
-# regenerated from config/nominal.yaml and every row is joined by candidate id.
+# Score data and simulation with the same per-system model; flags and leader
+# indices are regenerated from config/nominal.yaml, joined by candidate id.
 python PhotonID/score_trees.py --system pp --config config/nominal.yaml \
     --model models/pp/pp_photon_bdt.root --input trees/pp_data.root \
-    --input trees/pp_photonjet_sim.root --output-dir scored/
+    --input trees/pp_photonjet_sim.root --input trees/pp_inclusive_sim.root --output-dir scored/
 
 # Derive the tight threshold at the configured signal efficiency and paste the
 # printed fragment into config/nominal.yaml (systems.pp.working_points).
@@ -124,85 +126,88 @@ python PhotonID/score_trees.py --system pp --config config/nominal.yaml \
     --input trees/pp_data.root --output-dir scored/
 ```
 
-`train_photon_bdt.py` writes a manifest with the ordered features, the label
-mapping, the sample hashes and the held-out AUC; pin the model with
-`model_file` and `model_sha256` in the configuration.
-
-## 3. TreeToHists: nominal histograms
+## 3. TreeToHists: nominal histograms with the complete weights
 
 ```bash
 python TreeToHists/make_histograms.py --system pp --config config/nominal.yaml \
-    --input scored/pp_data.root --output-json hists/pp_data.json --output-root hists/pp_data.root
+    --sample pp_data --input scored/pp_data.root \
+    --output-json hists/pp_data.json --output-root hists/pp_data.root
 
-# Prompt-photon leakage from the photon+jet simulation (truth-signal only)
+# Prompt-photon leakage from the photon+jet simulation (nominal truth signal only)
 python TreeToHists/make_histograms.py --system pp --config config/nominal.yaml \
-    --input scored/pp_photonjet_sim.root --truth-signal-only \
+    --sample pp_photonjet --input scored/pp_photonjet_sim.root --truth-signal-only \
     --output-json hists/pp_leakage.json
 ```
 
-Output: ABCD event-leading photon counts per photon-pT bin and the xJgamma
-spectra in regions A and C, with Sumw2, as JSON and ROOT histograms.
+For Au+Au embedded inclusive-jet slices give one line per file in an input
+list, `path sample`, so each slice gets its ownership stitching and centrality
+factor (`--sample` names one sample for every input).
 
-## 4. FinalAnalysis: purity correction, unfolding, overlay
+## 4. FinalAnalysis: responses, corrections, unfolding, overlay
 
 ```bash
-# Response from the photon+jet simulation trees (2D: photon pT x xJgamma)
-python FinalAnalysis/photonjet/cli.py response build --system pp --dimension 2D \
-    --input scored/pp_photonjet_sim.root --output-stem response/pp
+# Pair response (photon pT x xJ) and per-event photon response from the
+# photon+jet simulation, with the nominal truth definition and sample weights
+python FinalAnalysis/photonjet/cli.py response build --config config/nominal.yaml --system pp \
+    --sample pp_photonjet --input scored/pp_photonjet_sim.root --output-stem response/pp_pairs
+python FinalAnalysis/photonjet/cli.py photon-response build --config config/nominal.yaml --system pp \
+    --sample pp_photonjet --input scored/pp_photonjet_sim.root --output-stem response/pp_photons
 
-# Leakage-aware ABCD purity, corrected spectrum, iterative-Bayes unfolding
-python FinalAnalysis/run_corrections.py --config config/nominal.yaml \
+# Purity correction, combinatoric subtraction (Au+Au), unfolding of pairs and
+# photons, toy uncertainties, iteration selection; final points as JSON + CSV
+python FinalAnalysis/run_corrections.py --config config/nominal.yaml --system pp \
     --data hists/pp_data.json --leakage hists/pp_leakage.json \
-    --response response/pp --iterations 4 --output results/pp.json
+    --pair-response response/pp_pairs --photon-response response/pp_photons \
+    --output results/pp.json
 
-# Final comparison (one photon-pT bin per figure)
+# Final comparison, optionally with published reference points
 python FinalAnalysis/plot_overlay.py --result "p+p=results/pp.json" \
-    --result "Au+Au 0-20%=results/auau.json" --pt-bin 0 --output results/xjgamma_pt15_20.png
+    --result "Au+Au 0-20%=results/auau.json" \
+    --reference "ATLAS p+p, 63-80 GeV=FinalAnalysis/reference/atlas_plb789_167_table1_xjgamma.csv:pp" \
+    --output results/xjgamma_overlay.png
 ```
 
-`run_corrections.py` reports, per photon-pT bin, the ABCD solution, the
-purity-corrected spectrum and, when a response is given, the unfolded spectrum
-with data-statistics uncertainties and the refolding chi2/ndf.  The iteration
-count is a configuration choice; set `unfolding.iterations` once the
-refold/toy scan (`photonjet.analysis.unfolding.scan_problem`) has been run on
-the nominal samples.
+`FinalAnalysis/README.md` describes the chain step by step.
 
 ## Tests
 
 ```bash
 python tests/run_tests.py                      # everything
-python tests/run_tests.py test_chain_on_fixtures.py
+python tests/run_tests.py test_chain.py        # one module
 ```
 
-The suite checks the selection boundaries, that TreeToHists reproduces the
-independent reference reducers bin by bin on the fixture trees, that scoring
-preserves the tree contract and joins by candidate identity, that the
-correction and unfolding driver runs on a real response bundle, and the reused
-kernel tests for the ABCD, response and unfolding arithmetic.
+The suite covers the selection boundaries and truth contract, the complete
+weight contract (source factors, ownership windows, centrality support), the
+per-event photon response, the correction and unfolding chain with its gate
+and iteration selection on synthetic self-consistent responses, the training
+recipe (weighting, flattening, split, label mapping), scoring against the tree
+contract, agreement of TreeToHists with the independent reference reducers on
+the fixture trees, the producer scrub rule, and the tree-builder interface.
 
 ## What is still needed before nominal results
 
 1. Collaborator trees produced with the current producer for data and
    simulation.  The fixture trees in `tests/` predate the R = 0.3 truth
-   isolation branches and cannot define the nominal training signal.
+   isolation branches; the nominal training signal needs the new trees.
 2. Trained models: run `train_photon_bdt.py` once those trees exist; the
    configuration ships without a model.
-3. Working points: derive the tight threshold with
-   `derive_working_points.py`; choose and record the non-tight band and the
-   R = 0.3 isolation thresholds in the configuration.
-4. Unfolding iteration count from the refold/toy scan.
-5. Optional combinatoric (unmatched recoil) subtraction and photon efficiency
-   correction, both supported by the kernels but not applied in this pass.
+3. Working points: derive the tight threshold with `derive_working_points.py`;
+   choose and record the non-tight band and the R = 0.3 isolation thresholds.
+4. `generated_events` for the p+p simulation samples in `config/samples.yaml`,
+   and re-derived Au+Au centrality maps for the new production.
+5. Systematic uncertainties, which this repository does not evaluate.
 
 ## Layout
 
 ```text
-config/nominal.yaml       one nominal configuration (pp and auau sections)
-contracts/                collaborator tree branch contract
-TreeProduction/           Fun4All producer (src, src_AuAu, macros) and tree builder
-PhotonID/                 photon_selection.py, train_photon_bdt.py, score_trees.py, derive_working_points.py
-TreeToHists/              make_histograms.py
-FinalAnalysis/            run_corrections.py, plot_overlay.py, photonjet/ (analysis kernels and cli)
-tests/                    unit and connected-chain tests, small fixture trees
-tools/                    fixture generator used by the tests
+config/nominal.yaml        one nominal configuration (pp and auau sections)
+config/samples.yaml        sample normalisation: cross sections, stitching, centrality maps
+contracts/                 collaborator tree branch contract
+docs/ANALYSIS.md           the physics of every choice; docs/STATUS.md what is validated
+TreeProduction/            Fun4All producer (src, src_AuAu, macros) and tree builder
+PhotonID/                  photon_selection.py, train_photon_bdt.py, score_trees.py, derive_working_points.py
+TreeToHists/               make_histograms.py, sample_weights.py
+FinalAnalysis/             run_corrections.py, plot_overlay.py, reference/, photonjet/ (kernels and cli)
+tests/                     unit and connected-chain tests, fixture trees, synthetic tree helper
+tools/                     producer scrub script, fixture generator
 ```

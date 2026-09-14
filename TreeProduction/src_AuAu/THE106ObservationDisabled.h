@@ -5,9 +5,9 @@
 #include <cstdint>
 #include <string>
 
-// Compile-time hard-disable adapter for the optional THE-106 observer API.
+// Compile-time hard-disable adapter for the optional observer API.
 // Every function is intentionally inline and inert.  It introduces no runtime
-// component and preserves the THE-117 direct-path independence certificate.
+// Component and preserves the direct-path independence certificate.
 namespace the106
 {
 namespace c0h2

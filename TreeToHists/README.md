@@ -11,6 +11,18 @@ as ROOT histograms.  All cuts come from `config/nominal.yaml`; the thresholds
 come from the configuration by default (`--thresholds-from config`) so that
 editing a threshold and rerunning this script is enough to regenerate the
 histograms.  `--thresholds-from tree` uses the per-candidate threshold
-branches instead and exists for mechanism checks.  `--truth-signal-only`
-restricts simulation to candidates linked to a nominal truth-signal photon,
-which gives the prompt-photon leakage inputs of the purity correction.
+branches instead and exists for mechanism checks.
+
+`sample_weights.py` is the one implementation of the complete per-event
+analysis weight, `event_weight x source factor x centrality factor`, from
+`config/samples.yaml`: the family cross-section scale for p+p simulation, the
+cross section over generated events for embedded photon+jet samples, the
+ownership stitching of embedded inclusive-jet slices by the leading R=0.4
+truth-jet pT, and the 5 percent centrality maps for Au+Au simulation.  Pass
+`--sample <name>` (or a second column in `--input-list`) to apply it; the
+response builds use the same module.
+
+`--truth-signal-only` restricts simulation to the best-matched candidate of
+each truth photon satisfying the nominal contract, one per truth photon.  The
+resulting ABCD counts are the prompt-photon leakage of the purity correction
+and their Region-A row normalises the combinatoric template.

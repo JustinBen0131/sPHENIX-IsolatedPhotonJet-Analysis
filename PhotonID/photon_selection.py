@@ -70,6 +70,8 @@ def system_config(config: Mapping[str, Any], system: str) -> dict[str, Any]:
 def truth_signal_mask(truth: Mapping[str, np.ndarray], contract: Mapping[str, Any]) -> np.ndarray:
     """Boolean mask over ``truthPhotons`` rows satisfying the nominal signal contract."""
 
+    if isinstance(truth, np.ndarray) and truth.dtype.names:
+        truth = {name: truth[name] for name in truth.dtype.names}
     missing = [name for name in TRUTH_SIGNAL_FIELDS if name not in truth]
     if missing:
         raise KeyError(

@@ -24,8 +24,8 @@
 #if __has_include(<phool/THE106Observation.h>)
 #include <phool/THE106Observation.h>
 #else
-// THE-117 certifies that the authoritative direct path builds and runs without
-// the optional THE-106 observer runtime.  Keep the instrumentation call sites
+// The authoritative direct path is certified to build and run without
+// The optional observer runtime. Keep the instrumentation call sites
 // source-compatible, but compile them to strict no-ops when the patched PHOOL
 // header is not part of the active release.
 #include "THE106ObservationDisabled.h"
@@ -3981,7 +3981,7 @@ void RecoilJets::fillAuAuBDTTrainingTree(const SSVars& v,
   m_bdtTrain_auau_tight_logreg_score = std::isfinite(v.auau_tight_logreg_score) ? static_cast<float>(v.auau_tight_logreg_score) : -2.0f;
 
   // Preserve the accepted Au+Au label calculations while avoiding redundant
-  // legacy-tree serialization in the explicitly gated THE-134 fast extractor.
+  // Legacy-tree serialization in the explicitly gated fast extractor.
   if(!m_the134FastExtraction)
   {
     m_auauBDTTrainingTree->Fill();
@@ -8431,7 +8431,7 @@ int RecoilJets::process_event(PHCompositeNode* topNode)
     }
     m_replayNodesReady = true;
 
-    // THE-106 C0-R diagnostic identity must not depend on the optional
+    // C0-R diagnostic identity must not depend on the optional
     // event-display payload.  Observe the authoritative EventHeader node only
     // when the neutral event observer is active; the disabled path retains the
     // original null-observer check and performs no additional node lookup.
@@ -8637,9 +8637,10 @@ int RecoilJets::process_event(PHCompositeNode* topNode)
                 {
                     scaledTrigRunListLoaded = true;
 
+                    // Optional scaled-trigger QA run list, shared with the steering macro.
+                    const char* scaledTrigRunListEnv = std::getenv("RJ_SCALED_TRIGGER_RUNLIST");
                     const std::string scaledTrigRunListPath =
-                    "/sphenix/u/patsfan753/scratch/thesisAnalysis/dst_lists_auau/"
-                    "scaledEffRuns_MBD_NS_geq_2_vtx_lt_150__Pho10_12.list";
+                    scaledTrigRunListEnv ? std::string(scaledTrigRunListEnv) : std::string();
 
                     std::ifstream runListIn(scaledTrigRunListPath);
                     if (!runListIn)
@@ -15254,7 +15255,7 @@ void RecoilJets::processCandidatesForCurrentIsoView(PHCompositeNode* topNode,
                                                     bdtTrainEContrib);
                 }
 
-                // THE-106 C0-RH: observe the authoritative data-only PPG12
+                // C0-RH: observe the authoritative data-only PPG12
                 // raw-QA candidate once, before its canonical pre/tight/
                 // nonTight fanout.  The callback is diagnostic-only and the
                 // entire enabled path is exception-contained.
@@ -23367,7 +23368,7 @@ TH3F* RecoilJets::getOrBookAuAuDualViewScoreIsoSurface(const std::string& trig,
   // V2 fixes the historical dual-view diagnostic, whose hard-coded _isoR30
   // name mixed the first R=0.3 and R=0.4 views into one object.  The active
   // cone is now part of the merge-stable object name.  A 0.01-wide score
-  // axis supports the finite THE-112 sideband grid without interpolation.
+  // Axis supports the finite sideband grid without interpolation.
   const std::string base = "h3_auauSidebandScanV2_scoreMinusT80_vs_Eiso_vs_pT_" + category;
   const std::string name = withIsoConeSuffix(base) + suffixForBins(-1, centIdx);
 

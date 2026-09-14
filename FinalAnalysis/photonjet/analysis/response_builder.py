@@ -74,8 +74,20 @@ class ResponseBuildConfig:
     truth_prompt_class: int = 1
     truth_source_role: int = 1
     truth_isolation_max: float = 4.0
+    # "nominal": truth photons pass ``truth_signal`` (the shared contract in
+    # PhotonID/photon_selection.py, needs the R=0.3 truth-isolation branches).
+    # "legacy_fixture": prompt_class / source_role / truth_isolation above,
+    # for trees that predate those branches (the engineering fixtures).
+    truth_definition: str = "nominal"
+    truth_signal: Any = field(default=None, compare=False, repr=False)
+    # Complete analysis weights by event key; events absent from it are dropped.
+    event_weights: Any = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.truth_definition not in {"nominal", "legacy_fixture"}:
+            raise ValueError("truth_definition must be nominal or legacy_fixture")
+        if self.truth_definition == "nominal" and self.truth_signal is None:
+            raise ValueError("the nominal truth definition needs a truth_signal callable")
         if self.system not in {"pp", "auau"}:
             raise ValueError("response system must be pp or auau")
         if self.dimension not in {"1D", "2D"}:
@@ -95,6 +107,8 @@ class ResponseBuildConfig:
             "system": self.system,
             "dimension": self.dimension,
             "selection": asdict(self.selection),
+            "truth_definition": self.truth_definition,
+            "event_weights": "stored event_weight" if self.event_weights is None else "complete analysis weights",
             "truth_selection": {
                 "prompt_class": self.truth_prompt_class,
                 "source_role": self.truth_source_role,
@@ -261,19 +275,28 @@ def _truth_photon(
     event: EventKey,
 ) -> dict[str, Any] | None:
     eligible = []
-    for row in rows:
+    if config.truth_definition == "nominal" and rows:
+        columns = {name: np.asarray([row[name] for row in rows]) for name in rows[0]}
+        nominal = np.asarray(config.truth_signal(columns), dtype=bool)
+    else:
+        nominal = np.zeros(len(rows), dtype=bool)
+    for index, row in enumerate(rows):
         pt = _finite(row["truth_photon_pt"], "truth photon pT")
         eta = _finite(row["truth_photon_eta"], "truth photon eta")
         phi = _finite(row["truth_photon_phi"], "truth photon phi")
         isolation = _finite(row["truth_isolation"], "truth photon isolation")
         if pt <= 0:
             raise ValueError(f"truth photon pT is not positive in event {event}")
-        if (
-            int(row["prompt_class"]) == config.truth_prompt_class
-            and int(row["source_role"]) == config.truth_source_role
-            and isolation < config.truth_isolation_max
-            and abs(eta) < config.selection.photon_abs_eta_max
-        ):
+        if config.truth_definition == "nominal":
+            selected_truth = bool(nominal[index]) and abs(eta) < config.selection.photon_abs_eta_max
+        else:
+            selected_truth = (
+                int(row["prompt_class"]) == config.truth_prompt_class
+                and int(row["source_role"]) == config.truth_source_role
+                and isolation < config.truth_isolation_max
+                and abs(eta) < config.selection.photon_abs_eta_max
+            )
+        if selected_truth:
             selected = dict(row)
             selected.update(
                 truth_photon_pt=pt,
@@ -339,6 +362,11 @@ def _candidate_record(row: Mapping[str, Any]) -> dict[str, float]:
         "photon_bdt_tight_threshold": float(row["bdt_tight_threshold"]),
         "photon_bdt_nontight_low_threshold": float(row["bdt_nontight_low_threshold"]),
         "photon_bdt_nontight_high_threshold": float(row["bdt_nontight_high_threshold"]),
+        "photon_iso_r03": float(row["iso_r03"]),
+        "photon_iso_r03_threshold": float(row["iso_r03_threshold"]),
+        "photon_iso_r03_nonisolated_threshold": float(
+            row["iso_r03_nonisolated_threshold"]
+        ),
         "photon_iso_r04": float(row["iso_r04"]),
         "photon_iso_r04_threshold": float(row["iso_r04_threshold"]),
         "photon_iso_r04_nonisolated_threshold": float(
@@ -683,6 +711,7 @@ _PHOTON_BRANCHES = (
     "candidate_id_hi", "candidate_id_lo", "photon_encounter_ordinal",
     "photon_et", "photon_eta", "photon_phi", "bdt_score", "bdt_tight_threshold",
     "bdt_nontight_low_threshold", "bdt_nontight_high_threshold",
+    "iso_r03", "iso_r03_threshold", "iso_r03_nonisolated_threshold",
     "iso_r04", "iso_r04_threshold", "iso_r04_nonisolated_threshold",
 )
 _JET_BRANCHES = (
@@ -814,9 +843,8 @@ def build_response(
             photon_groups = _group(_rows(root["photons"], _PHOTON_BRANCHES))
             jet_groups = _group(_rows(root["jets"], _JET_BRANCHES))
             pair_groups = _group(_rows(root["photonJets"], _PAIR_BRANCHES))
-            truth_photon_groups = _group(
-                _rows(root["truthPhotons"], _TRUTH_PHOTON_BRANCHES)
-            )
+            truth_branches = tuple(dict.fromkeys((*_TRUTH_PHOTON_BRANCHES, *root["truthPhotons"].keys())))
+            truth_photon_groups = _group(_rows(root["truthPhotons"], truth_branches))
             truth_jet_groups = _group(_rows(root["truthJets"], _TRUTH_JET_BRANCHES))
             link_groups = _group(_rows(root["recoTruthLinks"], _LINK_BRANCHES))
 
@@ -834,7 +862,12 @@ def build_response(
                 raise ValueError("p+p response input does not use centrality=-1")
             if config.system == "auau" and not 0.0 <= centrality < 100.0:
                 raise ValueError("Au+Au response input centrality is outside [0, 100)")
-            weight = _finite(event_row["event_weight"], "event weight")
+            if config.event_weights is not None:
+                if event not in config.event_weights:
+                    continue            # dropped by the sample weight contract
+                weight = _finite(config.event_weights[event], "event weight")
+            else:
+                weight = _finite(event_row["event_weight"], "event weight")
             if weight < 0:
                 raise ValueError("negative response weights are not supported by ResponseBundleV1")
             truth_photon = _truth_photon(

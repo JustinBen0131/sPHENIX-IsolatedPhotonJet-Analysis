@@ -1,0 +1,158 @@
+# Sample normalisation for the histogram and response stages.
+#
+# The complete per-event analysis weight is the ordered product
+#
+#     w = event_weight (stored by the producer)
+#         x source factor            (this file, per sample)
+#         x centrality factor        (this file, Au+Au simulation only)
+#
+# applied exactly once, with Sumw2 accumulated from w squared.  The producer's
+# stored event_weight already contains, for p+p simulation, the generator-slice
+# cross section relative to the family reference below, the truth-vertex
+# weight, the signal/background interaction-mix weight and the period-luminosity
+# weight.  For Au+Au simulation and for all data it is 1 unless a vertex
+# reweighting was switched on at production.
+#
+# Source factors
+#   family_reference           p+p simulation: reference_cross_section_pb / generated_events
+#                              (the slice-to-reference ratio is already in event_weight)
+#   cross_section_over_generated
+#                              Au+Au embedded photon+jet: cross_section_pb / generated_events
+#   ownership_stitch           Au+Au embedded inclusive-jet slices: each event is owned by
+#                              the slice whose half-open window [low, high) contains the
+#                              event's leading anti-kT R=0.4 truth-jet pT; the factor is
+#                              ownership_effective_cross_section_pb / owned_events, and
+#                              events outside their own slice's window are dropped.
+#
+# The centrality factor w(c) = p_data(c) / p_simulation(c) is a lookup in 5 percent
+# bins over 0 <= c < 80 percent, one map per simulation family.  Events outside
+# that support have no weight and are not histogrammed.
+#
+# `generated_events: null` means the value has not been recorded here; the
+# stage then applies event_weight only (correct relative normalisation inside
+# one family, no absolute cross-section scale) and says so in its receipt.
+#
+# Numbers below are the values accepted for the 2026 schema-10 production.  A
+# new production needs new owned_events / generated_events and re-derived
+# centrality maps; keep `campaign` in step so mismatches are caught.
+
+campaign: schema10_production_2026-08
+
+reference_cross_section_pb:
+  pp_photon_signal: 130.4461         # PYTHIA photon+jet, 20 GeV slice, used as the p+p family reference
+  pp_inclusive_background: 7.3113    # PYTHIA inclusive jet, 50 GeV slice, used as the p+p family reference
+
+samples:
+  pp_data:
+    system: pp
+    kind: data
+    family: data
+  auau_data:
+    system: auau
+    kind: data
+    family: data
+
+  pp_photonjet:
+    system: pp
+    kind: simulation
+    family: photonjet
+    source_factor: family_reference
+    reference: pp_photon_signal
+    generated_events: null           # fill from the production receipt of the slice being used
+  pp_inclusive:
+    system: pp
+    kind: simulation
+    family: inclusivejet
+    source_factor: family_reference
+    reference: pp_inclusive_background
+    generated_events: null
+
+  auau_photon12:
+    system: auau
+    kind: simulation
+    family: photonjet
+    source_factor: cross_section_over_generated
+    cross_section_pb: 2598.12425
+    generated_events: 9991946
+  auau_photon20:
+    system: auau
+    kind: simulation
+    family: photonjet
+    source_factor: cross_section_over_generated
+    cross_section_pb: 133.317866
+    generated_events: 9991946
+
+  auau_jet12:
+    system: auau
+    kind: simulation
+    family: inclusivejet
+    source_factor: ownership_stitch
+    ownership_window_gev: [12.0, 21.0]
+    ownership_effective_cross_section_pb: 1227724.77
+    owned_events: 8940823
+  auau_jet20:
+    system: auau
+    kind: simulation
+    family: inclusivejet
+    source_factor: ownership_stitch
+    ownership_window_gev: [21.0, 31.0]
+    ownership_effective_cross_section_pb: 38811.785
+    owned_events: 6564888
+  auau_jet30:
+    system: auau
+    kind: simulation
+    family: inclusivejet
+    source_factor: ownership_stitch
+    ownership_window_gev: [31.0, 41.0]
+    ownership_effective_cross_section_pb: 1736.65908
+    owned_events: 6783062
+  auau_jet40:
+    system: auau
+    kind: simulation
+    family: inclusivejet
+    source_factor: ownership_stitch
+    ownership_window_gev: [41.0, null]   # last window is unbounded above
+    ownership_effective_cross_section_pb: 100.642312
+    owned_events: 7242896
+
+# Au+Au centrality reweighting maps, derived 2026-09-04 from the stitched
+# schema-10 embedded simulation and the accepted Au+Au data event gate
+# (scaled photon-10 GeV trigger plus minimum-bias selection, |z| < 10 cm).
+# One value per 5 percent bin from 0 to 80 percent.
+centrality_weights:
+  campaign: schema10_production_2026-08
+  bin_edges_percent: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
+  photonjet:
+    - 1.7298245188856358
+    - 3.1179056202039237
+    - 2.484435262361177
+    - 1.8278059539251312
+    - 1.4474568520499578
+    - 1.1621608347451253
+    - 1.1041863898949482
+    - 0.5748410165639247
+    - 0.7008436811003427
+    - 0.38211664089707437
+    - 0.37702578768839046
+    - 0.29319364721330404
+    - 0.26075178208405664
+    - 0.15810793644396332
+    - 0.09945225641103553
+    - 0.10579481472225913
+  inclusivejet:
+    - 1.738484060219151
+    - 3.118933143545803
+    - 2.485240635027375
+    - 1.8232505712918143
+    - 1.4490425395444848
+    - 1.163147614646236
+    - 1.1029252026572416
+    - 0.5748584075637845
+    - 0.7009559507547624
+    - 0.38143756058078826
+    - 0.37634141942045823
+    - 0.29259574658103166
+    - 0.2608663919186352
+    - 0.15866776543037484
+    - 0.09945727860223073
+    - 0.10562581833137007
