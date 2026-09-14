@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sphenix.bnl.gov/photonjet/contracts/run_manifest_v1.json",
+  "title": "PhotonJetRunManifestV1",
+  "type": "object",
+  "required": ["schema", "stage", "parameters", "inputs", "outputs", "validators"],
+  "properties": {
+    "schema": {"const": "PhotonJetRunManifestV1"},
+    "stage": {"type": "string", "minLength": 1},
+    "software_commit": {"type": ["string", "null"]},
+    "parameters": {"type": "object"},
+    "inputs": {"type": "array"},
+    "outputs": {"type": "array"},
+    "validators": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

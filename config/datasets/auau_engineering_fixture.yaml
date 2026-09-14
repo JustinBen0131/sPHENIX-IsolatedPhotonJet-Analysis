@@ -1,0 +1,6 @@
+schema: PhotonJetDatasetManifestV1
+collision_system: auau
+sample_kind: engineering_fixture
+experiment_status: Internal
+sqrt_s_nn_gev: 200
+event_count: 2

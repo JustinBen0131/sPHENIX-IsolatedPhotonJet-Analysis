@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pcm
+*.d
+*.so
+*.o
+*.log
+build/
+out/
+outputs/
+*.root
+!tests/fixtures/*.root

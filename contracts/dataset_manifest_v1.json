@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sphenix.bnl.gov/photonjet/contracts/dataset_manifest_v1.json",
+  "title": "PhotonJetDatasetManifestV1",
+  "type": "object",
+  "required": ["schema", "collision_system", "sample_kind", "experiment_status"],
+  "properties": {
+    "schema": {"const": "PhotonJetDatasetManifestV1"},
+    "collision_system": {"enum": ["pp", "auau"]},
+    "sample_kind": {"enum": ["data", "simulation", "embedding", "engineering_fixture"]},
+    "experiment_status": {"const": "Internal"},
+    "sqrt_s_gev": {"type": "number", "exclusiveMinimum": 0},
+    "sqrt_s_nn_gev": {"type": "number", "exclusiveMinimum": 0},
+    "centrality_percent": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "number", "minimum": 0, "maximum": 100},
+        {"type": "number", "minimum": 0, "maximum": 100}
+      ],
+      "items": false
+    },
+    "event_count": {"type": "integer", "minimum": 1}
+  },
+  "additionalProperties": false
+}

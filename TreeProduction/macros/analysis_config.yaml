@@ -1,0 +1,604 @@
+# =============================================================================
+# analysis_config.yaml
+# =============================================================================
+#
+# Master configuration for the sPHENIX recoil-jet (γ+jet) analysis pipeline.
+#
+# DATA FLOW
+#   1. RecoilJets_Condor_submit.sh reads this file to build the matrix of
+#      job configurations. For each matrix cell it produces a per-job YAML
+#      override with public cfg axes replaced by scalar values. Some
+#      recoil-only scan axes are intentionally kept internal to the RecoilJets
+#      histogram loop to avoid repeated DST passes.
+#   2. Fun4All_recoilJets_unified_impl.C parses the (scalar) per-job YAML,
+#      validates it, prints a summary, and passes values to RecoilJets via
+#      setter calls. No YAML parsing happens inside RecoilJets itself.
+#   3. The full per-job YAML text is stamped into each output ROOT file as
+#      a TObjString ("analysis_config_yaml") for provenance.
+#   4. mergeRecoilJets.sh extracts that stamped YAML from ROOT files to
+#      derive the cfg tag for naming merged outputs — no re-read of this
+#      master file is needed at merge time.
+#
+# PRODUCTION COMMAND GUIDE
+#   DATA:
+#     ./scripts/RecoilJets_Condor_submit.sh isPP   condor all
+#     ./scripts/RecoilJets_Condor_submit.sh isAuAu condor all
+#
+#   SIM:
+#     ./scripts/RecoilJets_Condor_submit.sh isSim                  condorDoAll
+#     ./scripts/RecoilJets_Condor_submit.sh isSimEmbedded          condorDoAll
+#     ./scripts/RecoilJets_Condor_submit.sh isSimEmbeddedInclusive condorDoAll
+#
+#   Smoke checks:
+#     ./scripts/RecoilJets_Condor_submit.sh isPP   condor smokeTest
+#     ./scripts/RecoilJets_Condor_submit.sh isAuAu condor smokeTest
+#     ./scripts/RecoilJets_Condor_submit.sh isSim  condorDoAllSmoke
+#
+# Production uses the legacy RecoilJets/RecoilJets_AuAu histogram machinery.
+# The submitter may fan out compatible photon-ID rows inside one Fun4All DST
+# pass, but every final product remains an ordinary cfg-tagged ROOT file with
+# the same histogram names, classes, directories, and merge/read behavior as
+# the original one-cfg-at-a-time pipeline.
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Photon + jet kinematic selection
+# -----------------------------------------------------------------------------
+photon_eta_abs_max: 0.7
+
+# Production submits one cfg tag for this list and RecoilJets writes the
+# jet-pT-specific recoil/unfolding/JES histograms under jetPt-suffixed rKey
+# names such as r04_jetPt10. The first value keeps the legacy base rKey name
+# (for example r04) inside the jetMinPtScan cfg tag. Direct validation modes
+# can still disable this internal scan and submit one legacy scalar jet-pT cfg
+# at a time.
+jet_pt_min: [5.0, 7.0, 10.0, 12.0]
+
+# Jet radii to reconstruct (R values).
+# The steering macro builds reco jets (and SIM truth jets) for each radius.
+# RecoilJets processes only the radii listed here.
+# Baseline: r02 + r04 + r06
+jet_radii: [0.2, 0.3, 0.4]
+
+# Back-to-back azimuthal cut as a fraction of π.
+#   0.5   → Δφ > π/2
+#   0.875 → Δφ > 7π/8  (ATLAS-like)
+# Production submits one cfg tag for this list and RecoilJets writes the
+# dphi-specific recoil/unfolding/JES histograms under dphi-suffixed rKey names
+# such as r04_dphiPi2. The nominal 7π/8 cut keeps the legacy base rKey name
+# (for example r04) for compatibility with existing default plotting code.
+# Direct validation modes can still disable that internal scan and submit one
+# legacy scalar dphi cfg at a time.
+back_to_back_dphi_min_pi_fraction: [0.5, 0.875]
+
+# -----------------------------------------------------------------------------
+# Vertex selection
+# -----------------------------------------------------------------------------
+use_vz_cut: true
+
+# Available vertex-cut values. Production collapses this list to one
+# dataset-default cfg axis unless explicitly told to scan:
+#   AuAu-like datasets (isAuAu, isSimEmbedded, isSimEmbeddedInclusive): 10 cm
+#   pp-like datasets (isPP, isPPrun25, isSim, isSimJet5/isSimMB):       60 cm
+# Use RJ_VZ_SCAN_ALL=1 to submit the full list, or
+# RJ_VZ_CUT_OVERRIDE=<value> to pick one listed value.
+vz_cut_cm: [10, 30, 60]
+
+# AuAu only: when true, RecoilJets also requires
+# MinimumBiasInfo::isAuAuMinimumBias() after the configured GL1 trigger fires.
+# This is an offline MB-quality gate, not a replacement for the trigger gate.
+setMinBiasClassifer: true
+
+# -----------------------------------------------------------------------------
+# Centrality binning (AuAu only; ignored for pp/SIM)
+# -----------------------------------------------------------------------------
+centrality_edges: [0, 10, 20, 30, 40, 50, 60, 80]
+#for sliding isolation centraltiy centrality_edges: [0, 10, 20, 30, 40, 50, 60, 80]
+#[0, 20, 50, 80]
+
+# -----------------------------------------------------------------------------
+# Cluster UE pipeline (AuAu/OO DATA only)
+#
+# MATRIX AXIS: one independent job per entry. Keep this intentionally narrow
+# for production unless doing a dedicated UE-systematics scan.
+# For pp and SIM jobs the submit script forces "noSub" and excludes
+# this axis from the naming tag.
+#
+# Available variants:
+#
+#   noSub
+#     No photon-side UE subtraction. Clusters, shower shapes, and isolation
+#     all use the original unsubtracted TOWERINFO_CALIB_CEMC towers.
+#     This is the pp-equivalent baseline for AuAu comparisons.
+#
+#   baseVariant
+#     PhotonClusterBuilder runs with m_is_auau=true, which routes the
+#     isolation calculation to the coresoftware retowered SUB1 nodes
+#     (CEMC_RETOWER_SUB1, HCALIN_SUB1, HCALOUT_SUB1) via PCB's internal
+#     AuAu isolation path. Clusters and shower shapes still use the
+#     original unsubtracted CEMC towers.
+#
+#   variantA
+#     Native-grid EMCal UE subtraction for photons. A simple η-strip mean
+#     (averaged over all 256 φ towers per η index) is subtracted tower-by-
+#     tower from TOWERINFO_CALIB_CEMC at the full 96×256 granularity,
+#     producing a new node (CEMC_PHOSUB). Clusters are then rebuilt from
+#     PHOSUB towers via RawClusterBuilderTemplate, so cluster energies,
+#     positions, shower shapes, and isolation all use the same subtracted
+#     basis. No hard-object exclusion is applied to the strip mean.
+#     Jet reconstruction is unchanged (standard coresoftware SUB1 chain).
+#
+#   variantB
+#     Same as variantA, but with iterative hard-object masking. Before
+#     computing the η-strip mean, towers within ΔR < 0.4 of any refined
+#     coresoftware seed jet (AntiKt_TowerInfo_HIRecoSeedsSub_r02, pT > 5
+#     GeV) are excluded from the average. This follows the ATLAS approach
+#     (Phys. Lett. B 789, 167 (2019), arXiv:1809.07280, Sec. 4.1–4.2)
+#     where hard objects are masked so the UE estimate reflects only the
+#     soft underlying event. Everything downstream (reclustering, shower
+#     shapes, isolation) is identical to variantA.
+#
+# -----------------------------------------------------------------------------
+clusterUEpipeline: [baseVariant]
+
+# -----------------------------------------------------------------------------
+# Photon-ID logic matrix axes
+#
+# Preselection axis:
+#   preselection = reference
+#     Use the baseline PPG12-style hard-cut shower-shape preselection:
+#       e11/e33, et1, e32/e35, and weta_cogx.
+#
+#   preselection = newPPG12
+#     PPG12 common photon preselection plus the NPB-score gate, without the
+#     reference weta cut:
+#       0.6 < cluster_et1 < 1.0
+#       e11_over_e33 < 0.98
+#       0.8 < e32_over_e35 < 1.0
+#       npb_score > npb_cut
+#
+#     No cluster_prob cut is applied.
+#
+#   preselection = noPreCriteria
+#     Disable preselection completely:
+#       every candidate skips the preselection gate and goes directly to
+#       tight/non-tight ID.
+#
+#     This is NOT "reference with looser cuts"; it means no preselection
+#     shower-shape cuts and no NPB preselection cut are applied.
+#
+#   preselection = onlyNPB
+#     NPB-score-only preselection:
+#       npb_score > npb_cut
+#
+#     No shower-shape preselection cuts are applied.
+#
+#   preselection = refPlusNPB
+#     Baseline reference hard-cut shower-shape preselection plus the NPB-score
+#     gate:
+#       reference preselection cuts
+#       npb_score > npb_cut
+#
+#   preselection = auauOnlyNPB
+#     AuAu-trained NPB-score-only preselection:
+#       auau_npb_score > auau_npb_cut
+#
+#     No shower-shape preselection cuts are applied. This is intended for
+#     data-assisted AuAu NPB models; simulation-only NPB training is not
+#     PPG12-faithful because the NPB class is data-timing/streak tagged.
+#
+# Tight-ID axis:
+#   tight = reference
+#     Use the baseline PPG12-style hard-cut tight-ID definition.
+#
+#   tight = newPPG12
+#     Use the tight-ID BDT node:
+#       PHOTONCLUSTER_CEMC_TIGHTBDT
+#     with tight_bdt_score above the configured pT-dependent threshold and no
+#     upper score cap.
+#
+#   tight = auauEmbeddedBDT
+#     Legacy AuAu embedded-trained tight-ID BDT hook. Kept for compatibility.
+#
+#   tight = centINDcontrol
+#     AuAu-trained control model that mirrors the PPG12 pp base_v3E/split
+#     tight-BDT feature order and does not include centrality as a feature.
+#
+#   tight = centAsFeat
+#     Same all-centrality AuAu tight-BDT structure, but centrality is appended
+#     to the PPG12 feature vector.
+#
+#   tight = centDepBDTs
+#     One AuAu tight-BDT per interval in centrality_edges. The runtime selects
+#     the model from auau_tight_bdt_centDep_model_files according to the event
+#     centrality.
+#
+# Non-tight axis:
+#   nonTight = reference
+#     For tight=reference, non-tight follows the baseline hard-cut sideband logic.
+#
+#   nonTight = newPPG12
+#     Use the PPG12 BDT sideband, not the tight complement:
+#       0.7333333333 - 0.0133333333 * E_T^gamma < tight_bdt_score
+#       tight_bdt_score < 0.684375 + 0.0015625 * E_T^gamma
+#
+#     BDT scores outside the tight and non-tight windows are treated as neither.
+#
+#   nonTight = auauBDTSideband
+#     For tight=auauEmbeddedBDT, centINDcontrol, centAsFeat, or centDepBDTs, use
+#     the AuAu-trained BDT sideband window. The default mode is the historical
+#     ET-linear window configured by auau_nontight_bdt_* parameters. A diagnostic
+#     campaign can instead set auau_nontight_bdt_sideband_mode: relativeToTight
+#     to use tight_threshold + [relative_min_offset, relative_max_offset].
+#     This is the ABCD-style nominal option.
+#
+#   nonTight = auauBDTComplement
+#     For tight=auauEmbeddedBDT, centINDcontrol, centAsFeat, or centDepBDTs, use
+#     the complement of the AuAu tight BDT after preselection. This is a broad
+#     diagnostic/systematic option, not the PPG12-style nominal sideband.
+#
+# Photon-ID triplet axis:
+#   photon_id_sets is mandatory in the master YAML. Each row is
+#   [preselection, tight, nonTight] and becomes one ID matrix entry.
+#   The submit script writes scalar preselection/tight/nonTight keys into
+#   generated per-job YAML snapshots so final cfg tags and ROOT filenames keep
+#   the existing preselectionX_tightY_nonTightZ naming scheme.
+# -----------------------------------------------------------------------------
+photon_id_sets:
+  # Reference tight/non-tight ID with each pp-compatible preselection.
+  - [reference, reference, reference]
+  - [refPlusNPB, reference, reference]
+  - [newPPG12, reference, reference]
+  - [onlyNPB, reference, reference]
+  - [noPreCriteria, reference, reference]
+
+  # PPG12 tight BDT with broad complement non-tight.
+  - [reference, newPPG12, reference]
+  - [refPlusNPB, newPPG12, reference]
+  - [newPPG12, newPPG12, reference]
+  - [onlyNPB, newPPG12, reference]
+  - [noPreCriteria, newPPG12, reference]
+
+  # PPG12 tight BDT with the PPG12 BDT sideband non-tight window.
+  - [reference, newPPG12, newPPG12]
+  - [refPlusNPB, newPPG12, newPPG12]
+  - [newPPG12, newPPG12, newPPG12]
+  - [onlyNPB, newPPG12, newPPG12]
+  - [noPreCriteria, newPPG12, newPPG12]
+
+  # AuAu-specific model hooks. Uncomment only for AuAu/embedded runs with the
+  # corresponding model files/features configured.
+  # - [reference, auauEmbeddedBDT, auauBDTSideband]
+  # - [reference, auauEmbeddedBDT, auauBDTComplement]
+  # - [reference, centINDcontrol, centINDcontrol]
+  # - [reference, centAsFeat, centAsFeat]
+  # - [reference, centDepBDTs, centDepBDTs]
+  # - [auauOnlyNPB, auauEmbeddedBDT, auauBDTSideband]
+  # - [auauOnlyNPB, auauEmbeddedBDT, auauBDTComplement]
+  # - [auauOnlyNPB, centINDcontrol, centINDcontrol]
+  # - [auauOnlyNPB, centAsFeat, centAsFeat]
+  # - [auauOnlyNPB, centDepBDTs, centDepBDTs]
+
+# Workflow notification.
+# These addresses receive compact stage-boundary emails only. Worker jobs use
+# notification=Never; smoke/final/merge-stage DAGs send parseable
+# subjects like [RecoilJets][isAuAu][data_perRun_auau_wp_reference][READY].
+# Codex/Gmail automation can use those emails as the secure progress interface.
+# The submit/merge scripts also accept RJ_NOTIFY_EMAILS as an override.
+notify_emails: [just0131@gmail.com]
+
+# -----------------------------------------------------------------------------
+# NPB preselection controls
+#
+# CLUSTERINFO_CEMC corresponds to Shuhang's "split" cluster variant, so use:
+#   npb_score_split_tmva.root
+#
+# Used only when preselection = newPPG12, onlyNPB, or refPlusNPB:
+#   keep cluster if npb_score > 0.5
+#   reject cluster if npb_score <= 0.5 or the score is unavailable/non-finite
+# -----------------------------------------------------------------------------
+npb_model_file: /sphenix/user/shuhangli/ppg12/FunWithxgboost/npb_models/npb_score_split_tmva.root
+npb_cut: 0.5
+npb_features: [cluster_Et, cluster_Eta, vertexz, e11_over_e33, e32_over_e35, e11_over_e22, e11_over_e13, e11_over_e15, e11_over_e17, e11_over_e31, e11_over_e51, e11_over_e71, e22_over_e33, e22_over_e35, e22_over_e37, e22_over_e53, cluster_weta_cogx, cluster_wphi_cogx, cluster_et1, cluster_et2, cluster_et3, cluster_et4, cluster_w32, cluster_w52, cluster_w72]
+
+# -----------------------------------------------------------------------------
+# Tight-ID BDT controls (used when tight: newPPG12)
+#
+# PPG12 nominal split model:
+#   model_base_v3E_split_single_tmva.root
+#
+# Feature order:
+#   cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta,
+#   e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35
+#
+# Tight decision:
+#   tight_bdt_score > 0.815625 - 0.0015625 * E_T^gamma
+#   no upper tight_bdt_score cap is applied for tight: newPPG12
+#
+# PPG12 BDT non-tight sideband, used when nonTight: newPPG12:
+#   0.7333333333 - 0.0133333333 * E_T^gamma < tight_bdt_score
+#   tight_bdt_score < 0.684375 + 0.0015625 * E_T^gamma
+# -----------------------------------------------------------------------------
+tight_bdt_model_file: /sphenix/user/shuhangli/ppg12/FunWithxgboost/binned_models/model_base_v3E_split_single_tmva.root
+tight_bdt_min_intercept: 0.815625
+tight_bdt_min_slope: -0.0015625
+# Kept for backward-compatible parsing; tight: newPPG12 no longer applies this upper cap.
+tight_bdt_max: 1.0
+nontight_bdt_min_intercept: 0.7333333333333333
+nontight_bdt_min_slope: -0.01333333333333333
+nontight_bdt_max_intercept: 0.684375
+nontight_bdt_max_slope: 0.0015625
+tight_bdt_features: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35]
+
+# -----------------------------------------------------------------------------
+# AuAu-trained BDT controls
+#
+# The preferred AuAu tight-BDT modes are now explicit:
+#   centINDcontrol: PPG12 base_v3E/split feature order, no centrality feature.
+#   centAsFeat:     PPG12 base_v3E/split feature order plus centrality.
+#   centDepBDTs:    one PPG12-like model per centrality_edges interval.
+#
+# preselection = auauOnlyNPB uses auau_npb_*:
+#   auau_npb_score > auau_npb_cut
+#
+# tight = auauEmbeddedBDT/centINDcontrol/centAsFeat/centDepBDTs use:
+#   auau_tight_bdt_score > auau_tight_bdt_min_intercept
+#                          + auau_tight_bdt_min_slope * E_T^gamma
+#   auau_tight_bdt_score < auau_tight_bdt_max
+#
+# nonTight = auauBDTSideband:
+#   auau_nontight_bdt_sideband_mode: etLinear
+#     auau_nontight_bdt_min_intercept
+#       + auau_nontight_bdt_min_slope * E_T^gamma < score
+#     score < auau_nontight_bdt_max_intercept
+#       + auau_nontight_bdt_max_slope * E_T^gamma
+#
+#   auau_nontight_bdt_sideband_mode: relativeToTight
+#     tight_threshold(E_T, centrality) + relative_min_offset < score
+#     score < tight_threshold(E_T, centrality) + relative_max_offset
+#
+# nonTight = auauBDTComplement:
+#   complement of the AuAu tight BDT after preselection.
+# -----------------------------------------------------------------------------
+auau_npb_model_file:
+auau_npb_cut: 0.5
+auau_npb_features: [cluster_Et, cluster_Eta, vertexz, e11_over_e33, e32_over_e35, e11_over_e22, e11_over_e13, e11_over_e15, e11_over_e17, e11_over_e31, e11_over_e51, e11_over_e71, e22_over_e33, e22_over_e35, e22_over_e37, e22_over_e53, cluster_weta_cogx, cluster_wphi_cogx, cluster_et1, cluster_et2, cluster_et3, cluster_et4, cluster_w32, cluster_w52, cluster_w72]
+
+auau_tight_bdt_model_file:
+auau_tight_bdt_centINDcontrol_model_file:
+auau_tight_bdt_centAsFeat_model_file:
+auau_tight_bdt_centDep_model_files: []
+auau_tight_bdt_min_intercept: 0.8333333333333334
+auau_tight_bdt_min_slope: -0.003333333333333336
+auau_tight_bdt_max: 1.0
+auau_nontight_bdt_min_intercept: 0.7333333333333334
+auau_nontight_bdt_min_slope: -0.013333333333333334
+auau_nontight_bdt_max_intercept: 0.6666666666666666
+auau_nontight_bdt_max_slope: 0.003333333333333333
+auau_nontight_bdt_sideband_mode: etLinear
+auau_nontight_bdt_relative_min_offset: -0.20
+auau_nontight_bdt_relative_max_offset: -0.03
+auau_tight_bdt_features: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35]
+auau_tight_bdt_centINDcontrol_features: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35]
+auau_tight_bdt_centAsFeat_features: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35, centrality]
+auau_tight_bdt_centDep_features: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35]
+
+# Optional embedded-sim training row extraction from RecoilJets_AuAu outputs.
+# This is off for normal physics outputs.
+#
+# The submit-script training entry point is intentionally explicit:
+#   ./RecoilJets_Condor_submit.sh isSimEmbeddedAndInclusive trainTightBDT localTest
+#   ./RecoilJets_Condor_submit.sh isSimEmbeddedAndInclusive trainTightBDT smokeTestFirstPass
+#   ./RecoilJets_Condor_submit.sh isSimEmbeddedAndInclusive trainTightBDT smokeTestSecondPass SOURCE=/path/to/extraction
+#
+# By default it uses embedded photon 12/20 as the tight-BDT signal side and
+# embedded inclusive jet 12/20 as the background side. Override samples with
+# RJ_AUAU_BDT_SIGNAL_SAMPLES and RJ_AUAU_BDT_BACKGROUND_SAMPLES.
+#
+# PPG12-style NPB training uses label=1 for physics-like embedded clusters and
+# label=0 for real-data timing-tagged NPB clusters. The timing / away-side jet
+# criteria below are used only to create the data-side label, not as BDT inputs.
+auau_bdt_training_tree: false
+auau_bdt_training_tree_max_entries: 0
+auau_bdt_npb_data_tagging: false
+auau_npb_tag_delta_t_cut: -7.0
+auau_npb_tag_weta_min: 0.0
+auau_npb_tag_away_jet_pt_min: 5.0
+auau_npb_tag_away_jet_dphi_min: 1.5707963267948966
+auau_npb_tag_time_sample_ns: 17.6
+auau_npb_mbd_t0_offset: 0.0
+
+# Optional JetML residual-pT correction branch for the ATLAS-like inclusive
+# gamma-jet unfolding inputs.
+#
+# This is additive and off by default. When enabled, nominal jet selection still
+# uses the standard area/subtracted reco pT. JetML only changes the reco xJ
+# coordinate used to fill a parallel histogram family:
+#   h2_unfoldRecoJetML_pTgamma_xJ_incl_<rKey>
+#   h2_unfoldResponseJetML_pTgamma_xJ_incl_<rKey>
+#   h2_unfoldRecoCombinatoricJetML_pTgamma_xJ_incl_<rKey>
+#   h2_unfoldRecoFakesJetML_pTgamma_xJ_incl_<rKey>
+#   h2_unfoldTruthMissesJetML_pTgamma_xJ_incl_<rKey>
+jet_ml_training_tree: false
+jet_ml_training_tree_max_entries: 0
+jet_ml_correction_enabled: false
+jet_ml_use_as_nominal: false
+jet_ml_model_file:
+jet_ml_features: [reco_areaSub_pt, raw_pt, jet_area, jet_eta, centrality, R]
+
+# -----------------------------------------------------------------------------
+# SIM-only event reweighting
+#
+# pp photon+jet SIM:
+#   - applied online in RecoilJets when vertex_reweight_on_pp is true
+#   - uses PPG12 truth-vz iterative weights
+#   - photon5/10/20 cross-section factors are applied offline when merging
+#
+# AuAu embedded SIM:
+#   - applied online in RecoilJets_AuAu when vertex_reweight_on_auau is true
+#   - centrality weights remain AuAu-only
+# -----------------------------------------------------------------------------
+vertex_reweight_on_pp: true
+vertex_reweight_file_pp: /sphenix/user/shuhangli/ppg12/efficiencytool/truth_vertex_reweight/output/0mrad/reweight.root
+vertex_reweight_hist_pp: h_w_iterative
+
+vertex_reweight_on_auau: false
+vertex_reweight_file_auau: /sphenix/u/bseidlitz/work/pj_auau/reweightingDer/output/vtxz_reweighting.root
+vertex_reweight_hist_auau: data_over_MC_ratios/h_zvtx_ratio_data_over_photonJet
+
+centrality_reweight_on: false
+centrality_reweight_file: /sphenix/u/bseidlitz/work/pj_auau/reweightingDer/output/centrality_reweighting.root
+centrality_reweight_hist: nom_cent_rw_hist
+
+# -----------------------------------------------------------------------------
+# Pi0 analysis (parallel no-correction cluster branch)
+# -----------------------------------------------------------------------------
+doPi0Analysis: false
+
+# -----------------------------------------------------------------------------
+# Isolation working point
+#
+# The isolation threshold for each photon candidate is determined by the
+# combination of isSlidingIso, isSlidingAndFixed, fixedGeV, and (for AuAu-like
+# running) auau_cent_iso_wp:
+#
+#   isSlidingAndFixed  isSlidingIso   Matrix behavior
+#   ─────────────────  ────────────   ─────────────────────────────────────────────
+#   false              false          Fixed only: one job per fixedGeV value.
+#                                     Each job uses thrReco = fixedGeV.
+#   false              true           Sliding-enabled: one job total.
+#                                     pp / non-AuAu SIM:
+#                                       thrReco = aGeV + bPerGeV × pT(γ)
+#                                     AuAu / embedded SIM with exactly ONE
+#                                     auau_cent_iso_wp entry:
+#                                       thrReco(cent) = aGeV + bPerGeV × centrality
+#                                     AuAu / embedded SIM with one entry per
+#                                     centrality bin:
+#                                       use the entry for that bin.
+#   true               (ignored)      Both: sliding-enabled job + one fixed job
+#                                     per fixedGeV value. Allows direct
+#                                     comparison of sliding-enabled vs fixed.
+#
+# OPTIMIZED PRODUCTION INTERNAL VIEW: normal all/condorDoAll modes keep iso
+# mode and cone radius out of the cfg tag. Each photon-ID cfg ROOT file contains
+# explicit histogram views:
+#   pp-like    : isoR30_fixedIso2GeV, isoR40_fixedIso2GeV,
+#                isoR30_isSliding,    isoR40_isSliding
+#   AuAu-like  : legacy description only. Current AuAu production is guarded
+#                by the dataset-specific submitter/runtime contract and uses
+#                sliding R=0.4 plus sliding R=0.3; fixed reconstructed AuAu
+#                isolation requires explicit authorization.
+# The submitter passes those views through RJ_INTERNAL_ISO_VIEWS, and the same
+# RecoilJets/RecoilJets_AuAu histogram machinery fills each view with suffixed
+# names. Direct validation modes keep the old one-scalar-cfg-per-pass behavior.
+#
+# The non-isolated sideband is always: thrNonIso = thrReco + sideGapGeV.
+# Truth isolation (SIM only) uses truthIsoGeV independently.
+#
+# coneR sets the isolation cone radius. PhotonClusterBuilder provides isolation
+# sums for R=0.3 and R=0.4 in the same upstream pass, so optimized production
+# scans the configured cone list internally as histogram views.
+# -----------------------------------------------------------------------------
+isSlidingIso: false
+isSlidingAndFixed: true
+
+# Available fixed-isolation values. Optimized production uses the pp-family
+# fixedIso2GeV reference; AuAu-like jobs are overridden by the guarded
+# sliding-only dataset contract before execution.
+fixedGeV: [2.0, 4.0]
+
+# Available isolation cone radii scanned internally in optimized production.
+coneR: [0.30, 0.40]
+
+# Global sliding WP parameters.
+# Used as the fallback when no cone-specific pp or AuAu entry is available.
+# sideGapGeV: offset for non-isolated sideband
+# truthIsoGeV: generator-level isolation cut (SIM only)
+# towerMin: minimum tower energy for isolation sum (0 = no floor)
+isolation_wp: {aGeV: 0.490, bPerGeV: 0.037, sideGapGeV: 0.8, truthIsoGeV: 4.0, towerMin: 0.0}
+
+# Canonical PPG12 pp/non-embedded sliding isolation WP.
+# PPG12 final photon-yield parity uses R=0.4 with:
+#   thrReco(pT) = aGeV + bPerGeV * pT(gamma)
+# R=0.3 diagnostic views intentionally reuse the same paper-era threshold
+# rather than a historical optimization fit.
+pp_iso_wp_r30: {aGeV: 0.490, bPerGeV: 0.037, sideGapGeV: 0.8}
+pp_iso_wp_r40: {aGeV: 0.490, bPerGeV: 0.037, sideGapGeV: 0.8}
+
+# Exact Au+Au centrality-fit isolation working point.
+# With a SINGLE entry, RecoilJets_AuAu evaluates:
+#   thrReco(cent) = aGeV + bPerGeV × centrality
+# at the event centrality itself, then applies that as the event's fixed cut.
+# Prefer the cone-specific lists below for optimized internal-view production:
+# R=0.3 and R=0.4 use different embedded-photon isolation fits.
+#
+# Centrality-fit options from ppg12Style_isoCutEfficiencyFits_vsCentrality_noPP:
+#   R=0.3 90% efficiency: thrReco(cent) = 5.97 - 0.0507 × centrality
+#   R=0.4 90% efficiency: thrReco(cent) = 7.57 - 0.0658 × centrality
+#
+# The lists use fine centrality-bin constants evaluated at bin centers:
+# [0-10, 10-20, 20-30, 30-40, 40-50, 50-60, 60-80]%.
+auau_cent_iso_wp:
+  - {aGeV: 5.7165, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 5.2095, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 4.7025, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 4.1955, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 3.6885, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 3.1815, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 2.4210, bPerGeV: 0.0, sideGapGeV: 0.0}
+auau_cent_iso_wp_r30:
+  - {aGeV: 5.7165, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 5.2095, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 4.7025, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 4.1955, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 3.6885, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 3.1815, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 2.4210, bPerGeV: 0.0, sideGapGeV: 0.0}
+auau_cent_iso_wp_r40:
+  - {aGeV: 7.2410, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 6.5830, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 5.9250, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 5.2670, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 4.6090, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 3.9510, bPerGeV: 0.0, sideGapGeV: 0.0}
+  - {aGeV: 2.9640, bPerGeV: 0.0, sideGapGeV: 0.0}
+
+# -----------------------------------------------------------------------------
+# Photon shower-shape ID cuts (PPG12 Table 4)
+# Baseline values match the header defaults in RecoilJets.h / RecoilJets_AuAu.h.
+# -----------------------------------------------------------------------------
+photon_id_pre:   {e11e33_max: 0.98, et1_min: 0.60, et1_max: 1.00, e32e35_min: 0.80, e32e35_max: 1.00, weta_max: 0.60}
+photon_id_tight: {w_lo: 0.0, w_hi_intercept: 0.15, w_hi_slope: 0.006, e11e33_min: 0.40, e11e33_max: 0.98, et1_min: 0.90, et1_max: 1.00, e32e35_min: 0.92, e32e35_max: 1.00}
+
+# -----------------------------------------------------------------------------
+# Matching thresholds (truth ↔ reco, SIM only)
+# -----------------------------------------------------------------------------
+matching: {pho_dr_max: 0.05, jet_dr_max: 0.3}
+
+# -----------------------------------------------------------------------------
+# JES3 / xJγ photon pT bin edges (AUTHORITATIVE)
+# Drives ALL reco and truth photon pT slicing for JES3/xJγ booking + filling.
+# Reco and truth bins MUST match exactly.
+# -----------------------------------------------------------------------------
+jes3_photon_pt_bins: [5, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 35]
+
+# -----------------------------------------------------------------------------
+# Unfolding bin edges (independent from JES3 bins)
+# -----------------------------------------------------------------------------
+unfold_reco_photon_pt_bins:  [8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 35, 40]
+unfold_truth_photon_pt_bins: [5, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 35, 40]
+
+# Uniform jet pT binning: edges generated as range(start, stop, step)
+unfold_jet_pt_binning: {start: 0.0, stop: 60.0, step: 0.5}
+
+# xJ = pT(jet) / pT(γ) bin edges
+unfold_xj_bins: [0.0, 0.20, 0.24, 0.29, 0.35, 0.41, 0.50, 0.60, 0.72, 0.86, 1.03, 1.24, 1.49, 1.78, 2.14, 3.0]
+
+# -----------------------------------------------------------------------------
+# EventDisplay diagnostics (written into ROOT as EventDisplayTree)
+#   enable: true → always write the TTree for offline event displays
+#   max_per_bin: 0 = unlimited, N>0 = cap entries per (rKey × pTγ bin × category)
+# -----------------------------------------------------------------------------
+event_display_tree: false
+event_display_tree_max_per_bin: 1

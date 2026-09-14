@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sphenix.bnl.gov/photonjet/contracts/photonjet_trees_v1.json",
+  "title": "PhotonJetTrees_v1",
+  "type": "object",
+  "required": ["contract", "trees", "event_identity"],
+  "properties": {
+    "contract": {"const": "PhotonJetTrees_v1"},
+    "event_identity": {
+      "const": ["source_file_index", "event_id_hi", "event_id_lo"]
+    },
+    "trees": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "events"},
+        {"const": "eventTree"},
+        {"const": "photons"},
+        {"const": "jets"},
+        {"const": "photonJets"},
+        {"const": "truthPhotons"},
+        {"const": "truthJets"},
+        {"const": "recoTruthLinks"}
+      ],
+      "items": false
+    }
+  }
+}

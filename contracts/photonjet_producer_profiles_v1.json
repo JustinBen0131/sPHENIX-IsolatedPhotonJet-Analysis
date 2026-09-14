@@ -1,0 +1,43 @@
+{
+  "schema": "PhotonJetProducerProfilesV1",
+  "output_contract": "PhotonJetTrees_v1",
+  "profiles": [
+    {
+      "id": "pp_data",
+      "collision_system": "pp",
+      "sample_role": "data",
+      "system_adapter": "pp",
+      "truth_identity": "not_applicable",
+      "required_capabilities": [
+        "accepted_pp_event_selection",
+        "component_isolation_companion",
+        "scaled_vector_trigger_bit_30"
+      ]
+    },
+    {
+      "id": "pp_direct_photon_simulation",
+      "collision_system": "pp",
+      "sample_role": "direct_photon_simulation",
+      "system_adapter": "pp",
+      "truth_identity": "generator_occurrence_and_barcode",
+      "required_capabilities": [
+        "accepted_simulation_weighting",
+        "direct_interaction_source_ownership",
+        "occurrence_safe_generator_identity"
+      ]
+    },
+    {
+      "id": "auau_data",
+      "collision_system": "auau",
+      "sample_role": "data",
+      "system_adapter": "auau",
+      "truth_identity": "not_applicable",
+      "required_capabilities": [
+        "centrality_handling",
+        "data_retention_contract",
+        "minimum_bias_classification",
+        "uniform_event_gate_companion"
+      ]
+    }
+  ]
+}

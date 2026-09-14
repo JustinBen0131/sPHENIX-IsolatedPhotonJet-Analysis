@@ -1,0 +1,126 @@
+# Nominal analysis configuration: one photon-identification and selection
+# contract shared by every stage.  Units: GeV for energies, cm for vertex
+# position, percent for centrality, radians for angles.
+#
+# Every stage reads this file.  Working-point thresholds live here so that
+# changing a threshold regenerates flags and histograms without retraining a
+# model or re-reading a DST.  A `null` threshold means "not yet derived"; the
+# stages stop with an explicit message rather than substituting a value.
+
+selection_version: nominal-v2-draft-1
+
+# Truth photon definition used both as the training signal and as the
+# selected truth photon in simulation.  A truth photon is a signal photon when
+# every requirement below holds.  Candidates with a missing generator
+# association are never admitted as signal, whatever their stored class.
+truth_signal:
+  require_geant_photon: true            # g4_photon_valid == 1 (PID 22 in Geant)
+  require_generator_association: true   # hepmc_association_valid == 1
+  valid_prompt_classes: [-1, 0, 1, 2]   # PPG12 photon classes; class 3 and above are rejected
+  truth_isolation_cone_radius: 0.3
+  truth_isolation_max_gev: 4.0          # truth_isolation_r03 < 4 GeV
+  abs_eta_max: 0.7
+
+# Reconstructed isolation used for the nominal selection.  R=0.4 values stay
+# in the trees as a control but are not used by the nominal stages.
+isolation:
+  cone_radius: 0.3
+
+# Photon kinematics common to both collision systems.
+photon:
+  et_min_gev: 15.0
+  et_max_gev: 35.0                      # closed-open interval [15, 35)
+  abs_eta_max: 0.7
+  pt_edges_gev: [15.0, 20.0, 25.0, 35.0]
+
+# Recoil jet definition for xJgamma = jet_pt / photon_et.
+recoil:
+  jet_radius: 0.4
+  jet_pt_min_gev: 5.0
+  jet_abs_eta_max: 0.7
+  delta_phi_min_over_pi: 0.875          # back-to-back requirement, 7pi/8
+  xj_edges: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+             1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 3.0]
+
+# Non-tight definition used for the ABCD sidebands.  "bounded" uses the
+# explicit score band (nontight_low, nontight_high]; the band need not touch
+# the tight threshold, so a gap between the two is allowed.  "complement" uses
+# every candidate that is not tight.
+abcd:
+  non_tight_definition: bounded
+
+# Per-system photon-identification model and working points.
+# `features` is the ordered model input list as stored in the trees
+# (bdt_input_00 ... bdt_input_NN).  A model file must be a TMVA RBDT ROOT file
+# trained on exactly this ordered list; `model_sha256` pins it.
+#
+# Threshold entries accept:
+#   null                                         -> not derived, stage stops
+#   0.75                                         -> constant
+#   {intercept: a, slope_photon_et: b,
+#    slope_centrality: c}                        -> a + b*photon_et + c*centrality
+#   {mode: binned, pt_edges: [...], values: [...]} -> one value per photon-pT bin
+#   {mode: binned, pt_edges: [...], cent_edges: [...],
+#    values: [[...], ...]}                       -> value per (pT, centrality) bin
+systems:
+  pp:
+    features:
+      - cluster_Et
+      - cluster_weta_cogx
+      - cluster_wphi_cogx
+      - vertexz
+      - cluster_Eta
+      - e11_over_e33
+      - cluster_et1
+      - cluster_et2
+      - cluster_et3
+      - cluster_et4
+      - e32_over_e35
+    model_file: null
+    model_sha256: null
+    event:
+      abs_vertex_z_max_cm: 30.0
+      terminal_status: 0                      # producer success state for an accepted event
+    working_points:
+      tight_signal_efficiency_target: null    # set before running PhotonID/derive_working_points.py
+      tight_threshold: null                   # score > tight_threshold
+      nontight_low: null                      # nontight_low < score <= nontight_high
+      nontight_high: null
+      isolated_max_gev: null                  # iso_r03 < isolated_max_gev
+      nonisolated_min_gev: null               # iso_r03 > nonisolated_min_gev
+  auau:
+    features:
+      - cluster_Et
+      - cluster_weta_cogx
+      - cluster_wphi_cogx
+      - cluster_weta33_cogx
+      - cluster_wphi33_cogx
+      - vertexz
+      - cluster_Eta
+      - e11_over_e33
+      - cluster_et1
+      - cluster_et2
+      - cluster_et3
+      - cluster_et4
+      - e32_over_e35
+      - centrality
+    model_file: null
+    model_sha256: null
+    event:
+      abs_vertex_z_max_cm: 10.0
+      terminal_status: 0
+      centrality_percent: [0.0, 20.0]         # closed-open window used by the nominal histograms
+    working_points:
+      tight_signal_efficiency_target: 0.80    # established Au+Au working point (80% tight efficiency)
+      tight_threshold: null
+      nontight_low: null
+      nontight_high: null
+      isolated_max_gev: null
+      nonisolated_min_gev: null
+
+# Unfolding configuration.  The iteration count is selected by the maintained
+# refold/toy scan; until that scan has run on the nominal samples it is null
+# and FinalAnalysis/run_corrections.py requires --iterations explicitly.
+unfolding:
+  method: iterative_bayes
+  iterations: null
