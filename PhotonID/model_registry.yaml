@@ -1,19 +1,153 @@
-# PhotonID owns ordered features, application domains, model files and recipes.
-# Five separate slots, all UNBOUND. Proposed features need model parity review.
-# File and SHA256 bind together. CDB keys describe separately resolved imports;
-# Python inference never guesses or silently downloads a model.
-# Training needs the complete approved recipe enumerated in train.py.
-
----
-registry_version: 1
+registry_version: 2
 models:
+  canonical_pp_v1:
+    system: pp
+    version: '1'
+    shower_definition: H70
+    features:
+    - cluster_Et
+    - cluster_weta_cogx
+    - cluster_wphi_cogx
+    - cluster_weta33_cogx
+    - cluster_wphi33_cogx
+    - vertexz
+    - cluster_Eta
+    - e11_over_e33
+    - cluster_et1
+    - cluster_et2
+    - cluster_et3
+    - cluster_et4
+    - e32_over_e35
+    ratio_policy: nan
+    domain:
+      min_et_gev: 15.0
+      max_et_gev: 35.0
+      max_abs_eta: 0.7
+    format: xgboost_json
+    model_file: null
+    model_sha256: null
+    feature_schema_sha256: null
+    training_manifest: null
+    training_receipt_sha256: null
+    status: unresolved
+    binding_evidence: null
+    score_direction: higher_is_signal
+  canonical_auau_v1:
+    system: auau
+    version: '1'
+    shower_definition: H70
+    features: &id002
+    - cluster_Et
+    - cluster_weta_cogx
+    - cluster_wphi_cogx
+    - cluster_weta33_cogx
+    - cluster_wphi33_cogx
+    - vertexz
+    - cluster_Eta
+    - e11_over_e33
+    - cluster_et1
+    - cluster_et2
+    - cluster_et3
+    - cluster_et4
+    - e32_over_e35
+    - centrality
+    ratio_policy: nan
+    domain:
+      min_et_gev: 15.0
+      max_et_gev: 35.0
+      max_abs_eta: 0.7
+      centrality_percent:
+      - 0.0
+      - 80.0
+    format: xgboost_json
+    model_file: null
+    model_sha256: null
+    feature_schema_sha256: null
+    training_manifest: null
+    training_receipt_sha256: null
+    status: unresolved
+    binding_evidence: null
+    score_direction: higher_is_signal
+  ppg12_equivalent_v1:
+    system: pp
+    version: '1'
+    shower_definition: H70
+    features: &id001
+    - cluster_Et
+    - cluster_weta_cogx
+    - cluster_wphi_cogx
+    - vertexz
+    - cluster_Eta
+    - e11_over_e33
+    - cluster_et1
+    - cluster_et2
+    - cluster_et3
+    - cluster_et4
+    - e32_over_e35
+    ratio_policy: nan
+    domain:
+      min_et_gev: 15.0
+      max_et_gev: 35.0
+      max_abs_eta: 0.7
+    format: xgboost_json
+    model_file: null
+    model_sha256: null
+    feature_schema_sha256: null
+    training_manifest: null
+    training_receipt_sha256: null
+    status: unresolved
+    binding_evidence: null
+    score_direction: higher_is_signal
+  ppg12_original:
+    system: pp
+    version: '1'
+    shower_definition: H70
+    features: *id001
+    ratio_policy: nan
+    domain:
+      min_et_gev: 15.0
+      max_et_gev: 35.0
+      max_abs_eta: 0.7
+    format: tmva_rbdt
+    model_file: null
+    model_sha256: null
+    feature_schema_sha256: null
+    training_manifest: null
+    training_receipt_sha256: null
+    status: unresolved
+    binding_evidence: null
+    score_direction: higher_is_signal
+    expected_artifact_sha256: 7679e634260402fb3815b2733767182690eec7587f9e09bffc307a05d00d59df
+  historical_auau_h70_the134:
+    system: auau
+    version: '1'
+    shower_definition: H70
+    features: *id002
+    ratio_policy: nan
+    domain:
+      min_et_gev: 15.0
+      max_et_gev: 35.0
+      max_abs_eta: 0.7
+      centrality_percent:
+      - 0.0
+      - 80.0
+    format: tmva_rbdt
+    model_file: null
+    model_sha256: null
+    feature_schema_sha256: null
+    training_manifest: null
+    training_receipt_sha256: null
+    status: unresolved
+    binding_evidence: null
+    score_direction: higher_is_signal
+    expected_artifact_sha256: 8328af75235c8bcbf63659ba791ceff4e1165018de269c889472c6a80a26a41f
   ppg12_npb_reference:
     description: 'PPG12 non-prompt-background (NPB) reference classifier as invoked
       by the historical production, 25 ordered inputs from the H70 shower view. Kept
       as the reference point for p+p photon identification; it is not the tight-photon
       model of this analysis.
 
-'
+      '
     system: pp
     shower_definition: H70
     features:
@@ -48,148 +182,63 @@ models:
       max_et_gev: 40.0
       max_abs_eta: 0.7
     format: tmva_rbdt
-    model_file: 
-    model_sha256: 
-    cdb_key: 
+    model_file: null
+    model_sha256: null
+    cdb_key: null
     score_direction: higher_is_signal
-    training_manifest: 
+    training_manifest: null
     status: unresolved
-    binding_evidence: 
-  ppg12_tight_pp_reference:
-    description: Separate PPG12 tight-photon reference slot; features/domain need
-      imported-model review.
-    system: pp
-    shower_definition: H70
-    features:
-    - cluster_Et
-    - cluster_weta_cogx
-    - cluster_wphi_cogx
-    - vertexz
-    - cluster_Eta
-    - e11_over_e33
-    - cluster_et1
-    - cluster_et2
-    - cluster_et3
-    - cluster_et4
-    - e32_over_e35
-    ratio_policy: nan
-    domain:
-      min_et_gev: 15.0
-      max_et_gev: 35.0
-      max_abs_eta: 0.7
-    format: tmva_rbdt
-    model_file: 
-    model_sha256: 
-    cdb_key: 
-    score_direction: higher_is_signal
-    training_manifest: 
-    status: unresolved
-    binding_evidence: 
-  ppg12_tight_auau_reference:
-    description: Separate PPG12 tight-photon reference slot; features/domain need
-      imported-model review.
-    system: auau
-    shower_definition: H70
-    features:
-    - cluster_Et
-    - cluster_weta_cogx
-    - cluster_wphi_cogx
-    - cluster_weta33_cogx
-    - cluster_wphi33_cogx
-    - vertexz
-    - cluster_Eta
-    - e11_over_e33
-    - cluster_et1
-    - cluster_et2
-    - cluster_et3
-    - cluster_et4
-    - e32_over_e35
-    - centrality
-    ratio_policy: nan
-    domain:
-      min_et_gev: 15.0
-      max_et_gev: 35.0
-      max_abs_eta: 0.7
-      centrality_percent:
-      - 0.0
-      - 80.0
-    format: tmva_rbdt
-    model_file: 
-    model_sha256: 
-    cdb_key: 
-    score_direction: higher_is_signal
-    training_manifest: 
-    status: unresolved
-    binding_evidence: 
-  canonical_pp_v1:
-    description: Proposed pp 15-35 GeV tight-photon features; recipe/model acceptance
-      is unresolved.
-    system: pp
-    shower_definition: H70
-    features:
-    - cluster_Et
-    - cluster_weta_cogx
-    - cluster_wphi_cogx
-    - vertexz
-    - cluster_Eta
-    - e11_over_e33
-    - cluster_et1
-    - cluster_et2
-    - cluster_et3
-    - cluster_et4
-    - e32_over_e35
-    ratio_policy: nan
-    domain:
-      min_et_gev: 15.0
-      max_et_gev: 35.0
-      max_abs_eta: 0.7
-    format: tmva_rbdt
-    model_file: 
-    model_sha256: 
-    cdb_key: 
-    score_direction: higher_is_signal
-    training_manifest: 
-    status: unresolved
-    binding_evidence: 
-    training:
-      status: unresolved
-      recipe_evidence: 
+    binding_evidence: null
+working_points:
   canonical_auau_v1:
-    description: Proposed auau 15-35 GeV tight-photon features; recipe/model acceptance
-      is unresolved.
-    system: auau
-    shower_definition: H70
-    features:
-    - cluster_Et
-    - cluster_weta_cogx
-    - cluster_wphi_cogx
-    - cluster_weta33_cogx
-    - cluster_wphi33_cogx
-    - vertexz
-    - cluster_Eta
-    - e11_over_e33
-    - cluster_et1
-    - cluster_et2
-    - cluster_et3
-    - cluster_et4
-    - e32_over_e35
-    - centrality
-    ratio_policy: nan
+    path: null
+    sha256: null
+    model: canonical_auau_v1
+  canonical_pp_v1:
+    path: null
+    sha256: null
+    model: canonical_pp_v1
+  ppg12_equivalent_v1:
+    path: null
+    sha256: null
+    model: ppg12_equivalent_v1
+isolation_packages:
+  ppg12_topocluster_r04_v1:
+    system: pp
+    method: 3
+    radius: 0.4
+    axis: et
     domain:
-      min_et_gev: 15.0
-      max_et_gev: 35.0
-      max_abs_eta: 0.7
-      centrality_percent:
-      - 0.0
-      - 80.0
-    format: tmva_rbdt
-    model_file: 
-    model_sha256: 
-    cdb_key: 
-    score_direction: higher_is_signal
-    training_manifest: 
-    status: unresolved
-    binding_evidence: 
-    training:
-      status: unresolved
-      recipe_evidence: 
+    - 15.0
+    - 35.0
+    isolated:
+    - 0.49
+    - 0.037
+    nonisolated:
+    - 1.29
+    - 0.037
+    status: bound
+    evidence: explicit user contract; strict < and >
+  canonical_auau_sub1_r04_v1:
+    path: null
+    sha256: null
+    system: auau
+selection_recipes:
+  nominal_pp:
+    model: ppg12_equivalent_v1
+    id_package: ppg12_equivalent_v1
+    isolation_package: ppg12_topocluster_r04_v1
+  nominal_auau:
+    model: canonical_auau_v1
+    id_package: canonical_auau_v1
+    isolation_package: canonical_auau_sub1_r04_v1
+historical_id_packages:
+  ppg12_original:
+    path: null
+    sha256: null
+    model_sha256: 7679e634260402fb3815b2733767182690eec7587f9e09bffc307a05d00d59df
+    note: Historical pp formulas must be imported with their exact domain and source
+      binding; never attach to retrained model.
+input_campaign: null
+input_campaign_sha256: null
+output_root: ../output/photon_id

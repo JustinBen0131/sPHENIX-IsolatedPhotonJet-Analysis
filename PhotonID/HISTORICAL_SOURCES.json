@@ -1,0 +1,89 @@
+{
+  "library": "ThesisAnalysis (read-only provenance; never a runtime dependency)",
+  "files": [
+    {
+      "path": "scripts/ml/parity/train_corrected_ppg12_parity.py",
+      "sha256": "c86d180409b3f1ef78d288280e4f404490c7548c85f239a513988aeead5b6ea9"
+    },
+    {
+      "path": "ppg12codeGit/FunWithxgboost/data_loader.py",
+      "sha256": "bf7d9273fe36c4ec2aa79310c5907d44907169cba96393357614be3341b30e61"
+    },
+    {
+      "path": "ppg12codeGit/FunWithxgboost/reweighting.py",
+      "sha256": "144e45715fab98695f1387ca000b0ba6fb57b3596ca808586fa3f4e93641d078"
+    },
+    {
+      "path": "ppg12codeGit/FunWithxgboost/model_builder.py",
+      "sha256": "241dd50e8cb66a42edade219bc37177659e61e01d3c40250be2fb8e327b92d12"
+    },
+    {
+      "path": "ppg12codeGit/FunWithxgboost/variant_configs/config_base_v3E_split.yaml",
+      "sha256": "579c7a4d878bdaa4fc887dfbbe355bae5341f46da34dafbb51ade34ee955db76"
+    },
+    {
+      "path": "scripts/ml/parity/validation/compare_heldout_ppg12_models.py",
+      "sha256": "426609813daff4ab92a665a5c9e3f59f88f0fe53b52e00f56023ff37423fc699"
+    },
+    {
+      "path": "scripts/plotting/photon_performance/jstg_bdt_recap.py",
+      "sha256": "72e448c87e7ec641035e2c5dae849f0fe050ed4c60aaec2c6f3e9c531bb68587"
+    },
+    {
+      "path": "scripts/plotting/efficiency/derive_the327_auau_h70_wp_pt_centrality_grid.py",
+      "sha256": "e4bb70ffd1956a94e416e99c08b6e5fc923bc328c13fd9dd11433f33c1ca1814"
+    },
+    {
+      "path": "scripts/slides/auau_isolation/make_the327_auau_wp_fit_slides.py",
+      "sha256": "e3b70b424d7b7da2e9b6e4f5e7062d9a609b655d699c9924be6b3ae9ca8c678a"
+    },
+    {
+      "path": "scripts/plotting/truth_purity/make_auau_bdt_score_separation_centrality_grid.py",
+      "sha256": "5abd5d6cdef9e3d99a3e704d0b431663f2239845c971710f7eff54f2f75aba8e"
+    },
+    {
+      "path": "scripts/plotting/efficiency/make_the96_auau_isolation_efficiency_fits.py",
+      "sha256": "c4820c669f85aafe99b70034a8d2a7ec392b90640f2efce5097600e50cc810d2"
+    },
+    {
+      "path": "scripts/plotting/efficiency/derive_schema14_auau_isolation_thresholds.py",
+      "sha256": "32aa2fe8ca9d807d936c41e095c8c66c07cf5865e1de0967792e0f789d06fdc3"
+    },
+    {
+      "path": "agent_context/local/the327_auau_bdt_retrain_20260915/sealed_the134_code_120d401d/training/train_auau_photon_bdt.py",
+      "sha256": "fd1da822af2778b2402a25d38d6eaf18fdacf85782799367c68bfc136c53b2c8"
+    },
+    {
+      "path": "dataOutput/plots/jstg_frozen_h70_cuts_20260909/nominal_correction_receipt.json",
+      "sha256": "490b31cc90e2911cf23afbef9cacb5f7ca65765a59abfdddc6b52546668d809f"
+    },
+    {
+      "path": "dataOutput/plots/jstg_frozen_h70_cuts_20260909/nominal_source/model_metadata.json",
+      "sha256": "65c53aae0d19323dc2ea25e92fa9ffbe8e56fc655543a7fbd7ad5192067fff54"
+    },
+    {
+      "path": "agent_context/local/the327_auau_bdt_retrain_20260915/stage2/science_admission_receipt.json",
+      "sha256": "e3eb484a551817eb925799fd5068be119af1cfd07b44bf461d2817a33a301cf7"
+    },
+    {
+      "path": "agent_context/local/the327_auau_bdt_retrain_20260915/remote/v16_runtime_readiness.json",
+      "sha256": "6de58869e21c3af8daad9757cb2dd8e62d81fc6e8638c0307c4c389700c3b5c5"
+    },
+    {
+      "path": "agent_context/local/the269_corrected_ppg12_parity_v1/final_local_chain_v1/postmerge_run_v4/training/TRAINING_RECEIPT.json",
+      "sha256": "13a9117af81e7dcf7298bf0d40fae9e33b3281216eef7bfa0712c2f85484b10a"
+    },
+    {
+      "path": "agent_context/local/the269_corrected_ppg12_parity_v1/final_local_chain_v1/postmerge_run_v4/training/DERIVED_CONFIG.yaml",
+      "sha256": "3a22e27dd685e70976f54595aaf405f8449268bdab2772a934873e6d5710b3b1"
+    },
+    {
+      "path": "agent_context/local/the249_chatgpt_pp_workbench/unified_response_currenttree_workbench_v1/eventtree_reduction/purity_factorial_candidate_packet_v4_cent0to80/auau_background_reader.py",
+      "sha256": "8590bdb6e6d5c21e34089ccbd2fe2069b95e24b21b63febdc8f04431be7f414f"
+    },
+    {
+      "path": "agent_context/local/the249_chatgpt_pp_workbench/unified_response_currenttree_workbench_v1/eventtree_reduction/data_working_sample_46467_ppg12_dual_view_packet_v4/finalize_packet_v4.py",
+      "sha256": "f0321c452be659fb95dc202f0f2fa9b9c71e047b303d64f5c6e730b168573b6f"
+    }
+  ]
+}

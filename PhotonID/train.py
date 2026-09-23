@@ -1,304 +1,519 @@
 #!/usr/bin/env python3
-"""Train from canonical trees using a fully bound, explicitly approved recipe.
+"""One candidate-package training path. No publication or scientific acceptance.
 
-features.py owns both training and inference inputs. Source/event hash groups
-keep related candidates in one partition. Alternate productions with different
-source identities require an explicit common grouping map before combining.
-Unknown truth relations are excluded. Weight fitting and thinning use training
-rows only; held-out AUC uses unit weights. This is an explicit supported recipe,
-not a claim that the final pp/AuAu training recipe has been approved.
-
-Registry entries remain unresolved until labels, weighting, split, window and
-hyperparameters are reconciled with the accepted training authority. No silent
-fallback recipe exists. Outputs are new model files plus a manifest; this
-script never publishes models or rewrites the registry/base trees.
+Canonical weights are fitted on TRAIN and then frozen. The parity profile
+intentionally retains historical all-population weighting and row splitting.
+Labels and population witnesses are adapted once in inputs.py. Calibration
+never receives test rows; the on-disk freeze precedes their first prediction.
 """
 
-from __future__ import annotations
-
-import argparse
+from pathlib import Path
 import hashlib
 import json
-from pathlib import Path
+import subprocess
 import sys
-from typing import Any
-
 import numpy as np
-import uproot
+from features import feature_identity
+from registry import digest, file_hash, write_json
+from calibration import fit_working_points
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-from features import FeatureMatrix, ModelSpec, feature_identity, features_for_file, load_registry, sha256, base_metadata  # noqa: E402
+PARTITIONS = ("train", "validation", "test")
+PARITY_PARAMS = dict(
+    n_estimators=750,
+    max_depth=5,
+    learning_rate=0.1,
+    subsample=0.5,
+    colsample_bytree=0.6,
+    colsample_bylevel=1.0,
+    reg_alpha=5.0,
+    reg_lambda=0.3,
+    tree_method="hist",
+    grow_policy="lossguide",
+    max_bin=256,
+    random_state=42,
+    n_jobs=4,
+)
 
-ASSOCIATION_MATCHED = 3  # photonjet::AssociationState::Matched
 
-# ----------------------------------------------------------------------------
-# Weighting
-# ----------------------------------------------------------------------------
+def check_profile(spec, profile):
+    """Refuse silently different recipes under the same public profile identity."""
+    if (
+        list(spec.features) != profile["features"]
+        or spec.system != profile["system"]
+        or spec.shower_definition != profile["shower_definition"]
+    ):
+        raise ValueError(
+            "registry and training profile disagree on ordered features/system/shower"
+        )
+    for field in (
+        "feature_binding_evidence",
+        "label_binding_evidence",
+        "preselection_binding_evidence",
+        "domain_binding_evidence",
+    ):
+        if not profile.get(field):
+            raise ValueError(
+                f"{spec.name}: unresolved {field} in training_profiles.yaml"
+            )
+    if profile.get("label_adapter") != "dominant_prompt_v1":
+        raise ValueError("unknown label adapter")
+    s = profile["split"]
+    if spec.name == "ppg12_equivalent_v1":
+        if (
+            s
+            != dict(
+                rule="row_stratified_70_10_20",
+                seed=42,
+                train_fraction=0.7,
+                validation_fraction=0.1,
+                test_fraction=0.2,
+            )
+            or profile["xgboost"] != PARITY_PARAMS
+            or profile["weight_fit_population"] != "all_before_split"
+            or profile["low_et_background_flattening"] is not True
+        ):
+            raise ValueError(
+                "PPG12-equivalent mechanics differ from recovered executable recipe"
+            )
+    else:
+        if (
+            s
+            != dict(
+                rule="physical_event_hash_v1",
+                seed=13,
+                train_fraction=0.8,
+                validation_fraction=0.1,
+                test_fraction=0.1,
+            )
+            or profile["weight_fit_population"] != "train_only"
+            or profile["low_et_background_flattening"] is not False
+            or profile["et_window_gev"] != [15.0, 35.0]
+        ):
+            raise ValueError(
+                "canonical protocol must remain grouped 80/10/10, train-only weights, 15–35 GeV"
+            )
+    if profile["weighting"] != dict(
+        bins=20, eta_range=[-0.7, 0.7], et_cap=800.0, class_balance=True
+    ):
+        raise ValueError("weighting differs from recovered ET/eta/class-balance recipe")
+    if profile["working_points"]["fit_form"] != "linear":
+        raise ValueError("unsupported WP fit form")
+    window = profile["et_window_gev"]
+    if not window or window != [spec.domain["min_et_gev"], spec.domain["max_et_gev"]]:
+        raise ValueError(
+            "bind the exact training domain consistently in registry and profile"
+        )
 
-def inverse_pdf_weights(values: np.ndarray, *, n_bins: int = 20, fixed_range: tuple[float, float] | None = None,
-                        cap: float | None = None) -> np.ndarray:
-    """1 / (spline through a normalised histogram), capped, mean one."""
 
+def parity_split_indices(labels):
+    from sklearn.model_selection import train_test_split
+
+    rows = np.arange(len(labels))
+    rest, test = train_test_split(rows, test_size=0.2, random_state=42, stratify=labels)
+    train, val = train_test_split(
+        rest, test_size=0.1 / (0.7 + 0.1), random_state=43, stratify=labels[rest]
+    )
+    return train, val, test
+
+
+def split_rows(groups, spec, labels=None):
+    if spec["rule"] == "physical_event_hash_v1":
+        draws = np.array(
+            [
+                int.from_bytes(
+                    hashlib.sha256(
+                        f"photonid-physical-v1:{spec['seed']}:{g}".encode()
+                    ).digest()[:8],
+                    "big",
+                )
+                / 2**64
+                for g in groups
+            ]
+        )
+        return np.where(
+            draws < 0.8, "train", np.where(draws < 0.9, "validation", "test")
+        )
+    if spec["rule"] != "row_stratified_70_10_20" or labels is None:
+        raise ValueError("unsupported split")
+    train, val, test = parity_split_indices(labels)
+    result = np.full(len(labels), "train", dtype="<U10")
+    result[test] = "test"
+    result[val] = "validation"
+    return result
+
+
+def parity_row_order(et, labels, samples, ready, source_order):
+    """Historical per-source low-ET flattening, including its sampled row order.
+
+    A logical training source can span several base files. Its manifest order
+    must reproduce the historical concatenation; no filesystem sorting occurs.
+    """
+    import pandas as pd
+
+    rows = []
+    if set(np.asarray(samples)[ready]) != set(source_order):
+        raise ValueError("training source roster is incomplete or unexpected")
+    for source in source_order:
+        ix = np.flatnonzero(ready & (samples == source))
+        low = ix[(labels[ix] == 0) & (et[ix] < 15)]
+        if len(low):
+            bins = pd.cut(
+                et[low],
+                np.linspace(et[low].min(), 15.0, 21),
+                labels=False,
+                include_lowest=True,
+            )
+            counts = np.bincount(bins.astype(int), minlength=20)
+            target = int(counts[counts > 0].min())
+            rng = np.random.RandomState(42)
+            low = np.concatenate(
+                [
+                    rng.choice(low[bins == b], target, replace=False)
+                    for b in range(20)
+                    if counts[b]
+                ]
+            )
+            ix = np.concatenate([low, ix[et[ix] >= 15]])
+        rows.extend(ix.tolist())
+    return np.array(rows, dtype=int)
+
+
+def fit_weights(et, eta, labels, fit_mask, config):
+    """Save spline knots/coefficients and TRAIN normalizations for later reuse.
+
+    Formula retained from PPG12 KinematicReweighter. The fit population is the
+    only deliberate methodological difference for the two canonical profiles.
+    """
     from scipy.interpolate import UnivariateSpline
 
-    x = np.asarray(values, dtype=float)
-    if len(x) < n_bins:
-        raise ValueError(f"fewer rows ({len(x)}) than bins ({n_bins}) for inverse-pdf weights")
-    low, high = fixed_range if fixed_range is not None else (float(x.min()), float(x.max()))
-    if not high > low:
-        raise ValueError("degenerate range for inverse-pdf weights")
-    edges = np.linspace(low, high, n_bins + 1)
-    density = np.histogram(x, bins=edges, density=True)[0] * n_bins
-    centres = 0.5 * (edges[:-1] + edges[1:])
-    spline = UnivariateSpline(centres, density, s=0.0)
-    pdf = np.clip(spline(x), 1.0e-3, None)
-    local = 1.0 / pdf
-    if cap is not None:
-        local = np.minimum(local, float(cap))
-    return local / local.mean()
-
-
-def training_weights(et: np.ndarray, eta: np.ndarray, labels: np.ndarray, weighting: dict[str, Any]) -> tuple[np.ndarray, list[str]]:
-    labels = np.asarray(labels, dtype=int)
-    weights = np.ones(len(labels))
-    steps = []
-    n_total = len(labels)
+    fitted = {}
+    total = int(fit_mask.sum())
     for cls in (0, 1):
-        mask = labels == cls
-        factor = n_total / (2.0 * mask.sum())
-        weights[mask] *= factor
-        steps.append(f"class {cls}: factor n_total/(2 n_class) = {factor:.6g}")
-    eta_range = tuple(float(v) for v in weighting["eta_range"])
-    bins = int(weighting["bins"])
-    cap = float(weighting["et_cap"]) if weighting.get("et_cap") is not None else None
+        mask = fit_mask & (labels == cls)
+        if mask.sum() < 20:
+            raise ValueError("weight fit requires at least 20 candidates per class")
+        record = {"class_balance": total / (2 * int(mask.sum()))}
+        for name, values, limits, cap in [
+            ("eta", eta, config["eta_range"], None),
+            ("et", et, None, config["et_cap"]),
+        ]:
+            x = values[mask]
+            lo, hi = limits if limits else (x.min(), x.max())
+            if not hi > lo or not np.all(np.isfinite(x)):
+                raise ValueError("degenerate/nonfinite weight-fit range")
+            edges = np.linspace(lo, hi, 21)
+            density = np.histogram(x, bins=edges, density=True)[0] * 20
+            spline = UnivariateSpline((edges[:-1] + edges[1:]) / 2, density, s=0.0)
+            t, c, k = spline._eval_args
+            w = 1 / np.maximum(spline(x), 1e-3)
+            if cap is not None:
+                w = np.minimum(w, cap)
+            record[name] = dict(
+                knots=t.tolist(),
+                coefficients=c.tolist(),
+                degree=k,
+                normalization=float(w.mean()),
+                cap=cap,
+            )
+        fitted[str(cls)] = record
+    return fitted
+
+
+def apply_weights(et, eta, labels, fitted):
+    from scipy.interpolate import BSpline
+
+    result = np.full(len(labels), np.nan)
     for cls in (0, 1):
-        mask = labels == cls
-        weights[mask] *= inverse_pdf_weights(eta[mask], n_bins=bins, fixed_range=eta_range)
-        weights[mask] *= inverse_pdf_weights(et[mask], n_bins=bins, fixed_range=None, cap=cap)
-        steps.append(f"class {cls}: eta inverse-pdf ({bins} bins on {list(eta_range)}, mean one) "
-                     f"then ET inverse-pdf ({bins} bins on the data range, cap {cap}, mean one)")
-    return weights, steps
+        m = labels == cls
+        r = fitted[str(cls)]
+        result[m] = r["class_balance"]
+        for name, values in [("eta", eta), ("et", et)]:
+            d = r[name]
+            pdf = BSpline(d["knots"], d["coefficients"], d["degree"])(values[m])
+            w = 1 / np.maximum(pdf, 1e-3)
+            if d["cap"] is not None:
+                w = np.minimum(w, d["cap"])
+            result[m] *= w / d["normalization"]
+    return result
 
 
-def flatten_low_et_background(et: np.ndarray, labels: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
-    keep = np.ones(len(et), dtype=bool)
-    if not spec or not spec.get("enabled", False):
-        return keep
-    et_max = float(spec["et_max_gev"])
-    bins = int(spec["bins"])
-    rng = np.random.RandomState(int(spec["seed"]))
-    low_bkg = (labels == 0) & (et < et_max)
-    if not low_bkg.any():
-        return keep
-    edges = np.linspace(float(et[low_bkg].min()), et_max, bins + 1)
-    index = np.clip(np.searchsorted(edges, et, side="right") - 1, 0, bins - 1)
-    counts = np.bincount(index[low_bkg], minlength=bins)
-    target = int(counts[counts > 0].min())
-    for b in range(bins):
-        rows = np.flatnonzero(low_bkg & (index == b))
-        if len(rows) > target:
-            keep[rng.choice(rows, size=len(rows) - target, replace=False)] = False
-    return keep
+def predict(model, X, features):
+    import xgboost as xgb
+
+    if not len(X):
+        return np.empty(0)
+    return model.get_booster().predict(xgb.DMatrix(X, feature_names=list(features)))
 
 
-# ----------------------------------------------------------------------------
-# Labels from the canonical relations
-# ----------------------------------------------------------------------------
+def train_package(spec, profile, data, output, provenance, reference=None):
+    """Internal per-profile executor, also exercised by small synthetic fixtures."""
+    from xgboost import XGBClassifier
+    from diagnostics import save_diagnostics
 
-def signal_linked_candidates(path: Path) -> tuple[set, set]:
-    """Candidate keys whose Matched photon-truth relation points at an analysis-signal truth photon."""
+    output = Path(output)
+    if output.exists():
+        raise FileExistsError(f"refusing existing package: {output}")
+    eligible = data["ready"] & (data["y"] >= 0)
+    canonical = profile["split"]["rule"] == "physical_event_hash_v1"
+    if canonical:
+        order = np.flatnonzero(eligible)
+        partitions = split_rows(data["groups"], profile["split"])
+    else:
+        order = parity_row_order(
+            data["et"], data["y"], data["sample"], eligible, profile["source_order"]
+        )
+        partitions = np.full(len(eligible), "excluded", dtype="<U10")
+        partitions[order] = split_rows(
+            data["groups"][order], profile["split"], data["y"][order]
+        )
+    if len(np.unique(data["keys"], axis=0)) != len(data["keys"]):
+        raise ValueError("duplicate training candidate key")
+    selected = np.zeros(len(eligible), bool)
+    selected[order] = True
+    masks = {p: selected & (partitions == p) for p in PARTITIONS}
+    for p, m in masks.items():
+        if set(data["y"][m]) != {0, 1}:
+            raise ValueError(f"{p} lacks one class")
+    if canonical:
+        sets = {p: set(data["groups"][partitions == p]) for p in PARTITIONS}
+        if any(
+            sets[a] & sets[b]
+            for a, b in [
+                ("train", "validation"),
+                ("train", "test"),
+                ("validation", "test"),
+            ]
+        ):
+            raise ValueError("physical-event partition overlap")
+    fit_mask = masks["train"] if canonical else selected
+    fitted = fit_weights(
+        data["et"], data["eta"], data["y"], fit_mask, profile["weighting"]
+    )
+    weights = np.full(len(selected), np.nan)
+    before_freeze = selected & (partitions != "test") if canonical else selected
+    weights[before_freeze] = apply_weights(
+        data["et"][before_freeze],
+        data["eta"][before_freeze],
+        data["y"][before_freeze],
+        fitted,
+    )
+    if not np.all(np.isfinite(weights[before_freeze]) & (weights[before_freeze] > 0)):
+        raise ValueError("invalid training/validation weights")
+    output.mkdir(parents=True)
+    for folder in ("model", "split", "working_points", "isolation", "diagnostics"):
+        (output / folder).mkdir()
+    write_json(
+        output / "INCOMPLETE.json", {"status": "building candidate; not accepted"}
+    )
+    write_json(output / "training_profile.json", profile)
+    write_json(
+        output / "split/weighting.json",
+        dict(fit_population=profile["weight_fit_population"], classes=fitted),
+    )
+    np.savez_compressed(
+        output / "split/assignments.npz",
+        keys=data["keys"],
+        group=data["groups"],
+        partition=partitions,
+        training_eligible=selected,
+        training_row_order=order,
+    )
+    # Preserve historical row order for parity; canonical has no row shuffling contract.
+    tr = (
+        order[partitions[order] == "train"]
+        if canonical
+        else order[parity_split_indices(data["y"][order])[0]]
+    )
+    va = masks["validation"]
+    model = XGBClassifier(**profile["xgboost"])
+    import pandas as pd
 
-    with uproot.open(path) as root:
-        complete = root["Events"]["truth_denominator_complete"].array(library="np")
-        if np.any(complete != 1):
-            raise ValueError("training source has incomplete truth census")
-        truth = root["TruthPhotons"].arrays(["event_hi", "event_lo", "truth_photon_hi", "truth_photon_lo", "analysis_signal"], library="np")
-        links = root["PhotonTruthLinks"].arrays(["event_hi", "event_lo", "photon_hi", "photon_lo",
-                                                 "truth_photon_hi", "truth_photon_lo", "state"], library="np")
-    signal_truth = {
-        (int(eh), int(el), int(th), int(tl))
-        for eh, el, th, tl, ok in zip(truth["event_hi"], truth["event_lo"], truth["truth_photon_hi"], truth["truth_photon_lo"], truth["analysis_signal"])
-        if bool(ok)
+    model.fit(
+        pd.DataFrame(data["X"][tr], columns=list(spec.features)),
+        data["y"][tr],
+        sample_weight=weights[tr],
+    )
+    model_path = output / "model/model.json"
+    model.save_model(model_path)
+    reloaded = XGBClassifier()
+    reloaded.load_model(model_path)
+    scores = np.full(len(selected), np.nan)
+    scores[va] = predict(model, data["X"][va], spec.features)
+    again = predict(reloaded, data["X"][va], spec.features)
+    if not np.all(np.isfinite(scores[va])) or not np.array_equal(scores[va], again):
+        raise ValueError("nonfinite score or serialization/reload inequivalence")
+    binding = dict(
+        model_name=spec.name,
+        model_sha256=file_hash(model_path),
+        feature_schema_sha256=feature_identity(spec),
+    )
+    wp = fit_working_points(
+        scores[va],
+        weights[va],
+        data["et"][va],
+        data["centrality"][va],
+        data["y"][va] == 1,
+        spec.system,
+        partition="validation",
+    )
+    wp.update(binding)
+    write_json(output / "working_points/id.json", wp)
+    iso = None
+    if spec.system == "auau" and profile.get("analysis_signal_binding_evidence"):
+        iv = (partitions == "validation") & data["analysis"]
+        iso = fit_working_points(
+            data["isolation"][iv],
+            np.ones(int(iv.sum())),
+            data["et"][iv],
+            data["centrality"][iv],
+            np.ones(int(iv.sum()), bool),
+            "auau",
+            partition="validation",
+            isolation=True,
+        )
+        iso.update(binding)
+        write_json(output / "isolation/calibration.json", iso)
+        # Calibration is useful before the nominal alias/sideband decision is bound.
+        settings = profile["isolation"]
+        if (
+            settings.get("nominal_target")
+            and settings.get("nonisolated_rule")
+            and settings.get("binding_evidence")
+        ):
+            if settings["nonisolated_rule"] != "same_as_isolated":
+                raise ValueError("unsupported bound sideband rule")
+            curve = iso["curves"][settings["nominal_target"]]
+            write_json(
+                output / "isolation/selection.json",
+                dict(
+                    system="auau",
+                    method=2,
+                    radius=0.4,
+                    axis="centrality",
+                    domain=[0, 80],
+                    isolated=curve,
+                    nonisolated=curve,
+                    calibration_sha256=file_hash(output / "isolation/calibration.json"),
+                    status="candidate",
+                    binding_evidence=settings["binding_evidence"],
+                ),
+            )
+    elif spec.system == "auau":
+        write_json(
+            output / "isolation/UNBOUND.json",
+            dict(
+                status="unbound",
+                reason="analysis_signal_binding_evidence is required for isolation calibration; model/ID remain independent",
+            ),
+        )
+    freeze = {
+        str(p.relative_to(output)): file_hash(p)
+        for p in output.rglob("*")
+        if p.is_file()
     }
-    linked, known = set(), set()
-    for eh, el, ph, pl, th, tl, state in zip(links["event_hi"], links["event_lo"], links["photon_hi"], links["photon_lo"],
-                                             links["truth_photon_hi"], links["truth_photon_lo"], links["state"]):
-        if int(state) in (ASSOCIATION_MATCHED, 4):
-            known.add((int(eh), int(el), int(ph), int(pl)))
-        if int(state) == ASSOCIATION_MATCHED and (int(eh), int(el), int(th), int(tl)) in signal_truth:
-            linked.add((int(eh), int(el), int(ph), int(pl)))
-    return linked, known
-
-
-def load_rows(path: Path, spec: ModelSpec, role: str) -> dict[str, Any]:
-    matrix: FeatureMatrix = features_for_file(path, spec)
-    with uproot.open(path) as root:
-        metadata = base_metadata(root)
-        if metadata.get("data_kind") != "2" or metadata.get("simulation_role") != ("1" if role == "signal" else "2"):
-            raise ValueError(f"{path}: training role differs from source metadata")
-    linked, known = signal_linked_candidates(path)
-    is_linked = np.asarray([key in linked for key in matrix.keys], dtype=bool)
-    complete = matrix.complete & matrix.in_domain & np.isfinite(matrix.et) & np.isfinite(matrix.eta)
-    complete &= np.abs(matrix.eta) < float(spec.domain.get("max_abs_eta", 0.7))
-    keep = complete & np.asarray([key in known for key in matrix.keys]) & (is_linked if role == "signal" else ~is_linked)
-    return {
-        "features": matrix.values[keep],
-        "groups": np.asarray([f"{int(src[0])}:{int(src[1])}:{key[0]}:{key[1]}"
-                               for src, key in zip(matrix.source, matrix.keys)])[keep],
-        "keys": [key for key, take in zip(matrix.keys, keep) if take],
-        "label": np.full(int(keep.sum()), 1 if role == "signal" else 0, dtype=np.int32),
-        "et": matrix.et[keep], "eta": matrix.eta[keep],
-        "n_total": len(matrix.keys), "n_complete": int(complete.sum()), "n_linked": int((complete & is_linked).sum()),
+    write_json(
+        output / "FROZEN_CHOICES.json",
+        dict(status="candidate choices frozen before test prediction", files=freeze),
+    )
+    # Only now may test rows be evaluated. Never call a fit function below here.
+    if canonical:
+        te = masks["test"]
+        weights[te] = apply_weights(
+            data["et"][te], data["eta"][te], data["y"][te], fitted
+        )
+    if not np.all(np.isfinite(weights[selected]) & (weights[selected] > 0)):
+        raise ValueError("invalid frozen evaluation weights")
+    rest = selected & ~va
+    scores[rest] = predict(reloaded, data["X"][rest], spec.features)
+    if not np.all(np.isfinite(scores[selected])):
+        raise ValueError("nonfinite post-freeze scores")
+    metrics = {}
+    for population in ("validation", "test", "all"):
+        mask = selected if population == "all" else masks[population]
+        im = (
+            data["analysis"]
+            if population == "all"
+            else data["analysis"] & (partitions == population)
+        )
+        payload = dict(
+            score=scores[mask],
+            y=data["y"][mask],
+            weight=weights[mask],
+            et=data["et"][mask],
+            centrality=data["centrality"][mask],
+            keys=data["keys"][mask],
+            isolation=data["isolation"][im],
+            isolation_et=data["et"][im],
+            isolation_centrality=data["centrality"][im],
+        )
+        if reference is not None:
+            payload["reference_score"] = reference(data["X"][mask])
+        metrics[population] = save_diagnostics(
+            output / "diagnostics" / population, payload, wp, iso, population, spec.name
+        )
+    for name, sha in freeze.items():
+        if file_hash(output / name) != sha:
+            raise ValueError("frozen choices changed during evaluation")
+    for source in provenance.get("checked_inputs", []):
+        if file_hash(source["path"]) != source["sha256"]:
+            raise ValueError("training input changed during package construction")
+    hashes = {
+        str(p.relative_to(output)): file_hash(p)
+        for p in output.rglob("*")
+        if p.is_file() and p.name != "INCOMPLETE.json"
     }
+    receipt = dict(
+        schema="PhotonIDTrainingReceiptV1",
+        status="candidate",
+        mechanical_status="PASS",
+        scientific_acceptance="NOT_REVIEWED",
+        **binding,
+        model_version=provenance.get("model_version", "1"),
+        system=spec.system,
+        features=list(spec.features),
+        training_profile_sha256=digest(profile),
+        provenance=provenance,
+        split=profile["split"],
+        split_counts={p: int(m.sum()) for p, m in masks.items()},
+        split_group_counts={p: len(set(data["groups"][m])) for p, m in masks.items()},
+        weights=profile["weight_fit_population"],
+        hyperparameters=profile["xgboost"],
+        metrics=metrics,
+        files=hashes,
+        reference_comparison="evaluated" if reference else "unbound; not evaluated",
+        isolation_status=(
+            "calibrated"
+            if iso
+            else (
+                "unbound denominator; calibration/plots omitted"
+                if spec.system == "auau"
+                else "fixed pp package in registry"
+            )
+        ),
+        id_package_sha256=hashes["working_points/id.json"],
+        isolation_package_sha256=hashes.get("isolation/selection.json"),
+        isolation_calibration_sha256=hashes.get("isolation/calibration.json"),
+    )
+    import importlib.metadata
 
-
-def split_rows(groups: np.ndarray, spec: dict[str, Any]) -> np.ndarray:
-    """Stable source/event groups; candidate order and file partition do not enter."""
-    seed = int(spec["seed"])
-    test_fraction = float(spec["test_fraction"])
-    validation_fraction = float(spec["validation_fraction"])
-    if not (0 < test_fraction < 1 and 0 <= validation_fraction < 1 - test_fraction):
-        raise ValueError("invalid held-out fractions")
-    def fraction(group):
-        digest = hashlib.sha256(f"photonid-split-v1:{seed}:{group}".encode()).digest()
-        return int.from_bytes(digest[:8], "big") / 2**64
-    draws = np.asarray([fraction(group) for group in groups])
-    return np.where(draws < test_fraction, "test",
-                    np.where(draws < test_fraction + validation_fraction, "validation", "train"))
-
-
-def training_contract(spec: ModelSpec) -> dict[str, Any]:
-    training = dict(spec.training)
-    required = {"status", "recipe_evidence", "label_rule", "et_window_gev", "weighting",
-                "low_et_background_flattening", "split", "xgboost", "weight_fit_population", "heldout_weights"}
-    if required - training.keys() or training.get("status") != "approved" or not training.get("recipe_evidence"):
-        raise ValueError("training recipe is unresolved; bind the reviewed recipe before training")
-    if training["label_rule"] != "source_role_known_truth" or training["weight_fit_population"] != "train_only" or training["heldout_weights"] != "unit":
-        raise ValueError("requested label/weight recipe is not implemented; do not substitute another")
-    if training["split"].get("rule") != "source_event_hash_v1":
-        raise ValueError("training requires source_event_hash_v1 grouping")
-    for key in ("eta_range", "bins", "et_cap"):
-        if key not in training["weighting"]: raise ValueError(f"missing weighting.{key}")
-    thinning = training["low_et_background_flattening"]
-    if "enabled" not in thinning:
-        raise ValueError("background thinning must be explicitly enabled or disabled")
-    if thinning["enabled"] and any(k not in thinning for k in ("et_max_gev", "bins", "seed")):
-        raise ValueError("thinning parameters must be explicit")
-    if not training["xgboost"]: raise ValueError("explicit XGBoost hyperparameters required")
-    return training
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--registry", required=True, type=Path)
-    parser.add_argument("--model", required=True, help="registry entry to train (its features and system)")
-    parser.add_argument("--signal", action="append", required=True, type=Path, help="photon+jet simulation tree; repeatable")
-    parser.add_argument("--background", action="append", required=True, type=Path, help="inclusive-jet simulation tree; repeatable")
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--n-jobs", type=int, default=4)
-    args = parser.parse_args(argv)
-
-    try:
-        from sklearn.metrics import roc_auc_score
-        from xgboost import XGBClassifier
-    except ModuleNotFoundError as exc:
-        raise SystemExit(f"training needs xgboost and scikit-learn ({exc.name} is not installed)") from exc
-    import ROOT
-
-    registry = load_registry(args.registry)
-    if args.model not in registry:
-        raise SystemExit(f"model {args.model!r} is not in {args.registry}")
-    spec = registry[args.model]
-    training = training_contract(spec)
-    params = dict(training["xgboost"])
-
-    parts = [load_rows(p, spec, "signal") for p in args.signal]
-    parts += [load_rows(p, spec, "background") for p in args.background]
-    X = np.concatenate([p["features"] for p in parts])
-    y = np.concatenate([p["label"] for p in parts])
-    et = np.concatenate([p["et"] for p in parts])
-    eta = np.concatenate([p["eta"] for p in parts])
-
-    groups = np.concatenate([p["groups"] for p in parts])
-    keys = [key for part in parts for key in part["keys"]]
-    if len(set(keys)) != len(keys):
-        raise ValueError("duplicate candidate identity across training inputs")
-    low, high = (float(v) for v in training["et_window_gev"])
-    if not (np.isfinite(low) and np.isfinite(high) and low < high):
-        raise ValueError("invalid training window")
-    window = (et >= low) & (et < high)
-    X, y, et, eta, groups = X[window], y[window], et[window], eta[window], groups[window]
-    split = split_rows(groups, training["split"])
-    train, valid, test = split == "train", split == "validation", split == "test"
-    # Fit weighting and thinning on training observations only. Held-out AUC
-    # uses unit weights; this explicit recipe needs separate science approval.
-    keep = np.ones(len(y), dtype=bool)
-    keep[train] = flatten_low_et_background(et[train], y[train], training["low_et_background_flattening"])
-    X, y, et, eta, split = X[keep], y[keep], et[keep], eta[keep], split[keep]
-    train, valid, test = split == "train", split == "validation", split == "test"
-    for name, mask in (("train", train), ("test", test), ("validation", valid)):
-        if (name != "validation" or valid.any()) and len(np.unique(y[mask])) != 2:
-            raise ValueError(f"{name} partition lacks both classes; revise the declared split")
-    weights = np.ones(len(y))
-    weights[train], steps = training_weights(et[train], eta[train], y[train], training["weighting"])
-
-    seed = int(params.pop("random_state", (training.get("split") or {}).get("seed", 42)))
-    if args.output_dir.exists():
-        raise FileExistsError("training output directory must be new")
-    model = XGBClassifier(random_state=seed, n_jobs=args.n_jobs, objective="binary:logistic", **params)
-    eval_set = [(X[valid], y[valid])] if valid.any() else None
-    eval_weights = [weights[valid]] if valid.any() else None
-    model.fit(X[train], y[train], sample_weight=weights[train], eval_set=eval_set,
-              sample_weight_eval_set=eval_weights, verbose=False)
-    scores = model.predict_proba(X)[:, 1]
-    auc = {name: float(roc_auc_score(y[mask], scores[mask], sample_weight=weights[mask]))
-           for name, mask in (("train", train), ("validation", valid), ("test", test)) if mask.any()}
-
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    json_path = args.output_dir / f"{spec.name}.json"
-    tmva_path = args.output_dir / f"{spec.name}.root"
-    model.save_model(str(json_path))
-    booster = model.get_booster()
-    booster.feature_names = [f"f{i}" for i in range(len(spec.features))]
-    ROOT.TMVA.Experimental.SaveXGBoost(model, "myBDT", str(tmva_path), num_inputs=len(spec.features))
-
-    manifest = {
-        "schema": "PhotonIdModelManifestV2",
-        "feature_definition_sha256": feature_identity(spec),
-        "training_contract": training,
-        "model": spec.name,
-        "system": spec.system,
-        "shower_definition": spec.shower_definition,
-        "features": list(spec.features),
-        "ratio_policy": spec.ratio_policy,
-        "score_direction": "higher_is_signal",
-        "tmva_model": {"path": str(tmva_path), "sha256": sha256(tmva_path)},
-        "xgboost_model": {"path": str(json_path), "sha256": sha256(json_path)},
-        "xgboost_params": {**params, "random_state": seed, "objective": "binary:logistic"},
-        "label_rule": {
-            "signal": "signal files: candidate with a Matched PhotonTruthLinks relation to a TruthPhotons row with analysis_signal",
-            "background": "background files: known Matched non-signal or Fake relation; Unknown excluded",
-            "dropped": "cross-role candidates are excluded, never relabelled; no isolation or working point enters",
-        },
-        "weighting_steps": steps,
-        "producer_event_weight_used": False,
-        "low_et_background_flattening": training.get("low_et_background_flattening"),
-        "training_et_window_gev": [low, high],
-        "split": {"rule": "source_event_hash_v1", **(training.get("split") or {}),
-                  "train": int(train.sum()), "validation": int(valid.sum()), "test": int(test.sum())},
-        "samples": [{"role": "signal" if i < len(args.signal) else "background", "path": str(p), "sha256": sha256(p),
-                     "rows_used": int(len(part["label"])), "candidates_total": part["n_total"],
-                     "candidates_complete": part["n_complete"], "candidates_linked_to_signal_truth": part["n_linked"]}
-                    for i, (p, part) in enumerate(zip([*args.signal, *args.background], parts))],
-        "class_counts": {"signal": int((y == 1).sum()), "background": int((y == 0).sum())},
-        "auc": auc,
+    receipt["software_versions"] = {
+        n: importlib.metadata.version(n)
+        for n in (
+            "numpy",
+            "scipy",
+            "pandas",
+            "scikit-learn",
+            "xgboost",
+            "uproot",
+            "matplotlib",
+        )
     }
-    (args.output_dir / f"{spec.name}.manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"[train] wrote {tmva_path} AUC={auc}")
-    print(f"[train] bind model_file and model_sha256={manifest['tmva_model']['sha256']} for {spec.name} in the registry")
-    return 0
+    write_json(output / "TRAINING_RECEIPT.json", receipt)
+    (output / "INCOMPLETE.json").unlink()
+    return receipt
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from frontend import main
+
+    raise SystemExit(main("train", sys.argv[1:]))

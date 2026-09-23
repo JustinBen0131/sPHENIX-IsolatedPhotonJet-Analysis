@@ -125,8 +125,8 @@ def load_registry(path: Path | str) -> dict[str, ModelSpec]:
     for name, spec in raw["models"].items():
         if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name):
             raise ValueError("unsafe model identifier")
-        if spec.get("model_file") is not None and (spec.get("status") != "approved" or not spec.get("binding_evidence")):
-            raise ValueError(f"{name}: model binding requires approval evidence")
+        if spec.get("model_file") is not None and (spec.get("status") not in {"approved", "candidate"} or not spec.get("binding_evidence")):
+            raise ValueError(f"{name}: model binding requires candidate/approval evidence")
         policy = spec.get("ratio_policy", "nan")
         if policy not in RATIO_POLICIES:
             raise ValueError(f"{name}: ratio_policy must be one of {RATIO_POLICIES}")
@@ -164,6 +164,24 @@ def load_registry(path: Path | str) -> dict[str, ModelSpec]:
             training_manifest=None if manifest is None else (path.parent / manifest),
             training=dict(spec.get("training") or {}),
         )
+    for name, model in models.items():
+        if model.bound:
+            row = raw["models"][name]
+            if row.get("expected_artifact_sha256") and row["expected_artifact_sha256"] != model.model_sha256:
+                raise ValueError(f"{name}: frozen reference hash differs")
+            if row.get("feature_schema_sha256") != feature_identity(model):
+                raise ValueError(f"{name}: feature schema binding is missing or changed")
+            if model.training_manifest is None or not row.get("training_receipt_sha256"):
+                raise ValueError(f"{name}: missing training/import receipt binding")
+            if sha256(model.training_manifest) != row["training_receipt_sha256"]:
+                raise ValueError(f"{name}: training/import receipt changed")
+            receipt = json.loads(model.training_manifest.read_text())
+            if receipt.get("model_sha256") != model.model_sha256 or receipt.get("feature_schema_sha256") != feature_identity(model):
+                raise ValueError(f"{name}: training/import receipt belongs to another model or feature schema")
+            if not model.model_file.is_file() or sha256(model.model_file) != model.model_sha256:
+                raise ValueError(f"{name}: model artifact SHA256 mismatch")
+            if model.score_direction != "higher_is_signal":
+                raise ValueError(f"{name}: unsupported score direction")
     return models
 
 

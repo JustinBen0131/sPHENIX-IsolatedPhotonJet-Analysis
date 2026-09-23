@@ -1,0 +1,202 @@
+profile_version: 1
+profiles:
+  canonical_auau_v1:
+    system: auau
+    features:
+    - cluster_Et
+    - cluster_weta_cogx
+    - cluster_wphi_cogx
+    - cluster_weta33_cogx
+    - cluster_wphi33_cogx
+    - vertexz
+    - cluster_Eta
+    - e11_over_e33
+    - cluster_et1
+    - cluster_et2
+    - cluster_et3
+    - cluster_et4
+    - e32_over_e35
+    - centrality
+    shower_definition: H70
+    input_campaign: null
+    input_campaign_sha256: null
+    label_adapter: dominant_prompt_v1
+    label_binding_evidence: null
+    analysis_signal_binding_evidence: null
+    preselection_binding_evidence: null
+    et_window_gev:
+    - 15.0
+    - 35.0
+    domain_binding_evidence: requested prospective 15 <= ET < 35
+    split:
+      rule: physical_event_hash_v1
+      seed: 13
+      train_fraction: 0.8
+      validation_fraction: 0.1
+      test_fraction: 0.1
+    weight_fit_population: train_only
+    weighting:
+      bins: 20
+      eta_range:
+      - -0.7
+      - 0.7
+      et_cap: 800.0
+      class_balance: true
+    low_et_background_flattening: false
+    xgboost: &id001
+      n_estimators: 450
+      max_depth: 4
+      learning_rate: 0.035
+      subsample: 0.85
+      colsample_bytree: 0.85
+      reg_alpha: 5.0
+      reg_lambda: 0.3
+      tree_method: hist
+      grow_policy: lossguide
+      max_bin: 256
+      random_state: 13
+      n_jobs: 2
+    working_points:
+      status: implemented_candidate
+      fit_form: linear
+      axis: centrality
+      non_tight_lower: 0.1
+    isolation:
+      nominal_target: null
+      nonisolated_rule: null
+      binding_evidence: null
+    source_order:
+    - Jet40
+    - Jet30
+    - Jet20
+    - Jet12
+    - Photon20
+    - Photon12
+    feature_binding_evidence: null
+  canonical_pp_v1:
+    system: pp
+    features:
+    - cluster_Et
+    - cluster_weta_cogx
+    - cluster_wphi_cogx
+    - cluster_weta33_cogx
+    - cluster_wphi33_cogx
+    - vertexz
+    - cluster_Eta
+    - e11_over_e33
+    - cluster_et1
+    - cluster_et2
+    - cluster_et3
+    - cluster_et4
+    - e32_over_e35
+    shower_definition: H70
+    input_campaign: null
+    input_campaign_sha256: null
+    label_adapter: dominant_prompt_v1
+    label_binding_evidence: null
+    analysis_signal_binding_evidence: null
+    preselection_binding_evidence: null
+    et_window_gev:
+    - 15.0
+    - 35.0
+    domain_binding_evidence: requested prospective 15 <= ET < 35
+    split:
+      rule: physical_event_hash_v1
+      seed: 13
+      train_fraction: 0.8
+      validation_fraction: 0.1
+      test_fraction: 0.1
+    weight_fit_population: train_only
+    weighting:
+      bins: 20
+      eta_range:
+      - -0.7
+      - 0.7
+      et_cap: 800.0
+      class_balance: true
+    low_et_background_flattening: false
+    xgboost: *id001
+    working_points:
+      status: implemented_candidate
+      fit_form: linear
+      axis: et
+      non_tight_lower: 0.1
+    isolation: null
+    source_order:
+    - Jet40
+    - Jet30
+    - Jet20
+    - Jet12
+    - Jet8
+    - Photon20
+    - Photon10
+    - Photon5
+    feature_binding_evidence: null
+  ppg12_equivalent_v1:
+    system: pp
+    features:
+    - cluster_Et
+    - cluster_weta_cogx
+    - cluster_wphi_cogx
+    - vertexz
+    - cluster_Eta
+    - e11_over_e33
+    - cluster_et1
+    - cluster_et2
+    - cluster_et3
+    - cluster_et4
+    - e32_over_e35
+    shower_definition: H70
+    input_campaign: null
+    input_campaign_sha256: null
+    label_adapter: dominant_prompt_v1
+    label_binding_evidence: null
+    analysis_signal_binding_evidence: null
+    preselection_binding_evidence: null
+    et_window_gev: null
+    domain_binding_evidence: null
+    split:
+      rule: row_stratified_70_10_20
+      seed: 42
+      train_fraction: 0.7
+      validation_fraction: 0.1
+      test_fraction: 0.2
+    weight_fit_population: all_before_split
+    weighting:
+      bins: 20
+      eta_range:
+      - -0.7
+      - 0.7
+      et_cap: 800.0
+      class_balance: true
+    low_et_background_flattening: true
+    xgboost:
+      n_estimators: 750
+      max_depth: 5
+      learning_rate: 0.1
+      subsample: 0.5
+      colsample_bytree: 0.6
+      colsample_bylevel: 1.0
+      reg_alpha: 5.0
+      reg_lambda: 0.3
+      tree_method: hist
+      grow_policy: lossguide
+      max_bin: 256
+      random_state: 42
+      n_jobs: 4
+    working_points:
+      status: implemented_candidate
+      fit_form: linear
+      axis: et
+      non_tight_lower: 0.1
+    isolation: null
+    source_order:
+    - Jet40
+    - Jet30
+    - Jet20
+    - Jet12
+    - Jet8
+    - Photon20
+    - Photon10
+    - Photon5
+    feature_binding_evidence: null

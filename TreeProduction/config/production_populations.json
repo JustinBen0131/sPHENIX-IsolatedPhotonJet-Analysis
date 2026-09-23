@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "campaign": null,
+  "output_root": "../output/trees",
+  "production_config": "tree_production.yaml",
+  "producer_library": null,
+  "lanes": {
+    "pp_data": {"profile": "pp_data", "manifest": null, "manifest_sha256": null},
+    "auau_data": {"profile": "auau_data", "manifest": null, "manifest_sha256": null},
+    "pp_photon_sim": {"profile": "pp_photon_sim", "manifest": null, "manifest_sha256": null},
+    "pp_inclusive_sim": {"profile": "pp_inclusive_sim", "manifest": null, "manifest_sha256": null},
+    "auau_photon_embedded": {"profile": "auau_photon_embedded", "manifest": null, "manifest_sha256": null},
+    "auau_inclusive_embedded": {"profile": "auau_inclusive_embedded", "manifest": null, "manifest_sha256": null}
+  }
+}
