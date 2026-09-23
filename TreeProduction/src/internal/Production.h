@@ -16,6 +16,7 @@
 //
 #include "Types.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -257,6 +258,25 @@ struct Plan
 };
 
 //
+// Shared implementation details for the four Production translation units.
+// The steering macro uses only the six procedural functions below. Keep this
+// section small: each other helper remains local to its owning .cc file.
+namespace detail
+{
+constexpr int kArchivedDoubleInteractionRun = 28;
+constexpr int kDataRunThreshold = 1000;
+constexpr std::size_t kCemcChannelCount = 24576;
+
+[[noreturn]] void fail(const std::string& message);
+std::string trim(const std::string& value);
+std::string lower(std::string value);
+bool validSha256(const std::string& digest);
+std::string fileSha256(const std::string& path);
+std::vector<InputStream> loadInputs(const Job& job, const Reconstruction& reconstruction);
+bool hasInputStream(const Plan& plan, const std::string& name);
+void requireStatus(bool condition, const std::string& reason);
+}  // namespace detail
+
 // The production interface, in the order the macro calls it.
 //
 // Parse the configuration file, resolve one named profile and the physical

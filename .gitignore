@@ -9,3 +9,5 @@ scores/
 *.root
 *.npz
 .pytest_cache/
+TreeProduction/PHOTON_RECONSTRUCTION_THE358_AUDIT.md
+CANONICAL_PLOT_PROVENANCE.md

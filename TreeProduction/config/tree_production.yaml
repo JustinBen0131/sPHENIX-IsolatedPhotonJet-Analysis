@@ -1,23 +1,59 @@
 # =============================================================================
 # TreeProduction/config/tree_production.yaml
 #
-# Reconstruction and storage configuration for the isolated-photon + jet tree
-# producer. One file serves p+p and Au+Au, data and simulation; the profile
-# named at invocation selects the mode.
+# Canonical reconstruction and storage configuration for PhotonJetTree.
 #
-# This file configures what is reconstructed and what is stored. It does not
-# configure identification models, working points, analysis regions, purity,
-# response matrices, unfolding, histogram binning or plotting. Those belong to
-# the downstream stages and to config/measurement.yaml.
+# One file defines every supported DST-to-tree production mode. The profile
+# selected at invocation determines whether the job processes p+p or Au+Au,
+# DATA or simulation, and which reconstruction path is required.
 #
-# Physics algorithms are implemented in C++. This file supplies values and
-# bindings; it never redefines an algorithm.
+# Production flow
 #
-# Per-job values (input files, output file, run, segment, entry range, source
-# digests) are passed to the macro by the job, not written here.
+#   produce_trees.sh
+#       user-facing population command
+#
+#   scripts/produce.py
+#       resolves the reviewed source population and per-job provenance
+#
+#   Fun4All_PhotonJetTree.C
+#       passes one resolved job into Fun4All
+#
+#   production::LoadPlan
+#       combines that job with one profile from this file
+#
+#   Production*.cc
+#       constructs the required reconstruction and input streams
+#
+#   PhotonJetTree
+#       records the canonical model-independent analysis tree
+#
+# This file owns reconstruction and storage configuration only. It does not
+# define photon-ID models, working points, ABCD regions, purity corrections,
+# final recoil selections, response matrices, unfolding, histogram binning,
+# normalization, or plotting. Those decisions belong to PhotonID,
+# TreeToHists, FinalAnalysis, and config/measurement.yaml.
+#
+# Physics algorithms remain implemented in C++. YAML supplies explicit values
+# and bindings; it does not redefine algorithms.
+#
+# Job-specific information such as input lists, output files, run/segment,
+# entry ranges, and source digests is supplied by the production frontend and
+# is intentionally absent from this shared configuration.
+#
+# Unresolved required bindings remain null and must fail closed. Production
+# must never infer a population, payload, release, or calibration from nearby
+# files.
 # =============================================================================
 
 schema_version: 1
+
+
+# -----------------------------------------------------------------------------
+# Tree contract
+#
+# The complete resolved configuration is embedded in every output so the
+# meaning of a tree does not depend on recovering this YAML file later.
+# -----------------------------------------------------------------------------
 
 contract:
   name: PhotonJetTrees
@@ -26,19 +62,35 @@ contract:
   embed_resolved_configuration: true
   fail_closed: true
 
+
+# -----------------------------------------------------------------------------
+# Runtime provenance
+#
+# The software release is part of the declared reconstruction environment.
+# Build- and invocation-specific source/library identities are filled later by
+# the build and production layers.
+# -----------------------------------------------------------------------------
+
 runtime:
   sphenix_release: ana.568
+
   # Filled by the build and invocation layer.
   producer_git_commit: null
   producer_source_sha256: null
   producer_library_sha256: null
   macro_sha256: null
 
+
 # -----------------------------------------------------------------------------
-# Capture policy
+# Event capture policy
+#
+# TreeProduction retains the producer-level event population independently of
+# whether an event contains an analysis photon. This preserves the denominator
+# needed for later efficiency and exposure accounting.
 # -----------------------------------------------------------------------------
 
 capture:
+
   # One event row per event handed to the producer, including events with no
   # photon candidate. The event population is the exposure denominator.
   retain_every_producer_encounter: true
@@ -47,30 +99,46 @@ capture:
   # source identity.
   identity_scope: source
 
+
 # -----------------------------------------------------------------------------
-# Input node names
+# Input node vocabulary
+#
+# These are the canonical node names PhotonJetTree reads. Production*.cc is
+# responsible for creating or exposing the required nodes for the selected
+# profile before the producer executes.
 # -----------------------------------------------------------------------------
 
 nodes:
   event_header: EventHeader
   gl1_packet: GL1Packet
+
   global_vertex_map: GlobalVertexMap
   centrality_info: CentralityInfo
   minimum_bias_info: MinimumBiasInfo
+
   mbd_out: MbdOut
   mbd_pmts: MbdPmtContainer
+
   cemc_towers: TOWERINFO_CALIB_CEMC
   ihcal_towers: TOWERINFO_CALIB_HCALIN
   ohcal_towers: TOWERINFO_CALIB_HCALOUT
+
   cemc_geometry: TOWERGEOM_CEMC
+
   truth_info: G4TruthInfo
   hepmc_event_map: PHHepMCGenEventMap
 
+
 # -----------------------------------------------------------------------------
 # Calorimeter reconstruction
+#
+# Shared reconstruction-level calorimeter settings. System-specific behavior
+# is configured separately in the pp and auau sections below.
 # -----------------------------------------------------------------------------
 
 calorimeter:
+
+  # Electromagnetic calorimeter clustering.
   cluster_builder:
     detector: CEMC
     threshold_energy_gev: 0.070
@@ -78,49 +146,63 @@ calorimeter:
       path: "${CALIBRATIONROOT}/EmcProfile/CEMCprof_Thresh30MeV.root"
 
   tower_status:
+
     # Simulation applies this hot-tower map from the conditions database.
     simulation_hot_map_key: CEMC_hotTowers_status
 
   cemc:
+
     # Data: pin and validate the zero-suppression cross-calibration payload
     # before the CEMC calibrator runs.
     zero_suppression_cross_calibration: true
 
   event_energy:
+
     # Event energy sums admit only towers the calibration marked good. The
     # choice is recorded in every event.
     require_good_towers: true
 
+
 # -----------------------------------------------------------------------------
-# Photon capture
+# Photon reconstruction and capture
+#
+# The capture domain is deliberately broader than the final measurement
+# selection. TreeProduction preserves reconstruction-level photon information;
+# PhotonID and later stages decide how that information is selected.
 # -----------------------------------------------------------------------------
 
 photons:
+
   # Storage domain, not the measurement selection.
   capture_domain:
     min_et_gev: 5.0
     max_et_gev: 40.0
     max_abs_eta: 0.7
+
     # Reconstructed objects (photons and jets) are captured only when the
     # reconstructed vertex is valid and |z| is below this value. The event
     # row is retained either way. Analysis vertex windows are narrower and
     # live in config/measurement.yaml.
     object_vertex_abs_z_max_cm: 60.0
 
+  # Reconstruction input/output nodes used by the photon builder and isolation.
   source_cluster_node: CLUSTERINFO_CEMC
   output_photon_node: PHOTONCLUSTER_CEMC
   topocluster_node: TOPOCLUSTER_ALLCALO
 
   builder:
+
     # Threshold of the upstream photon builder. Kept equal to the storage
     # domain so that no candidate the tree could store is dropped upstream.
     # min_et_gev comes from capture_domain; do not duplicate it here.
-    # The reference production imposed no vertex cut inside the builder; the
-    # producer records the event vertex and leaves any window downstream.
-    use_vertex_cut: false
+
+    # Native reconstruction and storage use the same broad reconstructed-vertex
+    # domain. This is not the narrower downstream analysis vertex selection.
+    use_vertex_cut: true
     vertex_cut_cm: 60.0
 
   shower_shapes:
+
     # Definitions evaluated for every candidate. H = rectangular sums over the
     # full good-tower 7x7 grid, second moments over cluster-owned towers; the
     # number is the tower energy floor in MeV. These are the two definitions
@@ -131,59 +213,88 @@ photons:
     sample_ns: 17.6
 
   isolation:
+
+    # Both commonly used cone radii are retained as measured observables.
+    # Isolated/non-isolated working points are applied later by PhotonID.
     radii: [0.30, 0.40]
+
     truth:
       signal_radius: 0.30
       max_et_gev: 4.0
       self_removal_radius: 0.001
 
+
 # -----------------------------------------------------------------------------
 # p+p reconstruction
+#
+# Defines the p+p realization of shower reconstruction, reconstructed isolation,
+# and the retained jet collections.
 # -----------------------------------------------------------------------------
 
 pp:
+
   shower_shape_tower_min_energy_gev: 0.070
 
   isolation:
+
     # Topological-cluster cone ET minus candidate ET once; the raw tower
     # cones are stored beside it.
     method: topocluster
 
   jets:
+
+    # Raw and JES-corrected reconstructed collections are retained for all three
+    # radii, together with the same-radius truth collections in simulation.
     views:
       - {radius: 0.20, view: pp, raw_node: AntiKt_Tower_r02_RAW, corrected_node: AntiKt_Tower_r02, truth_node: AntiKt_Truth_r02}
       - {radius: 0.30, view: pp, raw_node: AntiKt_Tower_r03_RAW, corrected_node: AntiKt_Tower_r03, truth_node: AntiKt_Truth_r03}
       - {radius: 0.40, view: pp, raw_node: AntiKt_Tower_r04_RAW, corrected_node: AntiKt_Tower_r04, truth_node: AntiKt_Truth_r04}
 
+
 # -----------------------------------------------------------------------------
 # Au+Au reconstruction
+#
+# Au+Au retains the additional state required to reproduce centrality,
+# underlying-event subtraction, CEMC status handling, SUB1 isolation, and both
+# subtracted and unsubtracted jet views.
 # -----------------------------------------------------------------------------
 
 auau:
-  shower_shape_tower_min_energy_gev: 0.0
+
+  # Same H70 reconstruction as pp. H0 is the additional configured view above.
+  # This shower floor never imposes an AuAu isolation constituent energy cut.
+  shower_shape_tower_min_energy_gev: 0.070
 
   isolation:
+
     # Underlying-event subtracted tower cones; the raw cones are stored
     # beside them.
     method: sub1
 
+  # Centrality is reconstructed for Au+Au DATA from explicitly bound run-level
+  # payloads. The native centile remains stored; these coarse edges provide the
+  # production-level analysis-bin vocabulary.
   centrality:
     analysis_bin_edges_percent: [0, 20, 50, 80]
 
     data:
       reconstruct: true
+
       # local: run-bound frozen payloads pinned below or in `runs`.
       # cdb:   the conditions database resolves them.
       source: local
+
       calibration_set: sam_fit_20260913_v1
       calibration_manifest_sha256: 4a11e0e10ae9b82062325c3275679935da2259f4c91f796950a6b5ddd2e1501c
       require_own_run_payload: true
+
       # Resolved per run by the job; the entries below are the defaults the
       # per-run table in `runs` overrides.
       payload_run: null
       divisions: {path: null, sha256: null}
       run_scale: {path: null, sha256: null}
       vertex_scale: {path: null, sha256: null}
+
       # Only the qualified run-68144 fallback is admitted, with pinned
       # qualification evidence.
       fallback_evidence_sha256: null
@@ -197,27 +308,41 @@ auau:
     #     vertex_scale: {path: ..., sha256: ...}
     runs: {}
 
+  # CEMC status must remain tied to the calibration state of the original paired
+  # calorimeter input. Missing historical status may be restored only through an
+  # explicitly authorized and hash-bound recovery payload.
   cemc_status:
+
     # Validate the paired input's tower status against the bad-tower map the
     # original calorimeter file was reconstructed with.
     validate_paired_input_status: true
+
     # Exact original calorimeter file of this job, supplied by the job packet.
     original_calorimeter_input: null
+
     # A missing saved map may be recovered only from a pinned run-specific
     # payload that the job packet supplies.
     allow_missing_status_recovery: false
     recovery_payload: {path: null, sha256: null}
 
+  # Two-pass heavy-ion underlying-event reconstruction. The resulting SUB1/SUB2
+  # state is used by the Au+Au isolation and jet paths and retained sufficiently
+  # for downstream auditing.
   background_subtraction:
     retower_cemc: {enabled: true, fraction_cut: 0.5}
     seed_jets: {radius: 0.20, raw_node: AntiKt_TowerInfo_HIRecoSeedsRaw_r02}
     iteration_1: {output_background_node: TowerInfoBackground_Sub1, seed_type: raw, seed_jet_D: 3}
     iteration_2: {output_background_node: TowerInfoBackground_Sub2, seed_type: subtracted, seed_pt_min_gev: 7.0}
+
     # 0 no flow, 1 psi2 from the calorimeter, 2 from HIJING, 3 from the sEPD.
     # The observed reference-production data packet ran with 0.
     flow_modulation: 0
 
   jets:
+
+    # Retain both unsubtracted and SUB1 reconstructed jet views. The final
+    # measurement may choose one, but TreeProduction preserves both physical
+    # representations so that choice remains downstream.
     views:
       - {radius: 0.20, view: auau_nosub, raw_node: AntiKt_Tower_r02_NoSub_RAW, corrected_node: AntiKt_Tower_r02_NoSub, truth_node: AntiKt_Truth_r02}
       - {radius: 0.30, view: auau_nosub, raw_node: AntiKt_Tower_r03_NoSub_RAW, corrected_node: AntiKt_Tower_r03_NoSub, truth_node: AntiKt_Truth_r03}
@@ -226,15 +351,25 @@ auau:
       - {radius: 0.30, view: auau_sub1, raw_node: AntiKt_Tower_r03_Sub1_RAW, corrected_node: AntiKt_Tower_r03_Sub1, truth_node: AntiKt_Truth_r03}
       - {radius: 0.40, view: auau_sub1, raw_node: AntiKt_Tower_r04_Sub1_RAW, corrected_node: AntiKt_Tower_r04_Sub1, truth_node: AntiKt_Truth_r04}
 
+
 # -----------------------------------------------------------------------------
-# Jet capture and energy scale
+# Jet capture, calibration, and truth matching
+#
+# TreeProduction retains the broad reconstructed jet population. Recoil pT,
+# eta, and delta-phi requirements are measurement selections and remain
+# downstream.
+#
+# JES is applied once by the reconstruction layer. PhotonJetTree records both
+# the raw and corrected jet quantities together with the calibration identity.
 # -----------------------------------------------------------------------------
 
 jets:
+
   # Every finite nonnegative calibrated jet is retained; cuts are downstream.
 
   calibration:
     enabled: true
+
     # Legacy method without the electromagnetic-fraction calibration, applied
     # once from the raw collection. The common p+p v6 payload is used for
     # both systems; Au+Au inputs are already underlying-event subtracted.
@@ -242,15 +377,31 @@ jets:
     use_em_fraction_calibration: false
     expected_payload_sha256: 76a8788fdb4e0b3859d01361f884e295ea609bb8c1cc188105389214db2de27d
 
+  # Same-radius reconstructed/truth jet candidates are considered within this
+  # geometric distance before deterministic one-to-one assignment.
   matching:
     max_delta_r: 0.30
 
+
 # -----------------------------------------------------------------------------
-# Production profiles. The invocation selects exactly one.
+# Production profiles
+#
+# The invocation selects exactly one profile. Profiles describe production mode,
+# not final analysis selection:
+#
+#   system             p+p or Au+Au
+#   data_kind          DATA or simulation
+#   simulation_role    photon+jet, inclusive-jet, or none
+#   input_mode         reconstructed DST or archived Geant4-only input
+#   cdb context        conditions environment required by that mode
+#   truth_jets_mode    read, build, automatically resolve, or none
+#
+# Profile-specific reconstruction requirements are declared only where needed.
 # -----------------------------------------------------------------------------
 
 profiles:
 
+  # p+p DATA
   pp_data:
     system: pp
     data_kind: data
@@ -260,6 +411,8 @@ profiles:
     cdb_global_tag: null  # requires exact reviewed release/run binding
     truth_jets_mode: none
 
+
+  # p+p photon+jet simulation
   pp_photon_sim:
     system: pp
     data_kind: simulation
@@ -268,12 +421,18 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: null  # requires exact reviewed release/run binding
     truth_jets_mode: auto
+
+    # Producer-side simulated-vertex reweighting. Cross-section normalization,
+    # source ownership/stitching, SI/DI composition and luminosity remain
+    # downstream.
     vertex_reweighting:
       enabled: true
       file: null  # bind reviewed payload and SHA256
       sha256: null
       histogram: h_w_iterative
 
+
+  # p+p inclusive-jet simulation
   pp_inclusive_sim:
     system: pp
     data_kind: simulation
@@ -282,12 +441,19 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: null  # requires exact reviewed release/run binding
     truth_jets_mode: auto
+
     vertex_reweighting:
       enabled: true
       file: null  # bind reviewed payload and SHA256
       sha256: null
       histogram: h_w_iterative
 
+
+  # Archived p+p photon+jet double-interaction simulation
+  #
+  # These Geant4-only inputs depend on the original random-number consumption
+  # sequence. The archived donor is reproduced by replaying the exact FIFO seed
+  # contract rather than choosing a new production seed.
   pp_photon_di:
     system: pp
     data_kind: simulation
@@ -297,12 +463,15 @@ profiles:
     cdb_global_tag: MDC2
     cdb_timestamp: 28
     truth_jets_mode: dst
+
     historical_rng_contract:
       algorithm: phrandomseed_fifo_replay_v2
       seed_sequence: [2991264730, 4256268992, 2394322166, 874466025, 2240380304]
       expected_pedestal_sequence: 534
       forbid_reco_consts_random_seed: true
 
+
+  # Archived p+p inclusive-jet double-interaction simulation
   pp_inclusive_di:
     system: pp
     data_kind: simulation
@@ -312,12 +481,15 @@ profiles:
     cdb_global_tag: MDC2
     cdb_timestamp: 28
     truth_jets_mode: dst
+
     historical_rng_contract:
       algorithm: phrandomseed_fifo_replay_v2
       seed_sequence: [2991264730, 4256268992, 2394322166, 874466025, 2240380304]
       expected_pedestal_sequence: 534
       forbid_reco_consts_random_seed: true
 
+
+  # Au+Au DATA
   auau_data:
     system: auau
     data_kind: data
@@ -329,6 +501,8 @@ profiles:
     reconstruct_centrality: true
     require_minimum_bias_classifier: true
 
+
+  # Embedded Au+Au photon+jet simulation
   auau_photon_embedded:
     system: auau
     data_kind: simulation
@@ -337,8 +511,11 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: null  # requires exact reviewed release/run binding
     truth_jets_mode: auto
+
     require_embedded_minimum_bias: false  # record observation; no producer selection
 
+
+  # Embedded Au+Au inclusive-jet simulation
   auau_inclusive_embedded:
     system: auau
     data_kind: simulation
@@ -347,13 +524,29 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: null  # requires exact reviewed release/run binding
     truth_jets_mode: dst
+
     require_embedded_minimum_bias: false  # record observation; no producer selection
 
+
 # -----------------------------------------------------------------------------
-# Output tables
+# Optional high-volume witness tables
 #
-# The mandatory tables are always written. These switches govern the large
-# witness tables whose final disposition is a mapping-ledger decision.
+# Mandatory canonical tables are always written. These switches control large
+# reconstruction-level witness tables whose permanent disposition remains a
+# THE358 -> THE352 field-mapping decision.
+#
+# They remain enabled until equivalence work demonstrates that dropping them
+# would not remove information needed to reconstruct downstream quantities:
+#
+#   PhotonCells
+#     cell-level calorimeter evidence for reconstructed photon showers
+#
+#   IsolationConstituents
+#     individual objects contributing to reconstructed isolation cones
+#
+#   PhotonJetPairs
+#     explicit photon-jet pair witnesses; potentially derivable later from the
+#     retained photon and jet collections once exact equivalence is established
 # -----------------------------------------------------------------------------
 
 output:

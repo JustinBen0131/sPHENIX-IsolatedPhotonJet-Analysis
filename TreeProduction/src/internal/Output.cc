@@ -1,51 +1,98 @@
-//
-// Output.cc
-//
-// The ROOT output of the producer.
-//
-// Owns
-//   opening the file and booking every table
-//   the file-level provenance and the completion metadata
-//   copying finished records into the branch buffers and filling
-//
-// Does not own
-//   any scientific quantity. Nothing is computed here for the first time;
-//   every value written was measured or derived by the capture step that
-//   owns it.
-//
-// Layout
-//   One TTree per record type, flat leaves, one row per record. Relations are
-//   by 128-bit identity, stored as two unsigned 64-bit leaves named <x>_hi
-//   and <x>_lo. Enumerators are written as their persisted integer values.
-//   Physical observables are double. Nothing is written as a plausible
-//   default in place of a missing measurement.
-//
-// Tables
-//   Sources                one row per input source, written at End
-//   UpstreamRejectedEvents events reconstruction stopped before this module
-//   Events                 one row per retained event
-//   Photons                reconstructed photon candidates
-//   PhotonShowerViews      one row per candidate per shower definition
-//   PhotonCells            calorimeter cells around each candidate
-//   Isolation              one row per candidate per cone per method
-//   IsolationConstituents  objects entering the largest cone
-//   Jets                   reconstructed jets, every view and radius
-//   PhotonJetPairs         photon and jet pairs of one event
-//   TruthVertices          Geant4 vertex census
-//   TruthPhotons           embedded primary photons
-//   TruthJets              truth jets
-//   PhotonTruthLinks       reconstructed photon to truth photon relations
-//   JetTruthLinks          reconstructed jet to truth jet relations
-//   WeightComponents       producer weight factors
-//   TriggerScalers         run-length scaler snapshots
-//   TriggerRunInfo         run-level trigger configuration
-//
-// Metadata
-//   A TObjString named "metadata" holding the production provenance, one
-//   "key=value" per line, is written at Init. A second, "completion", is
-//   written at End with completion_status "complete" or "aborted" and the
-//   final counts. A file without "completion" was never finished.
-//
+/**
+ * @file Output.cc
+ * @brief ROOT serialization, provenance, and completion of PhotonJetTree output.
+ *
+ * This file is the persistence boundary of TreeProduction. It opens the ROOT file, books the canonical tables, copies completed records into ROOT branch
+ * buffers, writes provenance, and certifies successful completion.
+ *
+ * Output.cc does not define physics. Every scientific value written here has already been measured or derived by the capture code that owns it. This layer
+ * only preserves those records and their relationships on disk.
+ *
+ * Data model
+ * ----------
+ * The output is relational:
+ *
+ *   - one TTree per record type;
+ *   - one row per record;
+ *   - flat scalar/vector leaves;
+ *   - relations carried by stable 128-bit identities stored as <name>_hi and
+ *     <name>_lo uint64 leaves;
+ *   - persisted enums written using their fixed integer representation;
+ *   - physical observables stored as double;
+ *   - missing measurements preserved through their declared NaN/state
+ *     semantics rather than replaced with plausible defaults.
+ *
+ * Canonical tables
+ * ----------------
+ *   Sources
+ *       One row describing the physical input source and final exposure counts.
+ *
+ *   UpstreamRejectedEvents
+ *       Input events rejected by reconstruction before PhotonJetTree ran.
+ *
+ *   Events
+ *       One row for every producer encounter retained by TreeProduction.
+ *
+ *   Photons
+ *       Reconstructed photon candidates and candidate-level witnesses.
+ *
+ *   PhotonShowerViews
+ *       One row per photon and stored shower-shape definition.
+ *
+ *   PhotonCells
+ *       Calorimeter-cell witnesses retained around photon candidates.
+ *
+ *   Isolation
+ *       One row per photon, cone radius, and reconstructed isolation method.
+ *
+ *   IsolationConstituents
+ *       Constituents retained for reconstruction-level isolation auditing.
+ *
+ *   Jets
+ *       Reconstructed jets across the configured view/radius collections.
+ *
+ *   PhotonJetPairs
+ *       Stored relationships between reconstructed photons and jets.
+ *
+ *   TruthVertices
+ *       Geant4 truth-vertex census.
+ *
+ *   TruthPhotons
+ *       Retained primary truth photons and their truth-level properties.
+ *
+ *   TruthJets
+ *       Retained truth-jet collections.
+ *
+ *   PhotonTruthLinks
+ *       Reconstructed-photon to truth-photon associations.
+ *
+ *   JetTruthLinks
+ *       Reconstructed-jet to truth-jet associations.
+ *
+ *   WeightComponents
+ *       Producer-owned event-weight components and their validity.
+ *
+ *   TriggerScalers
+ *       Cumulative trigger-scaler snapshots over source-entry intervals.
+ *
+ *   TriggerRunInfo
+ *       Run-level trigger names, prescales, and scaler totals.
+ *
+ * File metadata
+ * -------------
+ * "metadata"
+ *     Written during initialization. Contains the production mode, source
+ *     identity, software/configuration hashes, calibration bindings, storage
+ *     policy, and other file-level provenance as key=value records.
+ *
+ * "configuration"
+ *     The exact resolved TreeProduction configuration bytes used for the job.
+ *
+ * "completion"
+ *     Written only during finalization. Records completion_status and terminal
+ *     source/accounting counts. A file without this object was never finalized
+ *     and must not be treated as a completed production product.
+ */
 #include "../PhotonJetTree.h"
 
 #include <TFile.h>
@@ -60,12 +107,21 @@
 
 namespace
 {
-
-// ---- branch helpers ------------------------------------------------------------
+// ============================================================================
+// ROOT branch helpers
 //
-// Records hold std::string, std::vector and fixed-width scalar members. Each
-// is bound with a leaf type that names its width, so the on-disk layout does
-// not depend on the compiler's idea of an enum or a bool.
+// These helpers are the only place where in-memory C++ types are translated
+// into ROOT branch representations. Fixed-width scalars and persisted enums are
+// given explicit leaf types so the file schema does not depend on compiler
+// choices. Strings and vectors use ROOT's object-branch interface directly.
+//
+// Identity values are always serialized as two uint64 leaves:
+//
+//   <name>_hi
+//   <name>_lo
+//
+// Together they preserve the 128-bit relational key used throughout the file.
+// ============================================================================
 
 void branchIdentity(TTree* tree, const std::string& name, photonjet::Identity& id)
 {
@@ -139,6 +195,13 @@ void branchVector(TTree* tree, const std::string& name, std::vector<T>& value)
   tree->Branch(name.c_str(), &value);
 }
 
+
+/**
+ * Create one TTree owned by the output file.
+ *
+ * All canonical tables are booked through this helper so file ownership is
+ * explicit and uniform.
+ */
 TTree* bookTree(TFile* file, const char* name, const char* title)
 {
   file->cd();
@@ -147,11 +210,18 @@ TTree* bookTree(TFile* file, const char* name, const char* title)
   return tree;
 }
 
+
+/**
+ * Fill one already-prepared row and promote ROOT write failure to a producer
+ * error. Serialization failure must never look like an ordinary missing row.
+ */
 void fillChecked(TTree* tree)
 {
   if (!tree || tree->Fill() < 0) throw std::runtime_error("ROOT TTree fill failed");
 }
 
+
+// Metadata objects use a deliberately simple, human-readable key=value format.
 void appendLine(std::ostringstream& out, const std::string& key, const std::string& value)
 {
   out << key << '=' << value << '\n';
@@ -165,9 +235,18 @@ void appendLine(std::ostringstream& out, const std::string& key, const T& value)
 
 }  // namespace
 
-//
-// Init: open, book, write provenance
-//
+
+// ============================================================================
+// Output initialization
+// ============================================================================
+
+/**
+ * Create the output product and establish its schema before event processing.
+ *
+ * CREATE mode deliberately refuses to overwrite an existing ROOT file. Once
+ * the file exists, all canonical TTrees are booked and immutable file-level
+ * provenance is written before the producer reports itself ready.
+ */
 void PhotonJetTree::initializeOutput()
 {
   if (m_config.outputFile.empty())
@@ -176,6 +255,7 @@ void PhotonJetTree::initializeOutput()
   }
 
   m_outputFile = TFile::Open(m_config.outputFile.c_str(), "CREATE");
+
   if (!m_outputFile || m_outputFile->IsZombie())
   {
     throw std::runtime_error("cannot create output file '" + m_config.outputFile + "'");
@@ -183,13 +263,29 @@ void PhotonJetTree::initializeOutput()
 
   bookTrees();
   writeFileMetadata();
-
   m_outputReady = true;
 }
 
+
+// ============================================================================
+// Canonical ROOT schema
+//
+// Each block below binds one record type to one relational TTree. The branch
+// definitions are intentionally explicit: this function is the readable
+// physical schema of the produced ROOT file.
+//
+// Object tables carry stable foreign-key identities rather than relying on
+// entry ordering between TTrees.
+// ============================================================================
+
 void PhotonJetTree::bookTrees()
 {
-  // ---- Sources ---------------------------------------------------------------------
+  // ==========================================================================
+  // Sources
+  //
+  // One terminal row for the physical source processed by this invocation.
+  // Stores source provenance, source range, and final exposure accounting.
+  // ==========================================================================
 
   m_sourceTree = bookTree(m_outputFile, "Sources", "input sources and exposure accounting");
   {
@@ -214,7 +310,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "completed", r.completed);
   }
 
-  // ---- UpstreamRejectedEvents ----------------------------------------------------
+  // ==========================================================================
+  // UpstreamRejectedEvents
+  //
+  // Physical input events observed before reconstruction but prevented from
+  // reaching PhotonJetTree::process_event(). These rows preserve the difference
+  // between input exposure and producer encounters.
+  // ==========================================================================
 
   m_upstreamRejectedTree = bookTree(m_outputFile, "UpstreamRejectedEvents",
                                     "events stopped by reconstruction before this module");
@@ -227,7 +329,13 @@ void PhotonJetTree::bookTrees()
     branchInt64(t, "source_entry", r.sourceEntry);
   }
 
-  // ---- Events ----------------------------------------------------------------------
+  // ==========================================================================
+  // Events
+  //
+  // One row per producer encounter. This table is the event-level join point
+  // for reconstructed objects, truth objects, weights, and event-quality
+  // witnesses. Zero-photon and zero-jet events remain ordinary event rows.
+  // ==========================================================================
 
   m_eventTree = bookTree(m_outputFile, "Events", "retained events");
   {
@@ -243,7 +351,6 @@ void PhotonJetTree::bookTrees()
     branchUInt64(t, "producer_event_ordinal", r.producerEventOrdinal);
     branchInt64(t, "physical_event_sequence", r.physicalEventSequence);
     branchBool(t, "physical_event_sequence_valid", r.physicalEventSequenceValid);
-
     branchUInt64(t, "trigger_input_bits", r.triggerInputBits);
     branchUInt64(t, "trigger_live_bits", r.triggerLiveBits);
     branchUInt64(t, "trigger_scaled_bits", r.triggerScaledBits);
@@ -254,14 +361,12 @@ void PhotonJetTree::bookTrees()
     branchUInt32(t, "trigger_decisions_available", r.triggerDecisionsAvailable);
     branchBool(t, "trigger_packet_valid", r.triggerPacketValid);
     branchInt64(t, "trigger_scaler_snapshot_id", r.triggerScalerSnapshotId);
-
     branchDouble(t, "reco_vertex_x", r.recoVertexX);
     branchDouble(t, "reco_vertex_y", r.recoVertexY);
     branchDouble(t, "reco_vertex_z", r.recoVertexZ);
     branchBool(t, "reco_vertex_valid", r.recoVertexValid);
     branchInt32(t, "reco_vertex_source", r.recoVertexSource);
     branchBool(t, "reco_object_vertex_in_domain", r.recoObjectVertexInDomain);
-
     branchDouble(t, "mbd_t0_ns", r.mbdT0Ns);
     branchDouble(t, "mbd_south_time_ns", r.mbdSouthTimeNs);
     branchDouble(t, "mbd_north_time_ns", r.mbdNorthTimeNs);
@@ -275,7 +380,6 @@ void PhotonJetTree::bookTrees()
     branchVector(t, "mbd_pmt_charge", r.mbdPmtCharge);
     branchVector(t, "mbd_pmt_time_ns", r.mbdPmtTimeNs);
     branchVector(t, "mbd_pmt_valid", r.mbdPmtValid);
-
     branchBool(t, "centrality_applicable", r.centralityApplicable);
     branchEnum32(t, "minimum_bias_decision", r.minimumBiasDecision);
     branchDouble(t, "centrality_selected_charge", r.centralitySelectedCharge);
@@ -285,7 +389,6 @@ void PhotonJetTree::bookTrees()
     branchInt32(t, "centrality_bin", r.centralityBin);
     branchDouble(t, "centrality_percent", r.centralityPercent);
     branchBool(t, "centrality_valid", r.centralityValid);
-
     branchDouble(t, "cemc_energy", r.cemcEnergy);
     branchDouble(t, "ihcal_energy", r.ihcalEnergy);
     branchDouble(t, "ohcal_energy", r.ohcalEnergy);
@@ -312,7 +415,6 @@ void PhotonJetTree::bookTrees()
     branchUInt64Array(t, "calo_bad_quality_tower_count", r.caloBadQualityTowerCount);
     branchUInt64Array(t, "calo_null_tower_count", r.caloNullTowerCount);
     branchUInt64Array(t, "calo_non_finite_tower_count", r.caloNonFiniteTowerCount);
-
     branchEnum32(t, "truth_vertex_capture_state", r.truthVertexCaptureState);
     branchInt32(t, "truth_primary_vertex_id", r.truthPrimaryVertexId);
     branchDouble(t, "truth_hard_vertex_z", r.truthHardVertexZ);
@@ -320,7 +422,6 @@ void PhotonJetTree::bookTrees()
     branchDouble(t, "truth_minimum_bias_vertex_z", r.truthMinimumBiasVertexZ);
     branchBool(t, "truth_minimum_bias_vertex_valid", r.truthMinimumBiasVertexValid);
     branchEnum32(t, "embedded_minimum_bias", r.embeddedMinimumBias);
-
     branchEnum32(t, "truth_photon_capture_state", r.truthPhotonCaptureState);
     branchUInt32(t, "truth_photon_embedded_primary_count", r.truthPhotonEmbeddedPrimaryCount);
     branchUInt32(t, "truth_photon_written_count", r.truthPhotonWrittenCount);
@@ -334,13 +435,10 @@ void PhotonJetTree::bookTrees()
     branchEnum32(t, "truth_jet_capture_state", r.truthJetCaptureState);
     branchVector(t, "truth_jet_radius_code", r.truthJetRadiusCode);
     branchVector(t, "truth_jet_container_valid", r.truthJetContainerValid);
-
     branchEnum32(t, "reco_photon_capture_state", r.recoPhotonCaptureState);
     branchUInt32(t, "reco_photon_unclassifiable_count", r.recoPhotonUnclassifiableCount);
-
     branchDouble(t, "event_weight", r.eventWeight);
     branchBool(t, "event_weight_valid", r.eventWeightValid);
-
     branchUInt32(t, "photon_count", r.photonCount);
     branchUInt32(t, "jet_count", r.jetCount);
     branchUInt32(t, "photon_jet_pair_count", r.photonJetPairCount);
@@ -349,7 +447,13 @@ void PhotonJetTree::bookTrees()
     branchInt32(t, "terminal_status", r.terminalStatus);
   }
 
-  // ---- Photons -------------------------------------------------------------------
+  // ==========================================================================
+  // Photons
+  //
+  // One row per retained reconstructed photon candidate. Detailed shower views,
+  // cells, and isolation are normalized into their own tables rather than
+  // duplicating variable-sized payloads here.
+  // ==========================================================================
 
   m_photonTree = bookTree(m_outputFile, "Photons", "reconstructed photon candidates");
   {
@@ -365,7 +469,6 @@ void PhotonJetTree::bookTrees()
     branchDouble(t, "phi", r.phi);
     branchBool(t, "kinematics_finite", r.kinematicsFinite);
     branchDouble(t, "producer_vertex_z", r.producerVertexZ);
-
     branchDouble(t, "timing_mean_time_samples", r.timing.meanTimeSamples);
     branchDouble(t, "timing_energy_weighted_numerator", r.timing.energyWeightedNumerator);
     branchDouble(t, "timing_energy_denominator", r.timing.energyDenominator);
@@ -373,7 +476,6 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "timing_finite", r.timing.finite);
     branchBool(t, "timing_valid", r.timing.valid);
     branchDouble(t, "timing_ns", r.timing.timeNs);
-
     branchEnum32(t, "dominant_truth_state", r.dominantTruth.state);
     branchEnum32(t, "dominant_truth_evaluator", r.dominantTruth.evaluator);
     branchInt32(t, "dominant_truth_track_id", r.dominantTruth.trackId);
@@ -384,15 +486,23 @@ void PhotonJetTree::bookTrees()
     branchDouble(t, "dominant_truth_energy_contribution", r.dominantTruth.energyContribution);
   }
 
-  // ---- PhotonShowerViews ---------------------------------------------------------
+  // ==========================================================================
+  // PhotonShowerViews
+  //
+  // One row per photon and shower-definition variant. Event and photon
+  // identities are carried alongside each view so consumers join explicitly
+  // rather than relying on row ordering.
+  // ==========================================================================
 
   m_showerShapeTree = bookTree(m_outputFile, "PhotonShowerViews", "shower-shape definitions per candidate");
   {
     TTree* t = m_showerShapeTree;
+
     // The row carries the owning identities beside the record so the table
     // joins without a parallel index.
     branchIdentity(t, "event", m_photonRow.eventId);
     branchIdentity(t, "photon", m_photonRow.photonId);
+
     ShowerShapeRecord& r = m_showerShapeRow;
     branchString(t, "definition", r.definitionName);
     branchDouble(t, "energy_floor_gev", r.energyFloorGeV);
@@ -428,7 +538,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "valid", r.valid);
   }
 
-  // ---- PhotonCells ---------------------------------------------------------------
+  // ==========================================================================
+  // PhotonCells
+  //
+  // Calorimeter-cell witnesses around retained photon candidates. These rows
+  // preserve the low-level inputs needed to audit or reproduce shower-derived
+  // quantities without embedding them repeatedly in the photon table.
+  // ==========================================================================
 
   m_photonCellTree = bookTree(m_outputFile, "PhotonCells", "calorimeter cells around each candidate");
   {
@@ -452,7 +568,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "finite", r.finite);
   }
 
-  // ---- Isolation -----------------------------------------------------------------
+  // ==========================================================================
+  // Isolation
+  //
+  // Reconstructed isolation measurements keyed to the photon, cone radius, and
+  // method. These are observables only; isolated/non-isolated decisions are
+  // deliberately downstream.
+  // ==========================================================================
 
   m_isolationTree = bookTree(m_outputFile, "Isolation", "isolation cones per candidate");
   {
@@ -472,7 +594,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "valid", r.valid);
   }
 
-  // ---- IsolationConstituents -----------------------------------------------------
+  // ==========================================================================
+  // IsolationConstituents
+  //
+  // Optional constituent-level witnesses underlying reconstructed isolation.
+  // They preserve source, geometry, energy/subtraction state, masking, and
+  // candidate-removal information for later auditing or recomputation.
+  // ==========================================================================
 
   m_isolationConstituentTree = bookTree(m_outputFile, "IsolationConstituents", "objects entering isolation cones");
   {
@@ -497,7 +625,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "candidate_removed", r.candidateRemoved);
   }
 
-  // ---- Jets ------------------------------------------------------------------------
+  // ==========================================================================
+  // Jets
+  //
+  // Reconstructed jets from every configured view/radius. Raw and corrected
+  // momenta, collection identities, area, ordering, and calibration witnesses
+  // are stored together in each row.
+  // ==========================================================================
 
   m_jetTree = bookTree(m_outputFile, "Jets", "reconstructed jets");
   {
@@ -522,7 +656,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "calibration_valid", r.calibrationValid);
   }
 
-  // ---- PhotonJetPairs ------------------------------------------------------------
+  // ==========================================================================
+  // PhotonJetPairs
+  //
+  // Explicit reconstructed photon-jet relations. The table stores the
+  // relationship observables and recoil witness without imposing the final
+  // recoil selection on the underlying object inventory.
+  // ==========================================================================
 
   m_photonJetPairTree = bookTree(m_outputFile, "PhotonJetPairs", "photon and jet pairs");
   {
@@ -541,7 +681,11 @@ void PhotonJetTree::bookTrees()
     branchUInt32(t, "jet_rank", r.jetRank);
   }
 
-  // ---- TruthVertices -------------------------------------------------------------
+  // ==========================================================================
+  // TruthVertices
+  //
+  // Geant4 truth-vertex census, including embedding identity and validity.
+  // ==========================================================================
 
   m_truthVertexTree = bookTree(m_outputFile, "TruthVertices", "Geant4 vertex census");
   {
@@ -555,7 +699,12 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "valid", r.valid);
   }
 
-  // ---- TruthPhotons --------------------------------------------------------------
+  // ==========================================================================
+  // TruthPhotons
+  //
+  // Retained primary truth photons with generator/embedding provenance,
+  // classification, truth isolation, and analysis-signal witness.
+  // ==========================================================================
 
   m_truthPhotonTree = bookTree(m_outputFile, "TruthPhotons", "embedded primary photons");
   {
@@ -582,7 +731,12 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "signal_source_role", r.signalSourceRole);
   }
 
-  // ---- TruthJets -----------------------------------------------------------------
+  // ==========================================================================
+  // TruthJets
+  //
+  // Truth jets remain independent of reconstructed JES. Radius and native key
+  // identify the originating truth collection/object.
+  // ==========================================================================
 
   m_truthJetTree = bookTree(m_outputFile, "TruthJets", "truth jets");
   {
@@ -598,7 +752,12 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "container_valid", r.containerValid);
   }
 
-  // ---- PhotonTruthLinks ----------------------------------------------------------
+  // ==========================================================================
+  // PhotonTruthLinks
+  //
+  // Explicit reco-photon <-> truth-photon relations. Relation state and
+  // association witnesses remain separate from the two object tables.
+  // ==========================================================================
 
   m_photonTruthLinkTree = bookTree(m_outputFile, "PhotonTruthLinks", "reconstructed photon to truth photon relations");
   {
@@ -613,7 +772,12 @@ void PhotonJetTree::bookTrees()
     branchDouble(t, "delta_r", r.deltaR);
   }
 
-  // ---- JetTruthLinks -------------------------------------------------------------
+  // ==========================================================================
+  // JetTruthLinks
+  //
+  // Explicit reco-jet <-> truth-jet relations, retaining jet view/radius and
+  // whether a candidate relation was selected by the matching algorithm.
+  // ==========================================================================
 
   m_jetTruthLinkTree = bookTree(m_outputFile, "JetTruthLinks", "reconstructed jet to truth jet relations");
   {
@@ -630,7 +794,12 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "selected_match", r.selectedMatch);
   }
 
-  // ---- WeightComponents ----------------------------------------------------------
+  // ==========================================================================
+  // WeightComponents
+  //
+  // Producer-owned event-weight factors and their validity/application count.
+  // Downstream sample stitching and final normalization are not invented here.
+  // ==========================================================================
 
   m_weightTree = bookTree(m_outputFile, "WeightComponents", "producer weight factors");
   {
@@ -649,7 +818,12 @@ void PhotonJetTree::bookTrees()
     branchInt32(t, "application_count", r.applicationCount);
   }
 
-  // ---- TriggerScalers ------------------------------------------------------------
+  // ==========================================================================
+  // TriggerScalers
+  //
+  // Run-length-like snapshots of cumulative raw/live/scaled GL1 counters.
+  // Source-entry and bunch ranges identify the interval represented by a row.
+  // ==========================================================================
 
   m_triggerScalerTree = bookTree(m_outputFile, "TriggerScalers", "cumulative trigger scaler snapshots");
   {
@@ -669,7 +843,13 @@ void PhotonJetTree::bookTrees()
     branchBool(t, "discontinuity", r.discontinuity);
   }
 
-  // ---- TriggerRunInfo ------------------------------------------------------------
+  // ==========================================================================
+  // TriggerRunInfo
+  //
+  // One row per trigger bit containing run-level trigger names, prescales, and
+  // cumulative counts. Missing/unsupported configuration is represented by row
+  // validity rather than by silently omitting the table.
+  // ==========================================================================
 
   m_triggerRunInfoTree = bookTree(m_outputFile, "TriggerRunInfo", "run-level trigger configuration");
   {
@@ -688,18 +868,41 @@ void PhotonJetTree::bookTrees()
   }
 }
 
-//
-// Provenance
-//
+
+// ============================================================================
+// File-level provenance
+// ============================================================================
+
+/**
+ * Persist everything needed to identify how this ROOT product was produced.
+ *
+ * "metadata" is intentionally compact and human-readable. It binds production
+ * mode, source identity, software/configuration hashes, calibration payloads,
+ * storage policy, and collection definitions.
+ *
+ * The resolved configuration itself is written separately as "configuration"
+ * so the output remains self-describing without reconstructing settings from
+ * the metadata summary.
+ */
 void PhotonJetTree::writeFileMetadata()
 {
   std::ostringstream text;
+
+  // --------------------------------------------------------------------------
+  // Product contract and production mode
+  // --------------------------------------------------------------------------
+
   appendLine(text, "contract", std::string("PhotonJetTrees"));
   appendLine(text, "schema_version", 1);
   appendLine(text, "collision_system", static_cast<int>(m_config.system));
   appendLine(text, "data_kind", static_cast<int>(m_config.dataKind));
   appendLine(text, "simulation_role", static_cast<int>(m_config.simulationRole));
   appendLine(text, "input_mode", static_cast<int>(m_config.inputMode));
+
+  // --------------------------------------------------------------------------
+  // Physical source binding
+  // --------------------------------------------------------------------------
+
   appendLine(text, "dataset", m_config.source.dataset);
   appendLine(text, "sample", m_config.source.sample);
   appendLine(text, "period", m_config.source.period);
@@ -712,6 +915,11 @@ void PhotonJetTree::writeFileMetadata()
   appendLine(text, "input_uri_sha256", m_config.source.inputUriSha256);
   appendLine(text, "input_file_sha256", m_config.source.inputFileSha256);
   appendLine(text, "source_manifest_sha256", m_config.source.sourceManifestSha256);
+
+  // --------------------------------------------------------------------------
+  // Software and configuration provenance
+  // --------------------------------------------------------------------------
+
   appendLine(text, "production_tag", m_config.provenance.productionTag);
   appendLine(text, "software_release", m_config.provenance.softwareRelease);
   appendLine(text, "producer_git_commit", m_config.provenance.producerGitCommit);
@@ -720,6 +928,11 @@ void PhotonJetTree::writeFileMetadata()
   appendLine(text, "macro_sha256", m_config.provenance.macroSha256);
   appendLine(text, "configuration_sha256", m_config.provenance.configurationSha256);
   appendLine(text, "calibration_manifest_sha256", m_config.provenance.calibrationManifestSha256);
+
+  // --------------------------------------------------------------------------
+  // Calibration and producer-owned weighting bindings
+  // --------------------------------------------------------------------------
+
   appendLine(text, "jet_energy_scale_payload", m_config.jets.energyScalePayloadPath);
   appendLine(text, "jet_energy_scale_payload_sha256", m_config.jets.energyScalePayloadSha256);
   appendLine(text, "jet_energy_scale_uses_em_fraction", m_config.jets.energyScaleUsesEmFraction ? 1 : 0);
@@ -727,6 +940,11 @@ void PhotonJetTree::writeFileMetadata()
   appendLine(text, "vertex_reweight_applied", m_config.weights.applyVertexReweight ? 1 : 0);
   appendLine(text, "vertex_reweight_file_sha256", m_config.weights.vertexReweightFileSha256);
   appendLine(text, "vertex_reweight_histogram", m_config.weights.vertexReweightHistogram);
+
+  // --------------------------------------------------------------------------
+  // Storage and relation contract
+  // --------------------------------------------------------------------------
+
   appendLine(text, "photon_min_et_gev", m_config.photon.minEtGeV);
   appendLine(text, "photon_max_et_gev", m_config.photon.maxEtGeV);
   appendLine(text, "photon_max_abs_eta", m_config.photon.maxAbsEta);
@@ -740,6 +958,8 @@ void PhotonJetTree::writeFileMetadata()
   appendLine(text, "write_photon_cells", m_config.output.writePhotonCells ? 1 : 0);
   appendLine(text, "write_isolation_constituents", m_config.output.writeIsolationConstituents ? 1 : 0);
   appendLine(text, "write_photon_jet_pairs", m_config.output.writePhotonJetPairs ? 1 : 0);
+
+  // Serialize the ordered set of shower definitions used for every candidate.
   {
     std::string definitions;
     for (const std::string& name : m_config.showerDefinitions)
@@ -749,6 +969,11 @@ void PhotonJetTree::writeFileMetadata()
     }
     appendLine(text, "shower_definitions", definitions);
   }
+
+  /*
+   * Bind every reconstructed jet collection by view/radius to the exact raw,
+   * calibrated, truth, input, and subtraction identities that define it.
+   */
   for (const JetNodeConfig& collection : m_config.jets.nodes)
   {
     std::ostringstream key;
@@ -760,19 +985,29 @@ void PhotonJetTree::writeFileMetadata()
   }
 
   m_outputFile->cd();
+
   TObjString metadata(text.str().c_str());
   if (metadata.Write("metadata", TObject::kOverwrite) <= 0)
     throw std::runtime_error("ROOT metadata write failed");
 
-  // The configuration bytes themselves, so a file is self-describing.
+  // Persist the exact resolved configuration bytes beside the summary metadata.
   TObjString configuration(m_config.provenance.configurationText.c_str());
   if (configuration.Write("configuration", TObject::kOverwrite) <= 0)
     throw std::runtime_error("ROOT configuration write failed");
 }
 
-//
-// Per-event fill
-//
+
+// ============================================================================
+// Per-event serialization
+// ============================================================================
+
+/**
+ * Finalize event-level counts and write the single Events row.
+ *
+ * Object counts are taken from the completed in-memory collections immediately
+ * before serialization so the event row describes exactly what will be written
+ * to the corresponding object tables.
+ */
 void PhotonJetTree::fillEventOutput()
 {
   m_event.sourceId = m_source.sourceId;
@@ -781,13 +1016,21 @@ void PhotonJetTree::fillEventOutput()
   m_event.photonJetPairCount = static_cast<std::uint32_t>(m_photonJetPairs.size());
   m_event.truthPhotonCount = static_cast<std::uint32_t>(m_truthPhotons.size());
   m_event.truthJetCount = static_cast<std::uint32_t>(m_truthJets.size());
-
   m_eventRow = m_event;
   fillChecked(m_eventTree);
 }
 
+
+/**
+ * Serialize every object/relation record accumulated for the current event.
+ *
+ * Each record is copied into the persistent row buffer whose address is bound
+ * to ROOT, then TTree::Fill() snapshots that row. No physics calculation is
+ * introduced by this function.
+ */
 void PhotonJetTree::fillObjectOutput()
 {
+  // Reconstructed photons and their shower-definition views.
   for (const PhotonRecord& photon : m_photons)
   {
     m_photonRow = photon;
@@ -800,6 +1043,7 @@ void PhotonJetTree::fillObjectOutput()
     }
   }
 
+  // Photon-associated calorimeter and isolation witnesses.
   for (const PhotonCellRecord& cell : m_photonCells)
   {
     m_photonCellRow = cell;
@@ -818,6 +1062,7 @@ void PhotonJetTree::fillObjectOutput()
     fillChecked(m_isolationConstituentTree);
   }
 
+  // Reconstructed jets and photon-jet relationships.
   for (const JetRecord& jet : m_jets)
   {
     m_jetRow = jet;
@@ -830,6 +1075,7 @@ void PhotonJetTree::fillObjectOutput()
     fillChecked(m_photonJetPairTree);
   }
 
+  // Simulation truth inventory.
   for (const TruthVertexRecord& vertex : m_truthVertices)
   {
     m_truthVertexRow = vertex;
@@ -848,6 +1094,7 @@ void PhotonJetTree::fillObjectOutput()
     fillChecked(m_truthJetTree);
   }
 
+  // Reconstruction-to-truth relations.
   for (const PhotonTruthLinkRecord& link : m_photonTruthLinks)
   {
     m_photonTruthLinkRow = link;
@@ -860,6 +1107,7 @@ void PhotonJetTree::fillObjectOutput()
     fillChecked(m_jetTruthLinkTree);
   }
 
+  // Producer-owned event-weight decomposition.
   for (const WeightComponentRecord& weight : m_weightComponents)
   {
     m_weightRow = weight;
@@ -867,9 +1115,23 @@ void PhotonJetTree::fillObjectOutput()
   }
 }
 
-//
-// End: source-level tables and completion
-//
+
+// ============================================================================
+// Final source-level serialization and completion certificate
+// ============================================================================
+
+/**
+ * Flush source/run-lifetime tables and write the terminal completion object.
+ *
+ * Event/object rows are written during event processing. Source accounting,
+ * upstream rejections, scaler snapshots, trigger-run configuration, and the
+ * final source record become authoritative only after the input has finished,
+ * so they are serialized here.
+ *
+ * The ROOT file is flushed before "completion" is written. Presence of that
+ * object therefore acts as the terminal product marker; its status still
+ * distinguishes a successful production from an explicitly aborted one.
+ */
 void PhotonJetTree::writeCompletionMetadata()
 {
   if (!m_outputFile)
@@ -877,7 +1139,10 @@ void PhotonJetTree::writeCompletionMetadata()
     return;
   }
 
-  // Source-level tables are written once, when their contents are final.
+  // --------------------------------------------------------------------------
+  // Source/run-lifetime tables
+  // --------------------------------------------------------------------------
+
   for (const UpstreamRejectedEventRecord& rejected : m_upstreamRejectedEvents)
   {
     m_upstreamRejectedRow = rejected;
@@ -896,13 +1161,25 @@ void PhotonJetTree::writeCompletionMetadata()
     fillChecked(m_triggerRunInfoTree);
   }
 
+  /*
+   * Finalize the source record only after all exposure accounting is known.
+   * completed describes producer status, not merely whether a ROOT file exists.
+   */
   m_source.upstreamRejectedEvents = static_cast<std::uint64_t>(m_upstreamRejectedEvents.size());
   m_source.completed = !m_aborted;
   m_sourceRow = m_source;
   fillChecked(m_sourceTree);
 
+  /*
+   * Flush every TTree before declaring terminal completion. A ROOT write error
+   * here prevents creation of a completion certificate.
+   */
   if (m_outputFile->Write(nullptr, TObject::kOverwrite) <= 0 || m_outputFile->TestBit(TFile::kWriteError))
     throw std::runtime_error("ROOT flush failed before completion");
+
+  // --------------------------------------------------------------------------
+  // Terminal accounting summary
+  // --------------------------------------------------------------------------
 
   std::ostringstream text;
   appendLine(text, "completion_status", std::string(m_aborted ? "aborted" : "complete"));
@@ -916,11 +1193,21 @@ void PhotonJetTree::writeCompletionMetadata()
   appendLine(text, "trigger_run_info_rows", m_triggerRunInfo.size());
 
   m_outputFile->cd();
+
   TObjString completion(text.str().c_str());
   if (completion.Write("completion", TObject::kOverwrite) <= 0)
     throw std::runtime_error("ROOT completion write failed");
 }
 
+
+/**
+ * Close the ROOT product and invalidate all file-owned handles.
+ *
+ * The TTrees have already been flushed before completion metadata was written,
+ * so this function does not intentionally rewrite the schema after the product
+ * has been declared complete. ROOT's write-error state is still checked after
+ * closing and propagated as a producer failure.
+ */
 void PhotonJetTree::closeOutput()
 {
   if (!m_outputFile)
@@ -929,15 +1216,20 @@ void PhotonJetTree::closeOutput()
   }
 
   m_outputFile->cd();
+
   // Trees were flushed before the completion object; do not rewrite them
   // after declaring completion. Close still checks ROOT's write-error bit.
   m_outputFile->Close();
+
   const bool writeError = m_outputFile->TestBit(TFile::kWriteError);
 
   delete m_outputFile;
   m_outputFile = nullptr;
 
-  // The trees belonged to the file and were released with it.
+  /*
+   * All TTrees were owned by the TFile and were released with it. Clearing the
+   * non-owning pointers prevents accidental use after close.
+   */
   m_sourceTree = m_upstreamRejectedTree = m_eventTree = nullptr;
   m_photonTree = m_showerShapeTree = m_photonCellTree = nullptr;
   m_isolationTree = m_isolationConstituentTree = nullptr;
@@ -945,5 +1237,6 @@ void PhotonJetTree::closeOutput()
   m_truthVertexTree = m_truthPhotonTree = m_truthJetTree = nullptr;
   m_photonTruthLinkTree = m_jetTruthLinkTree = nullptr;
   m_weightTree = m_triggerScalerTree = m_triggerRunInfoTree = nullptr;
+
   if (writeError) throw std::runtime_error("ROOT close failed");
 }

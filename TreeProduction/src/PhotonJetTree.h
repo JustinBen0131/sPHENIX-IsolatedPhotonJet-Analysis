@@ -1,55 +1,43 @@
 #ifndef PHOTONJETTREE_H
 #define PHOTONJETTREE_H
 
-//
-// PhotonJetTree
-//
-// One Fun4All module that reads reconstructed sPHENIX events and writes the
-// isolated-photon + jet analysis trees. One producer serves p+p and Au+Au,
-// data and simulation; the differences are explicit typed configuration, not
-// separate classes.
-//
-//
-// What this module owns
-//
-//
-//   source and event identity, and the exposure accounting that goes with it
-//   trigger decisions and scaler bookkeeping
-//   reconstructed vertex, minimum-bias detector state, centrality
-//   calorimeter event state
-//   photon candidates, their timing, shower shapes, cells and isolation
-//   reconstructed jets and their photon-jet relationships
-//   simulation truth, and the association of truth to reconstruction
-//   producer event weights
-//   the ROOT output and its provenance
-//
-//
-// What this module does not own
-//
-//
-//   detector reconstruction and calibration      the production layer
-//                                                registers those modules
-//   photon identification models                 trained and applied
-//                                                downstream, on these trees
-//   working points, isolation and identification selections
-//   background subtraction, purity, response matrices, unfolding
-//   histograms, normalisation and plotting
-//
-// The module is model-independent by construction. Candidates are admitted on
-// kinematics alone, and the trees carry the complete reconstruction primitives
-// a classifier needs, so a new model can be trained and applied without
-// reading a DST again.
-//
-//
-// Event flow
-//
-//
-//   identity -> trigger -> vertex -> minimum bias -> centrality -> calorimeter
-//            -> photons -> jets -> truth -> associations -> weights -> output
-//
-// process_event follows exactly that order and nothing hides behind a callback
-// table. The typed records it fills are defined once in internal/Types.h.
-//
+/**
+ * @file PhotonJetTree.h
+ * @brief Public interface and state of the isolated-photon + jet tree producer.
+ *
+ * PhotonJetTree is the single Fun4All producer used for pp and AuAu, DATA and simulation. Collision-system and sample differences are expressed through
+ * typed configuration rather than through separate producer classes.
+ *
+ * The producer owns the conversion of reconstructed event state into canonical
+ * analysis records:
+ *
+ *   source / event identity and exposure accounting
+ *     -> trigger and scaler state
+ *     -> vertex, MBD, centrality, and calorimeter state
+ *     -> reconstructed photons, shower information, and isolation
+ *     -> reconstructed jets and photon-jet relationships
+ *     -> simulation truth and reco-truth associations
+ *     -> producer-owned event weights
+ *     -> ROOT serialization and provenance
+ *
+ * TreeProduction deliberately stops at reconstructed and truth-level facts.
+ * Detector reconstruction is registered by the production layer; photon-ID models, working points, analysis selections, histogramming, corrections, unfolding, normalization, and plotting are downstream responsibilities.
+ *
+ * Candidates are therefore retained independently of photon-ID and isolation working points. The trees preserve the reconstruction primitives needed to train or evaluate later classifiers without rereading the DST.
+ *
+ * The implementation is split by responsibility while remaining one class:
+ *
+ *   PhotonJetTree.cc          lifecycle and explicit event-flow spine
+ *   internal/Event.cc        event context, exposure, triggers, and weights
+ *   internal/Photons.cc      photons, shower information, and isolation
+ *   internal/Jets.cc         reconstructed jets and photon-jet relations
+ *   internal/Truth.cc        simulation truth and reco-truth associations
+ *   internal/Output.cc       ROOT serialization, provenance, and completion
+ *
+ * All persisted configuration and record types are defined once in
+ * internal/Types.h.
+ */
+
 #include "internal/Types.h"
 
 #include <fun4all/SubsysReco.h>
@@ -66,19 +54,21 @@ class TTree;
 
 class RawCluster;
 class TowerInfoContainer;
+class PhotonClusterBuilder;
 
 class PHG4Particle;
 
 class PhotonJetTree : public SubsysReco
 {
  public:
+  // ==========================================================================
+  // Canonical producer vocabulary
   //
-  // The canonical vocabulary, defined in internal/Types.h.
-  //
-  // These are names for existing types, not second definitions. They let the
-  // implementation files spell a record the way a reader expects to see it on
-  // this class.
-  //
+  // internal/Types.h is the sole owner of these definitions. The aliases below
+  // expose that vocabulary through PhotonJetTree without creating a second type
+  // system.
+  // ==========================================================================
+
   using CollisionSystem = photonjet::CollisionSystem;
   using DataKind = photonjet::DataKind;
   using SimulationRole = photonjet::SimulationRole;
@@ -134,9 +124,17 @@ class PhotonJetTree : public SubsysReco
   using TriggerScalerSnapshotRecord = photonjet::TriggerScalerSnapshotRecord;
   using TriggerRunInfoRecord = photonjet::TriggerRunInfoRecord;
 
-  //
+  // ==========================================================================
   // Construction and Fun4All lifecycle
   //
+  // PhotonJetTree.cc implements the visible lifecycle:
+  //
+  //   Init -> InitRun -> process_event -> ResetEvent -> End
+  //
+  // process_event is the single event-flow spine; the responsibility-specific
+  // implementation files supply the individual capture operations it calls.
+  // ==========================================================================
+
   explicit PhotonJetTree(Config config,
                          const std::string& name = "PhotonJetTree");
 
@@ -151,45 +149,59 @@ class PhotonJetTree : public SubsysReco
   int ResetEvent(PHCompositeNode* topNode) override;
   int End(PHCompositeNode* topNode) override;
 
+  // ==========================================================================
+  // Exposure accounting
   //
-  // Exposure accounting for events this module never saw
-  //
-  // When a reconstruction module aborts an event, Fun4All skips every module
-  // after it, so this producer is never called. Those events are still
-  // exposure. A companion observer registered ahead of reconstruction reports
-  // them here, and they are written to their own table and counted in the
-  // source record.
-  //
-  // Calling this is the only supported way to account for them. The producer
-  // will not invent the count.
-  //
+  // An event rejected by an upstream reconstruction module never reaches
+  // process_event(), but it still belongs to the input exposure. A companion
+  // observer registered before reconstruction reports those events through
+  // this interface so the original source population remains explicit.
+  // ==========================================================================
+
+  /**
+   * Persist one event known to have been rejected before this producer ran.
+   *
+   * This is the only supported path for upstream-rejection accounting; the
+   * producer never infers missing encounters from downstream event counts.
+   */
   void recordUpstreamRejectedEvent(int run,
                                    std::int64_t physicalEventSequence,
                                    std::int64_t sourceEntry);
 
-  // Called by the exposure observer the production layer registers ahead of
-  // reconstruction, once per input event, before any module can abort it. If
-  // a second observation arrives while the previous one has not been consumed
-  // by process_event, the previous event never reached this producer and is
-  // recorded as upstream rejected. Implemented in internal/Event.cc.
+  /**
+   * Observe one physical input event before reconstruction can reject it.
+   *
+   * If a new observation arrives while the previous observation is still
+   * pending, the previous event never reached process_event() and is recorded
+   * as upstream rejected. Implemented in internal/Event.cc.
+   */
   void observeUpstreamEvent(int run, std::int64_t physicalEventSequence);
 
-  // Called by the steering macro when the Fun4All event loop stopped early.
-  // End() then closes the file with completion_status "aborted" instead of
-  // "complete", so a partial file can never pass for a finished one.
+  /**
+   * Mark the current product incomplete after an external event-loop failure.
+   *
+   * End() will then close the file as aborted rather than certifying a partial
+   * product as complete.
+   */
   void markAborted() { m_aborted = true; }
 
-  // Read-only view of the running source accounting, for validation code.
+  /// Read-only source accounting for steering and validation.
   const SourceRecord& sourceRecord() const { return m_source; }
 
+  // Non-owning binding to the registered reconstruction module. Its selected
+  // event vertex distinguishes unavailable input from a complete empty photon
+  // inventory without a second vertex-selection algorithm in capture.
+  void setPhotonBuilder(const PhotonClusterBuilder* builder) { m_photonBuilder = builder; }
+
  private:
+  // ==========================================================================
+  // Production-mode queries
   //
-  // Production mode
-  //
-  // Mode is configuration, never inferred from whether a node happens to be
-  // present. A missing node in a mode that requires it is an error, not a
-  // signal to switch behaviour.
-  //
+  // Mode is declared configuration. It is never inferred from whether a DST
+  // node happens to exist; absence of a required node is a contract failure,
+  // not an instruction to switch behavior.
+  // ==========================================================================
+
   bool isPP() const;
   bool isAuAu() const;
 
@@ -202,37 +214,51 @@ class PhotonJetTree : public SubsysReco
   bool isPhotonJetSimulation() const;
   bool isInclusiveJetSimulation() const;
 
-  //
-  // Setup
-  //
-  // Reject an internally inconsistent job before any file is opened. Throws
-  // std::runtime_error describing the first inconsistency found.
+  // ==========================================================================
+  // Job and run initialization
+  // ==========================================================================
+
+  /**
+   * Validate all configuration invariants available before event processing.
+   *
+   * Contradictory modes, missing provenance, unsupported storage domains, or
+   * inconsistent collection definitions fail before a production is allowed
+   * to create a seemingly usable event sample.
+   */
   void validateConfiguration() const;
 
-  // Fill the source record and its identity from the configuration. The
-  // identity needs a pinned input digest and does not depend on any event.
+  /**
+   * Initialize source-level provenance and the compact source identity.
+   *
+   * Full input hashes remain stored explicitly; the compact identity is the
+   * relational key shared by the output tables.
+   */
   void initializeSourceRecord();
 
-  // Open the output file, book every tree, and write the file-level
-  // provenance. Implemented in internal/Output.cc.
+  /// Open the ROOT product, book its tables, and write file-level provenance.
   void initializeOutput();
 
-  // Capture run-dependent state, such as the trigger configuration table.
+  /// Capture state whose lifetime is the current run rather than one event.
   void initializeRun(PHCompositeNode* topNode);
 
-  // Open the vertex-reweighting histogram when the configuration asks for
-  // it. Implemented in internal/Event.cc.
+  /// Load configured producer-owned weighting inputs. Implemented in Event.cc.
   void loadWeightInputs();
 
-  // Resolve a pending upstream observation that process_event never
-  // consumed, at the end of the event stream. Implemented in internal/Event.cc.
+  /**
+   * Resolve a final pending upstream observation at end of input.
+   *
+   * Implemented in internal/Event.cc.
+   */
   void finishUpstreamAccounting();
 
+  // ==========================================================================
+  // Event context
   //
-  // Per-event capture, in event order
-  //
-  // Implemented in internal/Event.cc.
-  //
+  // Implemented in internal/Event.cc and called in this order by
+  // process_event(). These methods establish the event state to which all
+  // reconstructed and truth objects are subsequently attached.
+  // ==========================================================================
+
   void resetEventState();
 
   void captureEventIdentity(PHCompositeNode* topNode);
@@ -243,26 +269,33 @@ class PhotonJetTree : public SubsysReco
   void captureCalorimeterInformation(PHCompositeNode* topNode);
   void captureEventWeights(PHCompositeNode* topNode);
 
-  // Run-level trigger configuration table, read once per run in data.
+  /// Capture the run-level DATA trigger configuration once per run.
   void captureTriggerRunInformation(PHCompositeNode* topNode);
 
-  //
+  // ==========================================================================
   // Reconstructed photons
   //
-  // Implemented in internal/Photons.cc.
-  //
+  // Implemented in internal/Photons.cc. This stage stores reconstruction facts
+  // and isolation observables; it does not apply photon-ID or isolation working
+  // points.
+  // ==========================================================================
+
   void capturePhotons(PHCompositeNode* topNode);
 
-  // Storage domain only: finite kinematics inside the configured transverse
-  // energy and pseudorapidity window. No identification and no isolation.
+  /**
+   * Test only the configured photon storage domain.
+   *
+   * Identification score and isolation decisions deliberately do not enter
+   * candidate retention.
+   */
   bool photonInCaptureDomain(const PhotonRecord& photon) const;
 
   void capturePhotonTiming(const RawCluster* cluster,
-                           TowerInfoContainer* cemcTowers,
                            PhotonRecord& photon) const;
 
-  // Evaluate every configured shower-shape definition from the calibrated
-  // tower grid around the cluster, and record the cells that entered it.
+  /**
+   * Copy builder-produced shower views and retain optional cell witnesses.
+   */
   void capturePhotonShowerShapes(const RawCluster* cluster,
                                  TowerInfoContainer* cemcTowers,
                                  PhotonRecord& photon);
@@ -274,11 +307,13 @@ class PhotonJetTree : public SubsysReco
                                           const RawCluster* cluster,
                                           const PhotonRecord& photon);
 
-  //
+  // ==========================================================================
   // Reconstructed jets
   //
-  // Implemented in internal/Jets.cc.
-  //
+  // Implemented in internal/Jets.cc. Collection identity, calibrated/raw jet
+  // information, and retained photon-jet relationships are kept explicit.
+  // ==========================================================================
+
   void captureJets(PHCompositeNode* topNode);
   void captureJetCollection(PHCompositeNode* topNode,
                             const JetNodeConfig& collection);
@@ -287,21 +322,27 @@ class PhotonJetTree : public SubsysReco
 
   void buildPhotonJetPairs();
 
-  //
+  // ==========================================================================
   // Simulation truth and associations
   //
   // Implemented in internal/Truth.cc. Truth.cc is the single owner of the
-  // dominant-primary witness as well as of the final relations.
-  //
+  // stored truth population, dominant-primary photon witness, and the final
+  // reconstruction-to-truth relations.
+  // ==========================================================================
+
   void captureSimulationTruth(PHCompositeNode* topNode);
 
   void captureTruthVertices(PHCompositeNode* topNode);
   void captureTruthPhotons(PHCompositeNode* topNode);
   void captureTruthJets(PHCompositeNode* topNode);
 
-  // Finite isolation and complete census are separate historical facts. A
-  // skipped bad primary marks completeness false without changing a finite
-  // stored sum or the native signal predicate.
+  /**
+   * Compute the retained truth-isolation sums and census completeness.
+   *
+   * A finite cone sum and a complete truth census are independent facts. A bad
+   * or unavailable primary may make the census incomplete without replacing a
+   * finite measured isolation sum.
+   */
   bool calculateTruthPhotonIsolation(PHCompositeNode* topNode,
                                      const PHG4Particle* photon,
                                      double& isolationR03,
@@ -311,12 +352,13 @@ class PhotonJetTree : public SubsysReco
   void buildPhotonTruthAssociations(PHCompositeNode* topNode);
   void buildJetTruthAssociations();
 
+  // ==========================================================================
+  // ROOT serialization
   //
-  // ROOT output
-  //
-  // Implemented in internal/Output.cc. No scientific quantity is computed for
-  // the first time there.
-  //
+  // Implemented in internal/Output.cc. This layer serializes already-defined
+  // records and product metadata; it does not introduce new physics quantities.
+  // ==========================================================================
+
   void bookTrees();
   void writeFileMetadata();
 
@@ -325,17 +367,23 @@ class PhotonJetTree : public SubsysReco
 
   void writeCompletionMetadata();
 
-  // Write and close the file, releasing the tree handles.
+  /// Write the product and release all ROOT output handles.
   void closeOutput();
 
-  //
-  // Configuration
-  //
-  Config m_config;
+  // ==========================================================================
+  // Immutable job configuration
+  // ==========================================================================
 
+  Config m_config;
+  const PhotonClusterBuilder* m_photonBuilder = nullptr;  // owned by Fun4AllServer
+
+  // ==========================================================================
+  // ROOT product handles
   //
-  // Output file and tables
-  //
+  // One handle per persisted table. The corresponding row buffers are declared
+  // separately below.
+  // ==========================================================================
+
   TFile* m_outputFile = nullptr;
 
   TTree* m_sourceTree = nullptr;
@@ -363,14 +411,18 @@ class PhotonJetTree : public SubsysReco
   TTree* m_triggerScalerTree = nullptr;
   TTree* m_triggerRunInfoTree = nullptr;
 
+  // ==========================================================================
+  // Source- and run-lifetime state
   //
-  // State that lives as long as the source
-  //
+  // These values persist across ResetEvent(). They describe the source as a
+  // whole, upstream exposure accounting, and run-level trigger information.
+  // ==========================================================================
+
   SourceRecord m_source;
 
   std::vector<UpstreamRejectedEventRecord> m_upstreamRejectedEvents;
 
-  // The most recent upstream observation not yet consumed by process_event.
+  // Most recent input observation not yet consumed by process_event().
   bool m_upstreamPending = false;
   int m_upstreamPendingRun = 0;
   std::int64_t m_upstreamPendingSequence = -1;
@@ -379,12 +431,16 @@ class PhotonJetTree : public SubsysReco
   std::vector<TriggerScalerSnapshotRecord> m_triggerScalerSnapshots;
   std::vector<TriggerRunInfoRecord> m_triggerRunInfo;
 
-  // Simulated-vertex reweighting histogram, owned by this module.
+  // Producer-owned simulated-vertex reweighting histogram.
   TH1* m_vertexReweight = nullptr;
 
+  // ==========================================================================
+  // Current-event state
   //
-  // State of the event being processed
-  //
+  // resetEventState() clears these containers for every producer encounter.
+  // Source- and run-lifetime state above is unaffected.
+  // ==========================================================================
+
   EventRecord m_event;
 
   std::vector<PhotonRecord> m_photons;
@@ -404,12 +460,13 @@ class PhotonJetTree : public SubsysReco
 
   std::vector<WeightComponentRecord> m_weightComponents;
 
+  // ==========================================================================
+  // ROOT row buffers
   //
-  // Row buffers
-  //
-  // ROOT branches address these; a fill copies the record being written into
-  // the matching buffer first.
-  //
+  // ROOT branches hold addresses into these records. Output.cc copies the row
+  // being serialized into the appropriate buffer before each TTree::Fill().
+  // ==========================================================================
+
   SourceRecord m_sourceRow;
   UpstreamRejectedEventRecord m_upstreamRejectedRow;
   EventRecord m_eventRow;
@@ -435,9 +492,13 @@ class PhotonJetTree : public SubsysReco
   TriggerScalerSnapshotRecord m_triggerScalerRow;
   TriggerRunInfoRecord m_triggerRunInfoRow;
 
-  //
+  // ==========================================================================
   // Lifecycle guards
   //
+  // These flags encode producer progress independently of ROOT pointer state.
+  // In particular, an opened file is not equivalent to a completed product.
+  // ==========================================================================
+
   bool m_outputReady = false;
   bool m_runInitialized = false;
   bool m_finalized = false;
