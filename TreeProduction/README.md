@@ -1,90 +1,44 @@
-# TreeProduction: DST to collaborator trees
+# TreeProduction
 
-Two steps: a Fun4All producer that reads DSTs and writes a normalised event
-record (the `ReplayFoundationV1` directory of `RJ*V1` record trees, plus the
-direct histograms of the maintained analysis), and a Python builder that turns
-that record into the eight collaborator trees described in
-`contracts/photonjet_trees_v1_branches.json`.
+Consumes one physical DST source bundle and writes model-independent ROOT tables. One `PhotonJetTree` SubsysReco serves pp/AuAu and DATA/SIM through typed configuration. This source is uncompiled and unvalidated on sPHENIX.
 
-## Where this source comes from
+| File | Ownership |
+|---|---|
+| `config/tree_production.yaml` | Eight production profiles, input nodes, reconstruction choices, payload bindings and storage policy |
+| `macros/Fun4All_PhotonJetTree.C` | Resolve job, configure conditions, create server/producer, register reconstruction/inputs, run, End |
+| `src/PhotonJetTree.h` | One producer interface and state; aliases refer to Types.h |
+| `src/PhotonJetTree.cc` | Lifecycle and visible event-processing order |
+| `src/internal/Types.h` | Plain configurations, records, enums and stable identities |
+| `src/internal/Production.h/.cc` | YAML/job/input resolution, CDB, reconstruction registration and input managers |
+| `src/internal/Event.cc` | Source/event identity, triggers/scalers, vertex, MBD, centrality, calorimeter/UE state and producer weights |
+| `src/internal/Photons.cc` | Candidates, timing, shower views/cells and separate pp/AuAu isolation semantics |
+| `src/internal/Jets.cc` | Raw/JES binding, active area, retained encounter order and provisional pairs |
+| `src/internal/Truth.cc` | Embedded primary census, HepMC ancestry, truth isolation, dominant-primary photon associations and jet matching |
+| `src/internal/Output.cc` | ROOT booking/filling, configuration/provenance and completion only |
 
-The producer here is a copy of the production source frozen on 2026-09-13,
-before the current Au+Au production, passed through
-`tools/scrub_producer_source.py`.  It has not been rebuilt from this
-repository: there is no sPHENIX build environment on the machine that
-assembled it.  When a production freezes, the rule is: copy the exact producer
-source and tree builder that ran it into this directory verbatim, record their
-hashes, rerun the scrub script, and commit.  `python tests/run_tests.py
-test_producer_scrub.py` checks the result.
+## Stored product
 
-What the scrub changes is documented at the top of the script: study numbers
-in comments, one user's absolute paths.  What it keeps, on purpose: C++
-identifiers, environment-variable names, ROOT object names and log tags that
-still carry study numbers (`the44`, `the134`, `the119`, `the221`).  Those are
-runtime interfaces of the production wrappers and of the output files, and
-they have no physics meaning.  `THE106Observation` is the name of an optional
-instrumentation header in a patched PHOOL; the local
-`THE106ObservationDisabled.h` compiles those call sites to no-ops when that
-header is absent.
+Eighteen declared tables: Sources, Events, UpstreamRejectedEvents, TriggerRunInfo, TriggerScalers, Photons, PhotonShowerViews, PhotonCells, Isolation, IsolationConstituents, Jets, PhotonJetPairs, TruthVertices, TruthPhotons, TruthJets, PhotonTruthLinks, JetTruthLinks and WeightComponents.
 
-## Producer
+`metadata` contains file-level key=value provenance, `configuration` the supplied YAML, and `completion` terminal accounting. Only `completion_status=complete` is consumable. Write failures propagate, existing files are refused, and aborted jobs are marked. This is not an atomic publish/validation protocol; close/failure injection still needs runtime checks.
 
-* `src/` p+p analysis module (`RecoilJets`), `src_AuAu/` Au+Au module
-  (`RecoilJets_AuAu`).  Both build with the usual sPHENIX autotools flow after
-  `source /opt/sphenix/core/bin/sphenix_setup.sh -n` and
-  `source /opt/sphenix/core/bin/setup_local.sh $MYINSTALL`:
+Every producer encounter is retained, including zero-candidate events. Upstream observer accounting is separate. One invocation accepts one physical source bundle; multi-file source transitions are intentionally unsupported. Manifest-based source identity requires an ordinal. Input hashes and exact run/entry ranges must be supplied.
 
-  ```bash
-  cd TreeProduction/src && ./autogen.sh --prefix=$MYINSTALL && make -j4 install && cd ../..
-  cd TreeProduction/src_AuAu && ./autogen.sh --prefix=$MYINSTALL && make -j4 install && cd ../..
-  ```
+Candidate storage has explicit ET/eta and reconstructed-vertex domains. These remain migration-review items, particularly for native simulation. Event retention alone does not establish complete object acceptance. No model score or working point decides retention.
 
-  `src/` also carries the analysis copy of `PhotonClusterBuilder` (installed
-  as part of `libcalo_reco`), which the macros load by name from the
-  installation.
-* `macros/Fun4All_recoilJets.C` and `macros/Fun4All_recoilJets_AuAu.C` are the
-  entry points; both include `macros/Fun4All_recoilJets_unified_impl.C`.
-  Arguments: number of events (0 = all), DST list file, output ROOT file,
-  verbose flag, events to skip.
-* `macros/analysis_config.yaml` is the producer configuration (photon and jet
-  windows, jet radii 0.2/0.3/0.4, vertex windows, isolation cones, trigger
-  selection, reweighting inputs).  The per-job YAML text is stamped into every
-  output file.
-* `macros/Calo_Calib.C` builds calibrated calorimeter towers and clusters;
-  `macros/calo/` holds the tower-status and centrality helpers it uses.
+Reconstructed jets retain finite nonnegative calibrated objects in container encounter order, restarting per view/radius. Raw pT must be finite/nonnegative, area valid, and calibrated ids bound to raw ordinals. JES is applied once upstream, never here or to truth jets. Per-view availability distinguishes valid empty, missing and not applicable. Provisional pair witnesses use absolute wrapped delta-phi, corrected jet pT / photon ET, inclusive 7π/8 recoil, photon_rank=0 and retained jet ordinal.
 
-### External inputs
+Truth isolation sums embedded primary **transverse energy**, with the merged core subtracted. A finite stored isolation value and a complete input census are separate facts. Native signal classification retains prompt classes below 3, including -1/0; generator association validity and archived hard-event ownership are separate witnesses. Photon association uses the maximum-energy primary identity, not nearest delta-R. Jet matching keeps its deterministic one-to-one rules and considered edges; incomplete capture cannot create a certified miss.
 
-These files are not in the repository.  They are analysis inputs provided by
-collaborators and are referenced by their location on the sPHENIX file system:
+AuAu UE arrays, flow mode, v2, psi2 and failure witnesses are stored. Isolation axes are retained. Signed SUB1 towers and pp signed topocluster sums follow separate definitions; candidate ET is subtracted once. Cells, isolation constituents and Cartesian pairs stay provisionally enabled until the field ledger proves a lossless alternative. Always-NaN working-point placeholders were removed from this unaccepted base schema.
 
-| Input | Configured in | Provider |
-| --- | --- | --- |
-| p+p truth-vertex reweighting histograms (0 and 1.5 mrad periods) | `analysis_config.yaml` `vertex_reweight_file_pp`; period contracts in `src/RecoilJets.cc` | Shuhang Li (PPG12 efficiency tools) |
-| Au+Au vertex and centrality reweighting histograms (off by default) | `analysis_config.yaml` `vertex_reweight_file_auau`, `centrality_reweight_file` | Blair Seidlitz |
-| EMCal tower mask for the PPG12 yield replay | `src/RecoilJets.cc` `kPPG12YieldTowerMaskFile` | Shuhang Li |
-| Scaled-trigger QA run list (optional) | environment `RJ_SCALED_TRIGGER_RUNLIST` | this analysis |
+## Integration still required
 
-## Collaborator tree builder
+- Supply real build/install rules for the library and its exported macro includes; compile all split definitions against the chosen release.
+- Reconcile external APIs, especially JetCalib legacy-mode control, centrality, calorimeter status, truth evaluators, tower encoding and TMVA.
+- Complete archived G4→waveform/tower registration with its exact random sequence. This lane currently fails explicitly.
+- Bind/register the pp topocluster reconstruction when that node is absent from input.
+- Bind CDB tags, centrality/ZS/JES payloads, vertex weights and runtime source/library provenance. No ambient or guessed payload is acceptable.
+- Validate all eight profiles and compare direct output with the reviewed migrated reference before acceptance.
 
-```bash
-python TreeProduction/build_photonjet_collaboration_tree.py --system auau \
-    --input auau_producer_part1.root --input auau_producer_part2.root \
-    --output trees/auau_data.root
-python TreeProduction/validate_photonjet_collaboration_tree.py --system auau trees/auau_data.root
-```
-
-* Inputs are producer files; `--input-list` accepts a text file of paths.
-* No model is needed: `bdt_score` is written unscored (`bdt_evaluation_state`
-  0) and filled later by `PhotonID/score_trees.py`, which also regenerates the
-  threshold and flag branches from `config/nominal.yaml`.  (`--model` is
-  accepted for backward compatibility with the maintained analysis.)
-* `--require-*` options enforce the presence of the trigger scaler, MBD and
-  centrality-replay branches used by the Au+Au normalisation; use them for
-  data production.
-* The validator checks branch types, unique event and candidate identities,
-  the event-array to flat-tree equivalence, pair kinematics and truth-link
-  targets.
-
-Helper modules used by the builder: `centrality_replay.py`,
-`gl1_trigger_interface.py`, `trigger_scaler_interface.py`, `producer/`.
+Never put tight selection, ABCD, purity, leakage, final recoil selection, response construction, unfolding, histogramming or plotting here. Generic optional model support in the upstream builder is disabled by this producer.

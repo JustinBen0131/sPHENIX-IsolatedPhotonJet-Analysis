@@ -1,27 +1,23 @@
-# PhotonID: training, scoring, working points
+# PhotonID
 
-* `photon_selection.py` is the one implementation of the truth-signal
-  contract, the working-point thresholds and the tight / non-tight /
-  isolated / non-isolated flags.  Every other stage imports it.
-* `train_photon_bdt.py` trains one XGBoost model per collision system from
-  photon+jet (signal) and inclusive-jet (background) trees with the
-  established recipe (class balance, spline-based eta and ET flattening with
-  the 800 cap computed before the training window, row-level stratified
-  split with the per-system seeds, per-system hyperparameters) and exports it
-  as a TMVA RBDT file plus a manifest with the label mapping, weighting steps,
-  sample hashes and AUC.  Needs `xgboost`, `scikit-learn`, `scipy`.
-* `score_trees.py` evaluates the model for every candidate with complete
-  inputs, writes the configured thresholds into the threshold branches,
-  regenerates the flags and the stored leader indices, and propagates
-  everything to `photonJets` and `eventTree` by candidate identity.  Without
-  `--model` it keeps the stored score and only refreshes thresholds and flags.
-* `derive_working_points.py` finds the tight threshold that gives the
-  configured signal efficiency per photon-pT bin (and centrality bin in
-  Au+Au) from scored signal simulation and prints a YAML fragment for
-  `config/nominal.yaml`.
+Consumes completed base trees and produces frozen model artifacts or candidate-keyed score sidecars. It never rewrites base trees or assigns tight/non-tight/ABCD regions.
 
-Rules kept by these scripts: data and simulation are scored with the same
-per-system model; every join uses the candidate identity; thresholds live in
-the configuration, never in the code; a candidate with a missing score or
-threshold is invalid rather than background; the producer event weight is not
-used in training.
+`features.py` owns the ordered feature vocabulary, shower view, ratio policy, domain and finite-input rules used by both `train.py` and `augment.py`. The feature identity hashes that definition and the implementation bytes. Inputs are narrowed to the actual float32 inference representation before validity checks.
+
+## Registry
+
+Five distinct **unbound** slots exist: `ppg12_npb_reference`, `ppg12_tight_pp_reference`, `ppg12_tight_auau_reference`, `canonical_pp_v1`, `canonical_auau_v1`. Reference and canonical models must not be conflated. Feature lists for unbound entries are proposals requiring model-specific parity review. Canonical training targets 15–35 GeV; application-domain coverage of wider response support remains unresolved.
+
+A bound registry entry needs an approved status, binding evidence, exact model file and SHA256. A CDB key records a separately resolved import; Python inference does not silently download one. No model weights were trained, imported or published in this pass.
+
+## Training
+
+Training is blocked until the registry supplies an explicitly approved complete recipe: label rule, ET window, class/kinematic weighting, optional thinning parameters, split fractions/seed/rule and XGBoost hyperparameters. The currently supported recipe uses known truth relations and source sample roles, fits weights/thinning on training observations only and evaluates held-out AUC with unit weights. This supported implementation is **not** an accepted pp/AuAu training recipe by itself.
+
+Splits hash source/event identity rather than candidate row order. Candidates from a shared event stay together. Alternative representations with different source/event keys require a reviewed common physical-event grouping before mixing; the code cannot infer those aliases. Incomplete truth censuses and duplicate candidate identities are refused.
+
+## Sidecars
+
+`augment.py` writes one `PhotonScores` TTree per base file/model. Rows carry source/event/candidate identity, model name, raw score and states for finite evaluation, nonfinite evaluation, missing inputs, out of domain and unavailable model. Metadata binds the exact base-file SHA256, model SHA256, feature-definition SHA256 and input recipe. No join may rely on row position. An unbound model produces only unavailable-model diagnostics, never a usable score product.
+
+Outputs must be new. Base mutation during scoring is rejected. Training/inference parity, TMVA export, numerical score behavior, model bindings and working-point derivation remain runtime/science gates. The scripts currently load a file's candidate features in memory; only the histogram loop has an event-batched implementation.

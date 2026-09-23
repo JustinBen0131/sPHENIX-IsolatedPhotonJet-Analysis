@@ -1,51 +1,25 @@
-# FinalAnalysis: responses, corrections, unfolding, comparison
+# FinalAnalysis
 
-Entry points:
+Consumes histogram packages only. It must never read event trees to repair insufficient packages. Numerical results are persisted before `plot.py` renders them.
 
-* `photonjet/cli.py response build` builds the (photon pT, xJ) pair response
-  from photon+jet simulation trees, `photonjet/cli.py photon-response build`
-  the per-event photon response used for the photon denominator.  Both use
-  the nominal truth-signal contract and, with `--sample`, the complete
-  analysis weights of `config/samples.yaml`.
-* `run_corrections.py` runs the chain for one system and writes the result
-  JSON and a CSV of final points.
-* `plot_overlay.py` draws final spectra and published reference points
-  (`reference/`).
+| File | Ownership |
+|---|---|
+| `corrections.py` | Leakage-aware ABCD, Region-C restoration and optional combinatoric subtraction |
+| `unfolding.py` | Fine-support aggregation, feed-in/out bookkeeping and iterative-Bayes kernels |
+| `statistics.py` | Error/covariance summaries, diagnostics and iteration gate |
+| `run.py` | Package compatibility, chain execution, scan and numerical JSON/CSV output |
+| `plot.py` | Rendering persisted numbers and explicitly labelled references |
 
-The chain (`photonjet/analysis/chain.py`), in order:
+The arithmetic follows the collaboration predecessor; this port has not been numerically validated. Fine bins are added before nonlinear operations. Positive normalization denominators are required. Integrated 15–35 GeV transfer is restricted to that window. Combinatoric template/denominator inputs must bind the same normalized simulation population, and the retained response-photon denominator must agree with leakage A.
 
-1. Leakage-aware ABCD purity per photon-pT bin from the data counts and the
-   simulated prompt-photon leakage; purity-corrected recoil spectrum (region A
-   minus the background transfer times region C, region-C prompt leakage
-   restored).  Au+Au uses one background transfer from the integrated
-   15-35 GeV population, p+p one solve per bin (`corrections.purity_strategy`).
-2. Combinatoric subtraction (Au+Au): simulated recoil of matched prompt photons
-   whose jet has no truth jet, scaled by the data photon count over the
-   simulated Region-A prompt-photon count.
-3. Joint iterative-Bayes unfolding in (photon pT, xJ) with the truth spectrum
-   as prior; the fake cause is detector plus boundary fakes only, since fake
-   photons were removed in 1 and combinatoric recoil in 2.
-4. Photon-count unfolding with the per-event photon response; fake cause the
-   photons whose truth pT lies outside 15-35 GeV.
-5. `(1/N_gamma) dN/dxJ` = unfolded pairs summed over pT divided by unfolded
-   photons and the bin width; also per photon-pT bin.
-6. Toys of the data sufficient statistics (and of the combinatoric template
-   when 2 is on) rerun 1-5; errors are the central 68 percent half-widths,
-   the covariance is the winsorized toy covariance rescaled to them.
-7. Diagnostics: refolding chi2/ndf, photon refolding chi2/ndf, simulation
-   closure and refold, zero-efficiency bins, negative-input fraction, toy
-   success fraction.
+An iteration scan chooses only finite-scored candidates that **pass** the gate. If none passes, nominal analysis fails. The selected final-toy result and a manually requested iteration must also pass. No least-bad failed result is published as nominal.
 
-Iteration count: `unfolding.iterations` in the configuration, or, when null,
-a scan of 2..12 with the maintained gate (all diagnostics below their limits,
-toy success at least 90 percent, relative errors bounded) and score, keeping
-the minimum score.
+## Uncertainty contract
 
-Not included in the statistical uncertainty: response, leakage and template
-statistics (held fixed, as in the maintained analysis).  Systematic
-uncertainties are not evaluated in this repository.
+Data toys use coherent stored event-bootstrap replicas, or an explicitly selected independent-Gaussian approximation. Response matrices and leakage remain fixed. When combinatoric subtraction is enabled, template and denominator fluctuate independently as Gaussians, matching the predecessor's executed behavior. Their mutual correlation and correlations with response/leakage are not retained. This is not a complete simulation-statistical or systematic covariance treatment.
 
-`photonjet/analysis/` also holds the reference tree reducers `purity.py` and
-`reduce.py`, used by the tests as an independent cross-check of TreeToHists,
-the tree validator `io/tree_validation.py`, and the kernels `background.py`,
-`response.py`, `response_builder.py`, `photon_response.py`, `unfolding.py`.
+Stored bootstrap replicas are used without recycling them as additional independent draws. The central-68 interval and winsorized covariance retain the predecessor definitions. The exact nominal uncertainty/iteration recipe still requires approval in `config/measurement.yaml`.
+
+Packages must be analysis-ready and share grids, exact measurement identity and frozen model/feature bindings. Missing response support or stale/mismatched inputs fail explicitly. JSON diagnostics use null for nonfinite values; failed nominal gates do not produce final points. Existing outputs are protected.
+
+Plotting cannot change physics and does not conceal invalid reported errors. Changing style rerenders existing numerical files. Changing unfolding can reuse packages only within the support and statistical information they actually retain.

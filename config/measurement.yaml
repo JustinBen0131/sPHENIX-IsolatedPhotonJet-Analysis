@@ -1,0 +1,147 @@
+# Measurement configuration: every physics choice that is applied after tree
+# production: TreeToHists owns selection/regions/grids; FinalAnalysis owns
+# corrections/unfolding. Training recipes live in PhotonID/model_registry.yaml.
+#
+# Units: GeV for energies, cm for positions, percent for centrality, radians
+# for angles. A `null` working point means "not yet derived": the stages stop
+# with a message instead of substituting a value.
+#
+# Nothing in this file is known to the tree producer. Changing a value here
+# regenerates histograms without re-reading a DST or retraining a model.
+
+measurement_version: canonical-v1-draft
+contract:
+  status: unresolved
+  evidence: null
+  # Every value below is a review proposal, not an approved nominal setting.
+  review_required:
+    - isolation method/radius and photon measurement bins
+    - fine response support and boundary populations
+    - reported xJ support and recoil threshold
+    - vertex/centrality/minimum-bias selections
+    - working points and model/feature hashes
+    - multi-truth-photon response population
+    - SI/DI, slices, exposure and normalization
+    - uncertainty approximations and iteration gates
+  uncertainty: data_event_bootstrap_fixed_response_leakage_independent_template_gaussians
+
+event_chunk_size: 256
+
+# Truth photon definition. This is the training signal and the selected truth
+# photon in simulation. The producer stores every embedded primary photon with
+# its prompt class and truth isolation; the predicate is re-evaluated here
+# from those primitives and cross-checked against the producer's own
+# analysis_signal flag.
+truth_signal:
+  valid_prompt_classes: [-1, 0, 1, 2]   # every class below Hadronic (3); Unknown (-1) and Unclassified (0) are kept
+  isolation_cone_radius: 0.3
+  isolation_max_gev: 4.0                # truth isolation < 4 GeV
+  abs_eta_max: 0.7
+  require_generator_association: false  # the established rule does not; a missing history is not a decay
+
+# Reconstructed isolation used by the nominal selection. The trees store every
+# cone and method; this picks one.
+isolation:
+  cone_radius: 0.3
+  method:
+    pp: topocluster          # IsolationMethod::Topocluster
+    auau: calorimeter_sub1   # IsolationMethod::CalorimeterSub1
+
+# Photon kinematics common to both systems (measurement window, not the
+# storage domain of the trees).
+photon:
+  et_min_gev: 15.0
+  et_max_gev: 35.0                      # closed-open [15, 35)
+  abs_eta_max: 0.7
+  pt_edges_gev: [15.0, 17.0, 19.0, 21.0, 23.0, 25.0, 35.0]  # review proposal
+
+# Recoil jet definition. xJgamma = corrected jet pT / photon ET.
+recoil:
+  jet_view:
+    pp: PP                   # JetView::PP
+    auau: AuAuSub1           # JetView::AuAuSub1
+  jet_radius: 0.4
+  jet_pt_min_gev: 5.0
+  jet_abs_eta_max: 0.7
+  delta_phi_min_over_pi: 0.875          # |delta phi| >= 7 pi / 8, inclusive
+  xj_edges: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+             1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 3.0]
+  reported_xj: [0.3, 1.8]               # bins reported in the final result
+
+# Response classification grids (wider than the measurement window so that
+# migration across its edges is visible to the unfolding).
+# Fine support is proposed; its physical range needs migration review.
+response:
+  reco_ptgamma_edges: [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0]
+  truth_ptgamma_edges: [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0]
+
+# ABCD sidebands. "bounded": non-tight is nontight_low < score <= nontight_high
+# (a gap below the tight threshold is allowed). "complement": every candidate
+# that is not tight.
+abcd:
+  non_tight_definition: bounded
+
+# Event-level bootstrap replicas stored with every histogram package, for the
+# statistical covariance of the final result.
+bootstrap:
+  replicas: 3000  # bounded by package memory admission; no recycled replicas
+  seed: 20260922
+
+# Per-system selection. `model` names the PhotonID registry entry whose score
+# sidecar TreeToHists joins; thresholds accept
+#   null                                          not derived, stage stops
+#   0.75                                          constant
+#   {intercept: a, slope_photon_et: b,
+#    slope_centrality: c}                         a + b*photon_et + c*centrality
+#   {mode: binned, pt_edges: [...], values: [...]}  one value per photon-pT bin
+#   {mode: binned, pt_edges: [...], cent_edges: [...], values: [[...], ...]}
+systems:
+  pp:
+    model: canonical_pp_v1
+    model_sha256: null
+    feature_definition_sha256: null
+    event:
+      trigger_selection: null  # DATA requires reviewed bits_any/live|scaled or explicit inclusive evidence
+      abs_vertex_z_max_cm: 30.0
+      require_object_vertex_in_domain: true
+      terminal_status: null  # no invented status-0 gate; native SIM can retain status 4
+    working_points:
+      tight_signal_efficiency_target: null
+      tight_threshold: null
+      nontight_low: null
+      nontight_high: null
+      isolated_max_gev: null
+      nonisolated_min_gev: null
+    corrections:
+      subtract_combinatoric: false
+      purity_strategy: per_pt
+  auau:
+    model: canonical_auau_v1
+    model_sha256: null
+    feature_definition_sha256: null
+    event:
+      trigger_selection: null  # DATA requires reviewed bits_any/live|scaled or explicit inclusive evidence
+      abs_vertex_z_max_cm: 10.0
+      require_object_vertex_in_domain: true
+      terminal_status: null  # no invented status-0 gate; native SIM can retain status 4
+      centrality_percent: [0.0, 20.0]   # closed-open
+      require_minimum_bias: true
+    working_points:
+      tight_signal_efficiency_target: 0.80
+      tight_threshold: null
+      nontight_low: null
+      nontight_high: null
+      isolated_max_gev: null
+      nonisolated_min_gev: null
+    corrections:
+      subtract_combinatoric: true
+      purity_strategy: integrated_15_35_transfer
+
+# Unfolding: iterative Bayes. With `iterations: null` the driver scans the
+# candidates, gates and scores each, and keeps the minimum score.
+unfolding:
+  method: iterative_bayes
+  iterations: null
+  candidates: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  scan_toys: 300
+  final_toys: 3000
