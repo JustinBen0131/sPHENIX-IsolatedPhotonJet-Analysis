@@ -25,10 +25,12 @@ from .integrity import sha256
 from .integrity import metadata
 
 
-def definition(meta):
+def definition(meta, schema=None):
     """Physics identity, independent of each chunk's statistics and ROOT version."""
+    schema = schema or Schema()
+    require(schema.accepts_digest(meta['schema']['schema_sha256']), 'source schema differs')
     p, i = meta.get('photon_id',{}), meta.get('isolation',{})
-    return (meta['schema']['schema_sha256'],p.get('freeze_sha256'),p.get('model_sha256'),i.get('freeze_sha256'))
+    return (schema.contract_sha256,p.get('freeze_sha256'),p.get('model_sha256'),i.get('freeze_sha256'))
 
 
 def merge_shapes(metas):
@@ -115,12 +117,12 @@ def consolidate(chunks, output, *, logical_source_id, expected_events, exclusion
             m=metadata(f)
             centrality_hist.append(('hist/SIM/h_centrality' in f,f['eventTree'].num_entries))
             require('consolidation' not in m,'source is already consolidated')
-            require(m['schema']['schema_sha256'] == schema.sha256,'source schema differs')
+            require(schema.accepts_digest(m['schema']['schema_sha256']),'source schema differs')
             require(f['eventTree'].num_entries == m['schema']['entries'],'source entry metadata differs')
             require(m['schema']['entries'] == c['event_end']-c['event_begin'],
                     'source event accounting incomplete: retained plus rejected must cover interval')
             if metas:
-                require(definition(m) == definition(metas[0]),'nominal definition differs')
+                require(definition(m,schema) == definition(metas[0],schema),'nominal definition differs')
                 for k in ('system','lane'):
                     require(m['schema'][k] == metas[0]['schema'][k], 'chunk schema property differs: '+k)
                 for k in ('dataset','run','segment','sample','period','si_di_role'):
@@ -136,7 +138,7 @@ def consolidate(chunks, output, *, logical_source_id, expected_events, exclusion
                 'nonempty chunk is missing the source centrality histogram')
     combined=copy.deepcopy(metas[0]); combined['codes']=union
     combined['schema']['strides'], combined['collections'] = merge_shapes(metas)
-    combined['schema'].update(entries=entries,retained_events=retained,
+    combined['schema'].update(schema_sha256=schema.sha256,entries=entries,retained_events=retained,
         absent_branches=sorted(set.intersection(*(set(m['schema']['absent_branches']) for m in metas))))
     trigger=[m.get('trigger_run_info') for m in metas]
     if not all(v==trigger[0] for v in trigger):combined.pop('trigger_run_info',None)

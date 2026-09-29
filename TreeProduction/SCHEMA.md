@@ -859,7 +859,7 @@ Every file carries all 642 branches (the superset schema; a group that does not 
 
 ## Source coverage
 
-All 809 columns of the production final layout are accounted for:
+All 809 columns of the historical production layout are accounted for:
 
 | Disposition | Columns |
 |---|---:|
@@ -872,4 +872,4 @@ All 809 columns of the production final layout are accounted for:
 | STORE_CODE | 5 |
 | STORE_INDEX | 5 |
 
-The per-column list, with the rebuild rule of every column that is not stored as a branch, is the `sources` section of the schema file.
+The per-column list, with the rebuild rule of every column that is not stored as a branch, is the `sources` section of `TreeProduction/tests/historical_Format/schema/eventTree_v1.yaml`.
