@@ -16,6 +16,7 @@
 #include <fun4all/Fun4AllServer.h>
 
 #include <TSystem.h>
+#include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <exception>
@@ -38,7 +39,8 @@ int Fun4All_PhotonJetTree(const std::string& profile,
                           const std::string& sample = "",
                           const std::string& period = "",
                           const std::string& siDiRole = "",
-                          const int verbosity = 0)
+                          const int verbosity = 0,
+                          const bool checkOnly = false)
 {
   using photonjet::production::Job;
   using photonjet::production::Plan;
@@ -60,8 +62,23 @@ int Fun4All_PhotonJetTree(const std::string& profile,
     job.period = period;
     job.siDiRole = siDiRole;
     job.verbosity = verbosity;
+    job.macroSha256 = photonjet::production::detail::fileSha256(__FILE__);
 
     Plan plan = photonjet::production::LoadPlan(configFile, job);
+    const auto mapping=photonjet::production::OutputMappingStatusJson(plan.tree);
+    std::cout << "TREEPRODUCTION_MAPPING_JSON=" << mapping << std::endl;
+    if(!nlohmann::json::parse(mapping).at("ready").get<bool>())
+      throw std::runtime_error("native output mapping is incomplete; see mapping report");
+    if(checkOnly)return 0;
+    if(nEvents<0)
+      throw std::runtime_error("native execution requires an exact finite source event budget");
+    if(nEvents==0) {
+      // Fun4All run(0) means unbounded processing. Book/end the producer
+      // explicitly instead, without creating a server or reading a DST.
+      PhotonJetTree empty(plan.tree,"PhotonJetTree");
+      if(empty.Init(nullptr)!=0)return 1;
+      return empty.End(nullptr)==0?0:1;
+    }
     photonjet::production::ConfigureConditions(plan);
     photonjet::production::Print(plan);
 
@@ -72,16 +89,21 @@ int Fun4All_PhotonJetTree(const std::string& profile,
 
     photonjet::production::RegisterReconstruction(server, plan, producer);
     photonjet::production::RegisterInputs(server, plan);
+    photonjet::production::WriteProgress(plan.tree,"initialized",0,0,"",true);
 
     if (firstEntry > 0)
     {
-      if (server->skip(static_cast<int>(firstEntry)) != 0)
+      // Advance the original source cursor in bounded controlling chunks, so
+      // deterministic skip has accurate in-process progress as well.
+      for(std::int64_t skipped=0;skipped<firstEntry;)
       {
-        producer->markAborted();
-        server->End();
-        delete server;
-        gSystem->Exit(1);
-        return 1;
+        const int chunk=static_cast<int>(std::min<std::int64_t>(100,firstEntry-skipped));
+        if(server->skip(chunk)!=0) {
+          photonjet::production::WriteProgress(plan.tree,"aborted",0,skipped,"source skip failed",true);
+          producer->markAborted();server->End();delete server;gSystem->Exit(1);return 1;
+        }
+        skipped+=chunk;
+        photonjet::production::WriteProgress(plan.tree,"deterministic_skip",0,skipped,"",true);
       }
     }
 

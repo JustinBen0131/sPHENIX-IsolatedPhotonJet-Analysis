@@ -1,0 +1,21 @@
+# The environment the analysis stages are tested in and the reference results were reproduced with.
+#
+#   conda env create -f environment.yml
+#   conda activate photonjet
+#   python TreeProduction/scripts/check_environment.py
+#
+# Tree production runs in the sPHENIX software environment instead (TreeProduction/README.md).
+name: photonjet
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.18
+  - root=6.34.4
+  - numpy=2.2.6
+  - pyyaml=6.0.2
+  - pip
+  - pip:
+      - scipy==1.15.3
+      - uproot==5.7.4
+      - awkward==2.9.0
+      - matplotlib==3.10.6

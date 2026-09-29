@@ -1,3 +1,13 @@
-__pycache__/
+# Local qualification and generated outputs are not part of the user package.
+/tests/
+/models/.populations/
+/models/AuAu/*/
+!/models/AuAu/nominal/
+/models/PP/*/
+!/models/PP/nominal/
+!/models/AuAu/nominal/model.tmva.root
+!/models/PP/nominal/model.tmva.root
+**/__pycache__/
 *.pyc
+.pytest_cache/
 .venv/

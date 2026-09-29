@@ -4,12 +4,48 @@
   "output_root": "../output/trees",
   "production_config": "tree_production.yaml",
   "producer_library": null,
+  "isolation_freeze": "../../TreeToHists/config/auau_isolation_wp80.json",
+  "isolation_freeze_sha256": "bce274e6a5a777a6cacbc1e9cb1d975384cb32c9b1c3e5f5ef20d8903385353f",
   "lanes": {
-    "pp_data": {"profile": "pp_data", "manifest": null, "manifest_sha256": null},
-    "auau_data": {"profile": "auau_data", "manifest": null, "manifest_sha256": null},
-    "pp_photon_sim": {"profile": "pp_photon_sim", "manifest": null, "manifest_sha256": null},
-    "pp_inclusive_sim": {"profile": "pp_inclusive_sim", "manifest": null, "manifest_sha256": null},
-    "auau_photon_embedded": {"profile": "auau_photon_embedded", "manifest": null, "manifest_sha256": null},
-    "auau_inclusive_embedded": {"profile": "auau_inclusive_embedded", "manifest": null, "manifest_sha256": null}
+    "pp_data": {
+      "profile": "pp_data",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "auau_data": {
+      "profile": "auau_data",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "pp_photon_sim": {
+      "profile": "pp_photon_sim",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "pp_inclusive_sim": {
+      "profile": "pp_inclusive_sim",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "auau_photon_embedded": {
+      "profile": "auau_photon_embedded",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "auau_inclusive_embedded": {
+      "profile": "auau_inclusive_embedded",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "pp_photon_di": {
+      "profile": "pp_photon_di",
+      "manifest": null,
+      "manifest_sha256": null
+    },
+    "pp_inclusive_di": {
+      "profile": "pp_inclusive_di",
+      "manifest": null,
+      "manifest_sha256": null
+    }
   }
 }

@@ -1,296 +1,114 @@
-"""The histogram package: what TreeToHists writes and FinalAnalysis reads.
+"""Public sample histogram inventory; the C++ fillers own calculation and binning."""
 
-One package holds the sufficient statistics of the implemented analysis
-contract. Unsupported covariance/measurement extensions must fail explicitly;
-FinalAnalysis never returns to a tree. Arrays are numpy, saved as one ``.npz``
-beside a ``.json`` of metadata. Nothing here computes physics; this module
-only names the arrays, fixes their shapes and checks them.
+# Public sample object inventory. Physics filling remains in the C++ reducers.
+SHAPES = ['e11_over_e33', 'e32_over_e35', 'bdt', 'weta_cogx', 'wphi_cogx',
+          'weta33_cogx', 'wphi33_cogx', 'et1', 'et2', 'et3', 'et4']
+WIDTHS = ['weta_cogx', 'wphi_cogx', 'weta33_cogx', 'wphi33_cogx']
+THRESHOLDS = [5, 7, 10, 12]
+RESPONSE = {
+    'photon_reco': 'reco_et', 'photon_truth': 'truth_et',
+    'photon_response_truth_x_reco': 'truth_et,reco_et',
+    'photon_fakes': 'reco_et', 'photon_misses': 'truth_et',
+    'xj_reco': 'reco_et,xj', 'xj_truth': 'truth_et,xj',
+    'xj_response_truth_global_x_reco_global': 'truth_cell,reco_cell',
+    'xj_fakes': 'reco_et,xj', 'xj_fake_photon_reco': 'reco_et,xj',
+    'xj_detector_fakes_reco': 'reco_et,xj', 'xj_misses': 'truth_et,xj',
+    'xj_combinatoric_reco': 'reco_et,xj',
+    'signal_leakage_truth_matched_abcd': 'region_abcd,reco_et',
+    **{f'dphi_{kind}_{side}': 'reco_et,xj,dphi' for kind in ['truthjet', 'combinatoric']
+       for side in ['near', 'far']}}
 
-Grids (from config/measurement.yaml)
-    pt_edges          measurement photon-pT bins, n_pt
-    xj_edges          xJ bins, n_xj
-    reco_pt_edges     response classification grid, reconstructed, n_reco
-    truth_pt_edges    response classification grid, truth, n_truth
-
-Arrays (every count array has a matching ``<name>_sumw2``)
-
-  Data and simulation
-    abcd_counts                (4, n_pt)         event-leading photons per region A,B,C,D
-    abcd_events                (4, n_pt) int     unweighted event counts
-    recoil_spectra             (2, n_pt, n_xj)   recoil xJ of the region-A and region-C leader
-    photon_et_denominator      (n_pt,)           every kinematically selected photon (no ID), for efficiencies
-    bootstrap_abcd_counts      (R, 4, n_pt)      event-bootstrap replicas
-    bootstrap_recoil_spectra   (R, 2, n_pt, n_xj)
-
-  Simulation only (truth-conditioned, same selection)
-    leakage_abcd_counts        (4, n_pt)         event-leading truth-signal photons per region
-    truth_photons              (n_truth,)        truth-signal photons on the truth grid
-    photon_response            (n_truth, n_reco) truth pT x reco ET of the region-A leader, matched
-    photon_misses              (n_truth,)
-    photon_fakes               (n_reco,)         region-A leader without a truth match
-    photon_boundary_fakes      (n_reco,)         matched, truth off the truth grid
-    pair_truth                 (n_truth * n_xj,) truth photon-jet pairs, flattened g = i_pt * n_xj + i_xj
-    pair_reco                  (n_reco * n_xj,)
-    pair_response              (n_truth * n_xj, n_reco * n_xj)
-    pair_misses                (n_truth * n_xj,)
-    pair_fakes_<cause>         (n_reco * n_xj,)  UNMATCHED_RECO, COMBINATORIC
-    pair_boundary_reco_<key>   (n_reco * n_xj,)  matched with truth off grid, and ASSIGNED_HARD_NONFIDUCIAL
-    pair_boundary_truth_<key>  (n_truth * n_xj,) matched with reco off grid
-
-Metadata (json)
-    schema, family, system, measurement_version, selection, grids, inputs
-    (paths, hashes, sample, weight receipts), counts, model, working points,
-    truth_signal_only flag, bootstrap seed and replica count.
-"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass, field
-import hashlib
-import json
-from pathlib import Path
-from typing import Any
-
-import numpy as np
-
-SCHEMA = "PhotonJetHistogramPackageV1"
-REGION_ORDER = ("A", "B", "C", "D")
-RECOIL_REGIONS = ("A", "C")
-
-# Response categories (names shared with FinalAnalysis).
-UNMATCHED_RECO = "UNMATCHED_RECO"
-COMBINATORIC = "COMBINATORIC"
-ASSIGNED_HARD_NONFIDUCIAL = "ASSIGNED_HARD_NONFIDUCIAL"
-PHOTON_RECO_MISS = "PHOTON_RECO_MISS"
-
-
-@dataclass
-class Grids:
-    pt_edges: np.ndarray
-    xj_edges: np.ndarray
-    reco_pt_edges: np.ndarray
-    truth_pt_edges: np.ndarray
-
-    def __post_init__(self) -> None:
-        for name in ("pt_edges", "xj_edges", "reco_pt_edges", "truth_pt_edges"):
-            values = np.asarray(getattr(self, name), dtype=float)
-            if values.ndim != 1 or len(values) < 2 or np.any(~np.isfinite(values)) or np.any(np.diff(values) <= 0):
-                raise ValueError(f"{name} must be strictly increasing with at least two edges")
-            setattr(self, name, values)
-
-    @property
-    def n_pt(self) -> int:
-        return len(self.pt_edges) - 1
-
-    @property
-    def n_xj(self) -> int:
-        return len(self.xj_edges) - 1
-
-    @property
-    def n_reco(self) -> int:
-        return len(self.reco_pt_edges) - 1
-
-    @property
-    def n_truth(self) -> int:
-        return len(self.truth_pt_edges) - 1
-
-    def flatten(self, i_pt: int, i_xj: int) -> int:
-        return i_pt * self.n_xj + i_xj
-
-    def to_dict(self) -> dict[str, list[float]]:
-        return {name: getattr(self, name).tolist() for name in ("pt_edges", "xj_edges", "reco_pt_edges", "truth_pt_edges")}
-
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "Grids":
-        return cls(
-            pt_edges=config["photon"]["pt_edges_gev"], xj_edges=config["recoil"]["xj_edges"],
-            reco_pt_edges=config["response"]["reco_ptgamma_edges"], truth_pt_edges=config["response"]["truth_ptgamma_edges"],
-        )
-
-
-def axis_bin(value: float, edges: np.ndarray) -> int | None:
-    """Bin index of value on edges, None when outside or non-finite."""
-
-    if not np.isfinite(value):
-        return None
-    index = int(np.searchsorted(edges, value, side="right") - 1)
-    return index if 0 <= index < len(edges) - 1 else None
-
-
-@dataclass
-class Package:
-    grids: Grids
-    arrays: dict[str, np.ndarray] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
-    sample_arrays: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
-
-    # ---- construction --------------------------------------------------------------
-
-    @classmethod
-    def empty(cls, grids: Grids, *, simulation: bool, replicas: int) -> "Package":
-        if replicas < 2 or replicas > 10000:
-            raise ValueError("bootstrap replicas must be in [2, 10000]")
-        g = grids
-        cells = replicas * (4*g.n_pt + 2*g.n_pt*g.n_xj) + 2*g.n_truth*g.n_reco*g.n_xj**2
-        if cells * 8 > 256 * 1024**2:
-            raise ValueError("single package would exceed 256 MiB; reduce explicit fanout")
-        package = cls(grids=g)
-        a = package.arrays
-        a["abcd_counts"] = np.zeros((4, g.n_pt)); a["abcd_counts_sumw2"] = np.zeros((4, g.n_pt))
-        a["abcd_events"] = np.zeros((4, g.n_pt), dtype=np.int64)
-        a["recoil_spectra"] = np.zeros((2, g.n_pt, g.n_xj)); a["recoil_spectra_sumw2"] = np.zeros((2, g.n_pt, g.n_xj))
-        a["photon_et_denominator"] = np.zeros(g.n_pt); a["photon_et_denominator_sumw2"] = np.zeros(g.n_pt)
-        a["bootstrap_abcd_counts"] = np.zeros((replicas, 4, g.n_pt))
-        a["bootstrap_recoil_spectra"] = np.zeros((replicas, 2, g.n_pt, g.n_xj))
-        for name, size in (("accepted_event_weight", 1), ("combinatoric_photon_denominator", g.n_pt)):
-            a[name] = np.zeros(size); a[f"{name}_sumw2"] = np.zeros(size)
-        if simulation:
-            nt, nr, nx = g.n_truth, g.n_reco, g.n_xj
-            for name, shape in (
-                ("leakage_abcd_counts", (4, g.n_pt)),
-                ("truth_photons", (nt,)), ("photon_response", (nt, nr)), ("photon_misses", (nt,)),
-                ("photon_reco", (nr,)), ("photon_fakes", (nr,)), ("photon_boundary_fakes", (nr,)),
-                ("pair_truth", (nt * nx,)), ("pair_reco", (nr * nx,)), ("pair_response", (nt * nx, nr * nx)),
-                ("pair_misses", (nt * nx,)),
-                (f"pair_fakes_{UNMATCHED_RECO}", (nr * nx,)), (f"pair_fakes_{COMBINATORIC}", (nr * nx,)),
-                (f"pair_boundary_reco_{ASSIGNED_HARD_NONFIDUCIAL}", (nr * nx,)),
-            ):
-                a[name] = np.zeros(shape); a[f"{name}_sumw2"] = np.zeros(shape)
-        return package
-
-    def component(self, name: str, shape: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
-        """Return (values, sumw2) of a named array, creating it when absent."""
-
-        if name not in self.arrays:
-            self.arrays[name] = np.zeros(shape); self.arrays[f"{name}_sumw2"] = np.zeros(shape)
-        return self.arrays[name], self.arrays[f"{name}_sumw2"]
-
-    def fill(self, name: str, index, weight: float) -> None:
-        if not np.isfinite(weight) or weight < 0:
-            raise ValueError("this count contract requires finite nonnegative weights")
-        self.arrays[name][index] += weight
-        self.arrays[f"{name}_sumw2"][index] += weight * weight
-
-    # ---- checks --------------------------------------------------------------------
-
-    def check(self) -> dict[str, Any]:
-        a = self.arrays
-        report: dict[str, Any] = {}
-        if not a or "abcd_counts" not in a or "bootstrap_abcd_counts" not in a:
-            raise ValueError("incomplete histogram package")
-        expected = Package.empty(self.grids, simulation="pair_response" in a,
-                                 replicas=a["bootstrap_abcd_counts"].shape[0]).arrays
-        for name, values in expected.items():
-            if name not in a or a[name].shape != values.shape:
-                raise ValueError(f"missing or malformed required array {name}")
-        for name, values in a.items():
-            if np.any(~np.isfinite(values)) or np.any(values < -1.0e-12):
-                raise ValueError(f"{name} has a non-finite or negative entry")
-            if name.endswith("_sumw2") or name.startswith("bootstrap_") or name == "abcd_events":
-                continue
-            if f"{name}_sumw2" not in a:
-                raise ValueError(f"{name} has no sumw2 companion")
-            if a[f"{name}_sumw2"].shape != values.shape:
-                raise ValueError(f"{name}_sumw2 shape differs from {name}")
-        if "pair_response" in a:
-            g = self.grids
-            reco_partition = a["pair_response"].sum(axis=0) + self.all_pair_fakes()
-            truth_partition = a["pair_response"].sum(axis=1) + self.all_pair_misses()
-            report["pair_reco_closes"] = bool(np.allclose(a["pair_reco"], reco_partition, rtol=1e-9, atol=1e-9))
-            report["pair_truth_closes"] = bool(np.allclose(a["pair_truth"], truth_partition, rtol=1e-9, atol=1e-9))
-            report["photon_truth_closes"] = bool(np.allclose(a["truth_photons"], a["photon_response"].sum(axis=1) + a["photon_misses"], rtol=1e-9, atol=1e-9))
-            report["photon_reco_closes"] = bool(np.allclose(a["photon_reco"], a["photon_response"].sum(axis=0) + a["photon_fakes"] + a["photon_boundary_fakes"], rtol=1e-9, atol=1e-9))
-            if not all(report.values()):
-                raise ValueError(f"response partition does not close: {report}")
-            report["pair_response_shape"] = [g.n_truth * g.n_xj, g.n_reco * g.n_xj]
-        return report
-
-    def all_pair_fakes(self) -> np.ndarray:
-        total = np.zeros_like(self.arrays["pair_reco"])
-        for name, values in self.arrays.items():
-            if (name.startswith("pair_fakes_") or name.startswith("pair_boundary_reco_")) and not name.endswith("_sumw2"):
-                total = total + values
-        return total
-
-    def all_pair_misses(self) -> np.ndarray:
-        total = self.arrays["pair_misses"].copy()
-        for name, values in self.arrays.items():
-            if name.startswith("pair_boundary_truth_") and not name.endswith("_sumw2"):
-                total = total + values
-        return total
-
-    def fake_causes(self) -> dict[str, np.ndarray]:
-        return {name[len("pair_fakes_"):]: values for name, values in self.arrays.items()
-                if name.startswith("pair_fakes_") and not name.endswith("_sumw2")}
-
-    def boundary_reco(self) -> dict[str, np.ndarray]:
-        return {name[len("pair_boundary_reco_"):]: values for name, values in self.arrays.items()
-                if name.startswith("pair_boundary_reco_") and not name.endswith("_sumw2")}
-
-    # ---- persistence ---------------------------------------------------------------
-
-    def save(self, stem: Path) -> tuple[Path, Path]:
-        """Write additive arrays first; a hash-bound JSON receipt completes the package."""
-        stem = Path(stem)
-        npz, meta = stem.with_suffix(".npz"), stem.with_suffix(".json")
-        if npz.exists() or meta.exists():
-            raise FileExistsError(f"refusing to overwrite {stem}")
-        check = self.check()
-        stem.parent.mkdir(parents=True, exist_ok=True)
-        arrays = {**self.arrays, **{f"grid_{k}": v for k, v in self.grids.to_dict().items()}}
-        for sample, subset in self.sample_arrays.items():
-            for name, values in subset.items():
-                arrays[f"sample::{sample}::{name}"] = values
-        np.savez_compressed(npz, **{k: np.asarray(v) for k, v in arrays.items()})
-        payload = {**self.metadata, "schema": SCHEMA, "grids": self.grids.to_dict(),
-                   "arrays": sorted(self.arrays), "samples": sorted(self.sample_arrays),
-                   "check": check, "npz_sha256": file_sha256(npz)}
-        meta.write_text(json.dumps(payload, indent=2, sort_keys=True, default=float, allow_nan=False) + "\n", encoding="utf-8")
-        return npz, meta
-
-    @classmethod
-    def load(cls, stem: Path) -> "Package":
-        stem = Path(stem)
-        meta = json.loads(stem.with_suffix(".json").read_text(encoding="utf-8"))
-        if meta.get("schema") != SCHEMA or meta.get("npz_sha256") != file_sha256(stem.with_suffix(".npz")):
-            raise ValueError(f"{stem}: package schema or array hash differs")
-        grids = Grids(**meta["grids"])
-        samples = {}
-        with np.load(stem.with_suffix(".npz"), allow_pickle=False) as data:
-            arrays = {name: np.asarray(data[name]) for name in data.files
-                      if not name.startswith(("grid_", "sample::"))}
-            for name, edges in grids.to_dict().items():
-                if not np.array_equal(data[f"grid_{name}"], edges):
-                    raise ValueError(f"{stem}: JSON and array grids disagree")
-            for name in data.files:
-                if name.startswith("sample::"):
-                    _, sample, field_name = name.split("::", 2)
-                    samples.setdefault(sample, {})[field_name] = np.asarray(data[name])
-        if sorted(arrays) != meta["arrays"] or sorted(samples) != meta["samples"]:
-            raise ValueError("package inventory differs from its receipt")
-        package = cls(grids=grids, arrays=arrays, sample_arrays=samples,
-                      metadata={k: v for k, v in meta.items() if k not in
-                                ("schema", "grids", "arrays", "samples", "check", "npz_sha256")})
-        package.check()
-        if samples:
-            combined = {}
-            for sample, subset in samples.items():
-                cls(grids, subset).check()
-                for name, values in subset.items():
-                    combined[name] = combined.get(name, np.zeros_like(values)) + values
-            if set(combined) != set(arrays) or any(not np.allclose(v, arrays[k], rtol=1e-12, atol=1e-12)
-                                                  for k, v in combined.items()):
-                raise ValueError("sample partitions do not reproduce family totals")
-        return package
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-__all__ = ["ASSIGNED_HARD_NONFIDUCIAL", "COMBINATORIC", "Grids", "PHOTON_RECO_MISS", "Package",
-           "RECOIL_REGIONS", "REGION_ORDER", "SCHEMA", "UNMATCHED_RECO", "axis_bin"]
+def inventory(system, family):
+    auau, sim = system == 'AuAu', family != 'DATA'
+    classes = ['cent0_20', 'cent20_50', 'cent50_80'] if auau else ['all']
+    labels = ['data'] if not sim else (['sig', 'phoother'] if family == 'photonjet' else ['bkg', 'jetprompt'])
+    F = 'data' if not sim else ('phosim' if family == 'photonjet' else 'jetsim')
+    rows = []
+    def add(path, axes, group, old=None, status='existing_booking'):
+        rows.append(dict(path=path, axes=axes.split(','), group=group,
+                         old_key=old, implementation=status, sumw2=True))
+    for c in classes:
+        for n, axes in [('events', 'count'), ('photons', 'et'), ('abcd', 'region_abcd,et')]:
+            add(f'measurement/{c}/{n}', axes, 'measurement', f'{n}_{c}')
+        for t in THRESHOLDS:
+            add(f'measurement/{c}/jet{t}/recoil', 'region_ac,et,xj', 'measurement', f'recoil_{c}_jet{t}')
+            for region in ['A', 'C']:
+                for side in ['near', 'far']:
+                    n = f'dphi{region}_{side}'
+                    add(f'measurement/{c}/jet{t}/{n}', 'et,xj,dphi', 'measurement', f'dphi{region}_{c}_jet{t}_{side}')
+            if sim:
+                for n, axes in RESPONSE.items():
+                    add(f'response/{c}/jet{t}/{n}', axes, 'response', f'{n}_{c}_jet{t}')
+        for label in labels:
+            dest = f'qa/photons/{c}/{label}'
+            tag = f'{label}_{c}'
+            for v in SHAPES:
+                add(f'{dest}/shape_{v}', f'{v},et,stage', 'qa', f'ss_{v}_{tag}')
+            for n, axes in [('ncb', 'npb,et'), ('iso', 'iso,et,id'),
+                            ('abcd', 'region_abcd,et'), ('recoil', 'region_ac,et,xj'),
+                            ('scoreiso', 'score,iso,et'), ('clu_et', 'wide_et,stage'),
+                            ('clu_etaphi', 'eta,phi,stage')]:
+                add(f'{dest}/{n}', axes, 'qa', f'{n}_{tag}')
+            if auau:
+                add(f'{dest}/isonoue', 'iso,et,id', 'qa', f'isonoue_{tag}')
+            if sim:
+                add(f'{dest}/abcdown', 'region_abcd,et,generator_window', 'qa', f'abcdown_{tag}')
+                add(f'{dest}/recoilown', 'region_ownership,et,xj', 'qa', f'recoilown_{tag}')
+        for n, axes in [('evt_vz', 'vz'), ('jet_pt', 'jet_pt,event_selection'),
+                        ('jet_etaphi', 'jet_eta,jet_phi,event_selection')]:
+            add(f'qa/events/{c}/{n}', axes, 'qa', f'{n}_{F}_{c}')
+        if not sim:
+            add(f'qa/photons/{c}/data/e11e33_dt', 'e11_over_e33,et,time_minus_mbd', 'qa', f'e11e33_dt_data_{c}')
+            add(f'qa/photons/{c}/data/etatime', 'eta,time_minus_mbd', 'qa', f'etatime_data_{c}')
+        if family == 'photonjet':
+            add(f'qa/truth/{c}/truth_iso', 'truth_iso,truth_et,prompt_class', 'qa', f'truth_iso_{c}')
+            add(f'qa/truth/{c}/eff', 'truth_et,efficiency_stage,reco_et', 'qa', f'eff_{c}')
+        # Three fraction distributions cover all nine stage-3 branches by component axis.
+        for radius in ['02', '03', '04']:
+            add(f'qa/jets/{c}/R{radius}/calo_fractions', 'fraction,jet_pt,calo_component',
+                'extension', status='proposed_requires_stage3')
+        if sim:
+            for obj in ['photon', 'jet']:
+                add(f'qa/matching/{c}/{obj}', 'delta_r,reco_pt,match_class',
+                    'extension', status='proposed')
+        else:
+            add(f'qa/photons/{c}/data/e11e33_npb_timing', 'e11_over_e33,et,time_minus_mbd',
+                'extension', status='proposed_requires_explicit_tag_predicate')
+    for label in labels:
+        dest = f'qa/slices/{label}'
+        for n, axes in [('bdt', 'score,et,centrality_slice'), ('isoslice', 'iso,et,centrality_slice')]:
+            add(f'{dest}/{n}', axes, 'qa', f'{n}_{label}')
+        if auau:
+            add(f'{dest}/isonoueslice', 'iso,et,centrality_slice', 'qa', f'isonoueslice_{label}')
+        for v in WIDTHS:
+            add(f'{dest}/width_{v}', f'{v},et,centrality_slice', 'qa', f'width_{v}_{label}')
+    add('qa/events/calo_total', 'calo_total,centrality,mb_state', 'qa', f'evt_calo_{F}')
+    if auau:
+        add('qa/events/centrality', 'centrality,weight_mode', 'qa', f'evt_cent_{F}')
+        if not sim:
+            add('qa/events/centrality_scaled_bits', 'centrality,scaled_bit', 'qa', 'cent_bits_data')
+    if sim:
+        add('qa/generator/leading_pt', 'generator_pt,generator_kind', 'qa', f'gen_{F}')
+        add('qa/photon_id/score_roles', 'score,et,centrality_slice,truth_role',
+            'extension', status='proposed_no_truth_isolation_requirement')
+    else:
+        add('qa/events/trigger_bits_raw', 'max_cluster_energy,scaled_bit,live_bit', 'qa', 'trig_data')
+        add('qa/events/trigger_max_cluster_energy', 'max_cluster_energy,semantic_trigger,trigger_state',
+            'extension', status='proposed_requires_per_run_trigger_blocks')
+    for n, axes in [('cutflow', 'gate,centrality,weight_mode'), ('weights', 'event_weight,weight_state'),
+                    ('mbd_charge', 'mbd_charge,centrality')]:
+        add(f'qa/events/{n}', axes, 'extension', status='proposed')
+    for detector in ['emcal', 'ihcal', 'ohcal', 'total']:
+        add(f'qa/events/{detector}_vs_mbd_charge', f'calo_{detector},mbd_charge,mb_state',
+            'extension', status='proposed')
+        if detector != 'total':
+            add(f'qa/events/{detector}_vs_centrality', f'calo_{detector},centrality,mb_state',
+                'extension', status='proposed')
+    if auau and not sim:
+        # Retain the nominal Photon12 stream and its top-level aliases.
+        measurement = [r for r in rows if r['group']=='measurement']
+        for trigger in ('photon12',):
+            rows.extend(dict(r,path='triggers/'+trigger+'/'+r['path'],
+                             old_key='triggers/'+trigger+'/'+r['old_key']) for r in measurement)
+    assert len({r['path'] for r in rows}) == len(rows)
+    return rows

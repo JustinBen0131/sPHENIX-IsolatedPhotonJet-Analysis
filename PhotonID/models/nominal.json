@@ -1,0 +1,138 @@
+{
+ "schema": "CanonicalPhotonIDFreezeV1",
+ "version": "1.0",
+ "note": "The photon-ID models and working points the eventTree augmentation applies. Au+Au: THE-134 v16 H70 centAsFeatBase3x3_pt15to35, the model behind the IAN numbers and PLOT-015; re-derivation on new production replaces the surfaces only through a new version of this file. pp: PPG12 original BaseV3E.",
+ "auau": {
+  "model": {
+   "file": "auau_the134_h70.tmva.root",
+   "sha256": "8328af75235c8bcbf63659ba791ceff4e1165018de269c889472c6a80a26a41f",
+   "evaluator": "ROOT TMVA Experimental RBDT",
+   "trees": 450,
+   "cuts": 6724,
+   "base_score": 0.004885449539870024
+  },
+  "features": {
+   "view": "H70",
+   "view_semantic_sha256": "fe6633650503f23cf3cfa662a2884d29efbcd7ca465b5b02cfe31ec220db3987",
+   "floor_gev": 0.07,
+   "order": [
+    "cluster_Et",
+    "cluster_weta_cogx",
+    "cluster_wphi_cogx",
+    "cluster_weta33_cogx",
+    "cluster_wphi33_cogx",
+    "vertexz",
+    "cluster_Eta",
+    "e11_over_e33",
+    "cluster_et1",
+    "cluster_et2",
+    "cluster_et3",
+    "cluster_et4",
+    "e32_over_e35",
+    "centrality"
+   ],
+   "count": 14,
+   "source": "the H70 shower view ordered_features (eventTree shv_features, the H70 position of the view order)"
+  },
+  "domain": {
+   "et_min": 15.0,
+   "et_max_exclusive": 35.0,
+   "centrality_min": 0.0,
+   "centrality_max_exclusive": 80.0,
+   "centrality": "events.centrality (eventTree cent_value)"
+  },
+  "working_points": {
+   "axis": "centrality",
+   "operator": "score > threshold",
+   "bins": [
+    0,
+    10,
+    20,
+    30,
+    40,
+    50,
+    60,
+    80
+   ],
+   "WP70": {
+    "intercept": 0.6927385742113304,
+    "slope": 0.0010476808935335573
+   },
+   "WP80": {
+    "intercept": 0.6071724560222583,
+    "slope": 0.0013019695025559648
+   },
+   "WP90": {
+    "intercept": 0.4634577166843198,
+    "slope": 0.0015466253667456042
+   }
+  },
+  "regions": {
+   "tight": "s > WP70(c)",
+   "non_tight": "0.1 < s < WP80(c)",
+   "gap": "WP80(c) <= s <= WP70(c), excluded",
+   "fail": "otherwise"
+  }
+ },
+ "pp": {
+  "model": {
+   "file": "pp_ppg12_base_v3e.tmva.root",
+   "sha256": "7679e634260402fb3815b2733767182690eec7587f9e09bffc307a05d00d59df",
+   "evaluator": "ROOT TMVA Experimental RBDT",
+   "trees": 750,
+   "cuts": 22653,
+   "base_score": 0.005007610656321049
+  },
+  "features": {
+   "view": "H70",
+   "count": 11,
+   "source": "the producer score (models.raw_score, eventTree pho_prodbdt_score), verified against an RBDT recompute on the H70 view: at most 2 float32 ulp (the farm and local ROOT builds round the last bits differently) and no photon-ID region change",
+   "floor_gev": 0.07,
+   "view_semantic_sha256": "fe6633650503f23cf3cfa662a2884d29efbcd7ca465b5b02cfe31ec220db3987",
+   "order": [
+    "cluster_Et",
+    "cluster_weta_cogx",
+    "cluster_wphi_cogx",
+    "vertexz",
+    "cluster_Eta",
+    "e11_over_e33",
+    "cluster_et1",
+    "cluster_et2",
+    "cluster_et3",
+    "cluster_et4",
+    "e32_over_e35"
+   ]
+  },
+  "domain": {
+   "et_min": 7.0,
+   "et_max_exclusive": null,
+   "note": "the producer score where finite_score == 1; the producer writes the sentinel -1.0 below 7 GeV"
+  },
+  "regions": {
+   "tight": "s > 0.815625 - 0.0015625*ET",
+   "non_tight": "0.7333333333333333 - 0.01333333333333333*ET < s < 0.684375 + 0.0015625*ET",
+   "gap": "between the non-tight upper edge and the tight cut",
+   "fail": "otherwise"
+  }
+ },
+ "codes": {
+  "pho_bdt_state": {
+   "1": "scored inside the model domain",
+   "0": "outside the model domain",
+   "2": "no valid inputs"
+  },
+  "pho_id_class": {
+   "3": "tight",
+   "2": "excluded gap",
+   "1": "non-tight",
+   "0": "fail",
+   "-1": "not classified"
+  }
+ },
+ "provenance": {
+  "model_metadata.json": "65c53aae0d19323dc2ea25e92fa9ffbe8e56fc655543a7fbd7ad5192067fff54",
+  "paired_registry.json": "606e6065a4289acc62a467c9ae57b5237a4c935a0c0f031f50d751d04513ddea",
+  "working_points.json": "cac36074ca68cc0ec2c82a834136e6e8e7aabb190ba21d53b3ecd776c91999be",
+  "population_certificate.json": "e6b12e8fb1bd7c6e3674c8fb723d515718d88cccb16a09d07f7343e704d1af99"
+ }
+}

@@ -1,0 +1,57 @@
+{
+  "artifacts": {
+    "model.tmva.root": "7679e634260402fb3815b2733767182690eec7587f9e09bffc307a05d00d59df"
+  },
+  "cdb": {
+    "conditions": null,
+    "identity": null,
+    "status": "CORRESPONDENCE_UNVERIFIED"
+  },
+  "definition": {
+    "domain": {
+      "et_max_exclusive": null,
+      "et_min": 7.0,
+      "note": "the producer score where finite_score == 1; the producer writes the sentinel -1.0 below 7 GeV"
+    },
+    "features": {
+      "count": 11,
+      "floor_gev": 0.07,
+      "order": [
+        "cluster_Et",
+        "cluster_weta_cogx",
+        "cluster_wphi_cogx",
+        "vertexz",
+        "cluster_Eta",
+        "e11_over_e33",
+        "cluster_et1",
+        "cluster_et2",
+        "cluster_et3",
+        "cluster_et4",
+        "e32_over_e35"
+      ],
+      "source": "the producer score (models.raw_score, eventTree pho_prodbdt_score), verified against an RBDT recompute on the H70 view: at most 2 float32 ulp (the farm and local ROOT builds round the last bits differently) and no photon-ID region change",
+      "view": "H70",
+      "view_semantic_sha256": "fe6633650503f23cf3cfa662a2884d29efbcd7ca465b5b02cfe31ec220db3987"
+    },
+    "model": {
+      "base_score": 0.005007610656321049,
+      "cuts": 22653,
+      "evaluator": "ROOT TMVA Experimental RBDT",
+      "file": "pp_ppg12_base_v3e.tmva.root",
+      "sha256": "7679e634260402fb3815b2733767182690eec7587f9e09bffc307a05d00d59df",
+      "trees": 750
+    },
+    "regions": {
+      "fail": "otherwise",
+      "gap": "between the non-tight upper edge and the tight cut",
+      "non_tight": "0.7333333333333333 - 0.01333333333333333*ET < s < 0.684375 + 0.0015625*ET",
+      "tight": "s > 0.815625 - 0.0015625*ET"
+    }
+  },
+  "freeze_sha256": "c986e6f13c11e9dd8a9961ec0ccf2bfdb214ad8950159924da23cf52dec2d2a0",
+  "name": "nominal",
+  "schema": "PhotonIDFrozenNominalV1",
+  "score_branch": "pho_bdt_score",
+  "status": "FROZEN_BYTES_VERIFIED",
+  "system": "PP"
+}

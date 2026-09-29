@@ -1,0 +1,47 @@
+{
+  "schema": "AtlasHepDataTableSubsetV1",
+  "record": "ins1694678",
+  "hepdata_record_id": 85369,
+  "table_id": 359676,
+  "table": "Table 1",
+  "location": "Data from Figure 4",
+  "doi": "10.17182/hepdata.85369.v1/t1",
+  "paper_doi": "10.1016/j.physletb.2018.12.023",
+  "paper_citation": "ATLAS Collaboration, Phys. Lett. B 789 (2019) 167-190",
+  "source_endpoint": "https://www.hepdata.net/record/data/85369/359676/1/0",
+  "source_endpoint_sha256_observed_2026_08_14": "f151d254563116da31b5b3c37d1de74b4013fde552218c42bcbea398ee051763",
+  "selection": {
+    "sqrt_s_nn_gev": 5020,
+    "photon_pt_gev": [63.1, 79.6],
+    "jet_radius": 0.4,
+    "jet_pt_min_gev": 31.6,
+    "photon_abs_eta_max": 2.37,
+    "photon_eta_excluded": [1.37, 1.52],
+    "jet_abs_eta_max": 2.8,
+    "delta_phi_min": "7pi/8",
+    "pbpb_centrality_percent": [0, 10]
+  },
+  "uncertainties": {
+    "stat": "published HEPData statistical uncertainty",
+    "sys": "published HEPData total systematic uncertainty"
+  },
+  "series": {
+    "pp_group": 0,
+    "pbpb_0_10_group": 5
+  },
+  "bins": [
+    {"low": 0.501190, "high": 0.562340, "pp": {"value": 0.785510, "stat": 0.017090, "sys": 0.074840}, "pbpb_0_10": {"value": 1.192740, "stat": 0.076090, "sys": 0.154190}},
+    {"low": 0.562340, "high": 0.630960, "pp": {"value": 0.779220, "stat": 0.016460, "sys": 0.040110}, "pbpb_0_10": {"value": 0.988790, "stat": 0.051020, "sys": 0.128930}},
+    {"low": 0.630960, "high": 0.707950, "pp": {"value": 0.814380, "stat": 0.015990, "sys": 0.039180}, "pbpb_0_10": {"value": 0.834970, "stat": 0.036720, "sys": 0.125190}},
+    {"low": 0.707950, "high": 0.794330, "pp": {"value": 0.938940, "stat": 0.016680, "sys": 0.046750}, "pbpb_0_10": {"value": 0.737250, "stat": 0.031820, "sys": 0.098840}},
+    {"low": 0.794330, "high": 0.891250, "pp": {"value": 1.134340, "stat": 0.018390, "sys": 0.038640}, "pbpb_0_10": {"value": 0.696650, "stat": 0.032360, "sys": 0.085740}},
+    {"low": 0.891250, "high": 1.000000, "pp": {"value": 1.252840, "stat": 0.020170, "sys": 0.077630}, "pbpb_0_10": {"value": 0.614550, "stat": 0.032470, "sys": 0.091030}},
+    {"low": 1.000000, "high": 1.122020, "pp": {"value": 0.719400, "stat": 0.014050, "sys": 0.111460}, "pbpb_0_10": {"value": 0.330480, "stat": 0.021400, "sys": 0.066020}},
+    {"low": 1.122020, "high": 1.258930, "pp": {"value": 0.289670, "stat": 0.007780, "sys": 0.068680}, "pbpb_0_10": {"value": 0.145380, "stat": 0.012170, "sys": 0.033560}},
+    {"low": 1.258930, "high": 1.412540, "pp": {"value": 0.139590, "stat": 0.005200, "sys": 0.024360}, "pbpb_0_10": {"value": 0.080780, "stat": 0.008990, "sys": 0.016030}},
+    {"low": 1.412540, "high": 1.584890, "pp": {"value": 0.071700, "stat": 0.003600, "sys": 0.015650}, "pbpb_0_10": {"value": 0.049920, "stat": 0.007470, "sys": 0.011310}},
+    {"low": 1.584890, "high": 1.778280, "pp": {"value": 0.036750, "stat": 0.002510, "sys": 0.008120}, "pbpb_0_10": {"value": 0.028040, "stat": 0.006010, "sys": 0.007300}},
+    {"low": 1.778280, "high": 1.995260, "pp": {"value": 0.016370, "stat": 0.001540, "sys": 0.004160}, "pbpb_0_10": {"value": 0.011370, "stat": 0.003460, "sys": 0.002950}}
+  ],
+  "curation_note": "This file retains only the pp and 0-10% Pb+Pb groups needed for the sPHENIX comparison. Numeric values and both published uncertainty components were transcribed directly from the HEPData JSON endpoint without rescaling or recombination."
+}

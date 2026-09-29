@@ -7,7 +7,16 @@ outputs/
 results/
 scores/
 *.root
+!PhotonID/frozen/*.tmva.root
 *.npz
 .pytest_cache/
 TreeProduction/PHOTON_RECONSTRUCTION_THE358_AUDIT.md
 CANONICAL_PLOT_PROVENANCE.md
+/Makefile
+
+# Development qualification lives outside the public package.
+**/tests/
+**/reports/
+**/.work/
+**/build/
+!PhotonID/models/**/model.tmva.root

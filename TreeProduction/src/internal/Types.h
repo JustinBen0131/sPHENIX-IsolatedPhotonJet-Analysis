@@ -1,65 +1,24 @@
 #ifndef PHOTONJETTREE_INTERNAL_TYPES_H
 #define PHOTONJETTREE_INTERNAL_TYPES_H
 
-//
-// Types.h
-//
-// The one typed vocabulary of the isolated-photon + jet tree producer.
-//
-// Everything the producer configures, measures, or writes is declared here as
-// a plain value type. There is exactly one definition of each concept; the
-// producer class and its implementation files use these types and never
-// redeclare them.
-//
-// This file holds data only: enums, identities, configuration, records, and
-// the pure integer functions that build relational identities. It never
-// touches Fun4All, PHCompositeNode, ROOT, YAML, detector reconstruction, or a
-// classification model.
-//
-//
-// Conventions used throughout
-//
-//
-// Units
-//   energy, transverse energy, transverse momentum   GeV
-//   angles                                           radians
-//   positions                                        cm
-//   calorimeter time                                 ADC samples, or ns where
-//                                                    a field name says Ns
-//   centrality                                       percent, 0 = most central
-//
-// Numeric types
-//   physical observables    double
-//   states, codes, counts   fixed-width integers
-//   identities and masks    64-bit unsigned
-//
-//   Upstream sPHENIX accessors return float for most calorimeter quantities.
-//   Widening to double is lossless and gives every observable one rule.
-//
-// Missing values
-//   A physical observable that was not measured is NaN. A state that was not
-//   determined is its Unknown enumerator, never a silently plausible default.
-//   Absent, invalid, out-of-domain and not-applicable stay distinguishable,
-//   because efficiency and denominator work downstream needs them separate.
-//
-// Identity scope
-//   Identity is a compact 128-bit key joining rows of one output file. It is
-//   built from the source content hash and source-local coordinates, so it is
-//   unique within a source and carries no meaning across unrelated sources.
-//   Full provenance (hashes, run, segment, entry ordinals) stays stored
-//   explicitly and is never replaced by the compact key. A cross-file join
-//   must carry the source identity with it.
-//
-// Ordering
-//   A field named "ordinal" is encounter order: the order in which the
-//   producer met the object while reading its container. A field named
-//   "order" is the deterministic retained order defined by the owning capture
-//   step. Neither is a transverse-momentum ranking.
-//
+/**
+ * @file Types.h
+ * Shared configuration, identities and persisted record definitions.
+ * Units, invalid states and indexing domains accompany the relevant fields.
+ * These records are the common capture/persistence contract for all presets.
+ * Energy and momentum: GeV; angles: rad; positions: cm; centrality: %.
+ * Time is ADC samples unless the field explicitly says Ns. Unmeasured
+ * observables are NaN; state/validity fields distinguish missing cases.
+ * Ordinals mean encounter order, never momentum rank. Compact identities
+ * join within a source; cross-file joins also carry full source provenance.
+ */
+
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -456,6 +415,7 @@ using SourceEntryResolver =
 // Which physical input this job reads, and how to name it afterwards.
 struct SourceConfig
 {
+  std::string lane;      // production profile (lane) name, e.g. pp_photon_sim
   std::string dataset;   // production lane token
   std::string sample;    // generator sample, or data period sample name
   std::string period;    // running period this source belongs to
@@ -493,6 +453,9 @@ struct NodeConfig
 
   std::string mbdOut = "MbdOut";
   std::string mbdPmts = "MbdPmtContainer";
+  // The embedding fallback is only for collaborator charge capture; the
+  // centrality replay remains bound to the configured primary PMT node.
+  std::string mbdPmtsFallback = "MbdPmtContainer_data";
 
   std::string cemcTowers = "TOWERINFO_CALIB_CEMC";
   std::string ihcalTowers = "TOWERINFO_CALIB_HCALIN";
@@ -514,6 +477,125 @@ struct CalorimeterConfig
 
 };
 
+// One retained shower-feature view definition.
+//
+// energySource: 0 calibrated TowerInfo energies, 1 RawCluster tower-map
+// values. sumMembership/momentMembership: 0 the full 7x7 grid, 1 the
+// cluster-owned towers. The semantic digest is SHA-256 of the view's semantic
+// text (RJ_SHOWER_DEFINITION_FACTORIAL_V1: name, energy source, memberships,
+// floor, 7x7 grid, TowerInfo isGood quality, center excluded from the COG-x
+// numerator, float32 row-major builder arithmetic); the PhotonID packages bind
+// their input view to it.
+struct ShowerViewDefinition
+{
+  const char* name;
+  double floorGeV;
+  std::int32_t energySource;
+  std::int32_t sumMembership;
+  std::int32_t momentMembership;
+  const char* semanticSha256;
+};
+
+inline const std::array<ShowerViewDefinition, 7>& showerViewDefinitions()
+{
+  static const std::array<ShowerViewDefinition, 7> values{{
+      {"H70", 0.070, 0, 0, 1, "fe6633650503f23cf3cfa662a2884d29efbcd7ca465b5b02cfe31ec220db3987"},
+      {"H0",  0.0,   0, 0, 1, "bca3665aa23f3f372ab3675d60d2dc9c29973d1da5e0e7053195d563546e2697"},
+      {"G70", 0.070, 0, 0, 0, "19be342d81fd569ec9578708e9075fa3192d1baa3a148404855a3411cdc3de77"},
+      {"G0",  0.0,   0, 0, 0, "5b45955652de2a98ccc37df1d82593ce3aa7a9e7934861f6bc4ccff1ab5f3a3d"},
+      {"O70", 0.070, 0, 1, 1, "044d92f2fe06b495bd97a9215749b33acab92e4ce9553082f3e39fdb670e2755"},
+      {"O0",  0.0,   0, 1, 1, "4109b126c999bde784cd09408e6c99160db73f19a8d7a5eaf28026daa7aada1a"},
+      {"R70", 0.070, 1, 1, 1, "825959fa8bc8bc97e571cbc48f9f3a534028d80481993e906c320106528dca62"}}};
+  return values;
+}
+
+inline const ShowerViewDefinition& showerViewDefinition(const std::string& name)
+{
+  for (const auto& value : showerViewDefinitions())
+    if (name == value.name) return value;
+  throw std::invalid_argument("unknown shower view definition: " + name);
+}
+
+// One named photon model evaluated by the builder during reconstruction, with
+// its pinned file and exact input order. The optional domain is the producer's
+// invocation range (ET >= minEt, ET <= maxEt, |eta| <= maxAbsEta), not a
+// certified physics applicability; a NaN bound leaves that side open.
+// unevaluatedScore is written where the model is not evaluated. configuredCut
+// is the selection cut the historical recipe applied to this score.
+struct PhotonModelConfig
+{
+  std::string scoreName, file, sha256;
+  std::vector<std::string> features;
+  float minEt = std::numeric_limits<float>::quiet_NaN();
+  float maxEt = std::numeric_limits<float>::quiet_NaN();
+  float maxAbsEta = std::numeric_limits<float>::quiet_NaN();
+  float unevaluatedScore = std::numeric_limits<float>::quiet_NaN();
+  double configuredCut = std::numeric_limits<double>::quiet_NaN();
+};
+
+// The producer's photon-identification score, evaluated by the builder on the
+// primary shower view and recorded with its historical per-candidate witnesses
+// (pho_prodbdt_*). Its model file, digest and input order come from the
+// canonical PhotonID package. An empty scoreName means no producer score is
+// configured: every candidate then records "model not applicable".
+struct ProductionScoreConfig
+{
+  std::string scoreName;
+  std::string modelSha256;
+  std::string showerDefinition;
+
+  // Candidates inside [validatedEtMin, validatedEtMax) (and, for Au+Au, a
+  // centrality inside [validatedCentralityMin, validatedCentralityMax)) are in
+  // the validated domain; finite inputs outside it are diagnostic extrapolation.
+  double validatedEtMin = 15.0;
+  double validatedEtMax = 35.0;
+  double validatedCentralityMin = std::numeric_limits<double>::quiet_NaN();
+  double validatedCentralityMax = std::numeric_limits<double>::quiet_NaN();
+
+  // Historical working points of this model in photon-ET bins, recorded as
+  // witnesses inside the validated domain; empty when none are configured.
+  std::vector<double> workingPointEtEdges;
+  std::array<std::vector<double>, 3> workingPoints;  // WP70, WP80, WP90
+};
+
+// The active photon preselection recorded per candidate (pho_presel_active).
+// newPPG12: the named NPB score above its model's configured cut, and et1,
+// e11/e33 and e32/e35 inside their open windows; no weta cut. An empty
+// variant records -1 (no active preselection configured).
+struct PreselectionConfig
+{
+  std::string variant;
+  std::string npbScoreName;
+  double et1Min = std::numeric_limits<double>::quiet_NaN();
+  double et1Max = std::numeric_limits<double>::quiet_NaN();
+  double e11OverE33Max = std::numeric_limits<double>::quiet_NaN();
+  double e32OverE35Min = std::numeric_limits<double>::quiet_NaN();
+  double e32OverE35Max = std::numeric_limits<double>::quiet_NaN();
+};
+
+// One isolation working-point line: threshold = interceptGeV + slope * x.
+struct IsolationLine
+{
+  double interceptGeV = std::numeric_limits<double>::quiet_NaN();
+  double slope = std::numeric_limits<double>::quiet_NaN();
+  double sidebandGapGeV = std::numeric_limits<double>::quiet_NaN();
+};
+
+// Isolation witness thresholds recorded with every reconstructed cone.
+//
+// pp: one photon-ET line per radius. Au+Au: one line in the truncated integer
+// centrality per radius, inside [centralityMin, centralityMax); the photon-ET
+// fallback line applies otherwise, including a nonfinite centrality. These
+// are the historical witnesses; the nominal isolation classes are defined
+// separately (PPG12 for pp, the pinned Au+Au freeze for Au+Au).
+struct IsolationWitnessConfig
+{
+  std::vector<IsolationLine> lines;  // aligned with PhotonConfig::isolationRadii
+  IsolationLine fallback;
+  double centralityMin = std::numeric_limits<double>::quiet_NaN();
+  double centralityMax = std::numeric_limits<double>::quiet_NaN();
+};
+
 // Photon capture.
 //
 // These bounds are the storage domain, not the measurement selection. The
@@ -521,6 +603,10 @@ struct CalorimeterConfig
 // is what lets a working point move without returning to the DST.
 struct PhotonConfig
 {
+  std::vector<PhotonModelConfig> models;
+  ProductionScoreConfig productionScore;
+  PreselectionConfig preselection;
+  IsolationWitnessConfig isolationWitness;
   double minEtGeV = 5.0;
   double maxEtGeV = 40.0;
   double maxAbsEta = 0.7;
@@ -601,11 +687,11 @@ struct CentralityConfig
 
 // Producer-side weight inputs.
 //
-// The only factor the producer itself applies is the simulated-vertex
-// reweighting, a lookup in a histogram of data-over-simulation vertex
-// probability keyed by the truth hard-scatter vertex. Slice cross sections,
-// sample stitching, interaction mixing and luminosity are downstream, where
-// they are combined once from the sample manifest.
+// Preserve the established producer weight and its factors. PPG12 stores
+// relative slice cross section x truth-vertex x SI/DI fraction x period share.
+// AuAu vertex and centrality fits are applied downstream without regenerating
+// trees; absolute sample normalization also remains downstream.
+// Alias factors are never multiplied twice.
 struct WeightConfig
 {
   bool applyVertexReweight = false;
@@ -613,13 +699,28 @@ struct WeightConfig
   std::string vertexReweightFile;
   std::string vertexReweightFileSha256;
   std::string vertexReweightHistogram;
+  bool ppg12Nominal = false;
+  bool doubleInteraction = false;
+  int ppg12LaneCode = 0;  // 1 photon+jet, 2 inclusive jet
+  double sliceFactor = 1.0;
+  double interactionFactor = 1.0;
+  double periodFactor = 1.0;
 };
 
 // Which optional tables the file carries. The mandatory tables are always
 // written; these switches govern the large witness tables whose final
 // disposition is a mapping-ledger decision.
+struct OutputField
+{
+  std::string name, type, title, counter;
+  int length = 0;  // scalar 0, vector -1, fixed array positive
+};
+
 struct OutputConfig
 {
+  std::vector<OutputField> fields;
+  std::string schemaSha256;
+  std::vector<std::string> modelFeatures;
   bool writePhotonCells = true;
   bool writeIsolationConstituents = true;
   bool writePhotonJetPairs = true;
@@ -665,11 +766,12 @@ struct Config
   OutputConfig output;
   ProvenanceConfig provenance;
 
-  // Names of the shower-shape definitions to evaluate for every candidate.
-  // "H70" and "H0" are the hybrid definition (rectangular sums over the full
-  // good-tower grid, moments over cluster-owned towers) at a 70 MeV and a 0 MeV
-  // floor; these are the two definitions the identification models have used.
-  std::vector<std::string> showerDefinitions = {"H70", "H0"};
+  // Names of the shower-shape definitions to evaluate for every candidate,
+  // each one of showerViewDefinitions(). "H70" and "H0" are the hybrid
+  // definition (rectangular sums over the full good-tower grid, moments over
+  // cluster-owned towers) at a 70 MeV and a 0 MeV floor; these are the two
+  // definitions the identification models have used.
+  std::vector<std::string> showerDefinitions = {"H70", "H0", "G70", "G0", "O70", "O0", "R70"};
 
   // Write an event row for every event the producer is handed, including
   // events with no photon candidate. The event population is the exposure
@@ -782,12 +884,16 @@ struct EventRecord
   std::uint64_t triggerScaledBits = 0;
 
   std::uint32_t triggerPacketNumber = 0;
-  std::uint64_t triggerBunchNumber = 0;
+  std::uint64_t triggerBunchNumber = std::numeric_limits<std::uint64_t>::max();
+  std::uint32_t triggerScalerDiscontinuityFlags = 0;
   std::uint64_t triggerPacketStatus = 0;
 
   std::int32_t triggerPacketVersion = 0;
   std::uint32_t triggerDecisionsAvailable = 0;
   bool triggerPacketValid = false;
+  // Retained GL1 decision contract: 0 valid, 1 missing, 2 unsupported,
+  // 3 read error, 4 nonzero status, 5 simulation (not detector data).
+  std::int32_t triggerDecisionState = 1;
 
   // Index into the scaler snapshot table. Consecutive events that saw no
   // counter change share one snapshot.
@@ -828,6 +934,10 @@ struct EventRecord
   double mbdTotalCharge = std::numeric_limits<double>::quiet_NaN();
 
   bool mbdValid = false;
+  bool mbdAvailable = false;
+  std::int32_t mbdNativeValid = -1;
+  std::int32_t mbdSouthNpmt = -1;
+  std::int32_t mbdNorthNpmt = -1;
 
   TriState mbdPmtAvailable = TriState::Unknown;
 
@@ -848,13 +958,29 @@ struct EventRecord
 
   TriState minimumBiasDecision = TriState::Unknown;
 
+  std::int32_t centralityReplayVersion = 1;
+  TriState centralityPmtAvailable = TriState::False;
+  std::vector<std::int32_t> centralityPmtId;
+  std::vector<double> centralityPmtCharge;
+  std::vector<double> centralityPmtTimeNs;
+  std::vector<std::int32_t> centralityPmtValid;
+  std::vector<std::int32_t> centralityPmtSelected;
+  double centralityMbdZ = std::numeric_limits<double>::quiet_NaN();
+  bool centralityMbdZValid = false;
+  std::int32_t centralityMbdEvent = -1;
+  std::int32_t centralityMbdClock = -1;
+  std::int32_t centralityMbdFemclock = -1;
+  bool centralityInputsValid = false;
   double centralitySelectedCharge = std::numeric_limits<double>::quiet_NaN();
 
   std::int32_t centralityNativeBin = -1;
-  double centralityNativePercent = std::numeric_limits<double>::quiet_NaN();
+  double centralityNativeCentile = std::numeric_limits<double>::quiet_NaN();  // fraction, not percent
   bool centralityNativeValid = false;
 
   std::int32_t centralityBin = -1;
+  // Legacy analysis uses truncation of the mbd_NS bin accessor, independently
+  // of the coarse jet bin and native validity witness. pp remains -1.
+  std::int32_t analysisCentrality = -1;
   double centralityPercent = std::numeric_limits<double>::quiet_NaN();
   bool centralityValid = false;
 
@@ -870,6 +996,7 @@ struct EventRecord
   double ihcalEnergy = std::numeric_limits<double>::quiet_NaN();
   double ohcalEnergy = std::numeric_limits<double>::quiet_NaN();
   double totalCaloEnergy = std::numeric_limits<double>::quiet_NaN();
+  double maximumRawClusterEnergy = std::numeric_limits<double>::quiet_NaN();
 
   // bits 0,1,2   CEMC, inner and outer hadronic container present
   // bits 8,9,10  the same containers complete and finite
@@ -944,6 +1071,11 @@ struct EventRecord
   // known to be complete for the event.
   //
   CaptureState recoPhotonCaptureState = CaptureState::NotApplicable;
+  // Version/domain stay zero when capture did not enter its vertex domain.
+  // Domain 1 is finite photon kinematics, 5 <= ET < 40 and |eta| < 0.7.
+  std::int32_t recoPhotonCaptureVersion = 0, recoPhotonCaptureDomain = 0;
+  std::uint32_t recoPhotonInspectedCount = 0, recoPhotonEligibleCount = 0;
+  std::uint32_t recoPhotonWrittenCount = 0;
   std::uint32_t recoPhotonUnclassifiableCount = 0;
 
   //
@@ -996,6 +1128,41 @@ struct PhotonTimingRecord
   double timeNs = std::numeric_limits<double>::quiet_NaN();
 };
 
+// Read-only witness of the exact native model invocation. Inputs retain their
+// binary32 evaluation representation; object id and container key are distinct.
+// Evaluation states follow the retained capture contract: 0 not captured,
+// 1 unavailable model, 2 outside domain, 3 invalid input, 4/5 finite/nonfinite
+// evaluation. Capturing a witness does not certify model applicability.
+struct ModelInvocationRecord
+{
+  std::int32_t captureVersion = 0, evaluationState = 0, domainMode = 0;
+  std::int32_t inProducerDomain = -1, modelAvailable = -1;
+  std::int32_t inputOrderIsNpb25 = 0, inputsCaptured = 0, inputsFinite = 0;
+  float minEt = NAN, maxEt = NAN, maxAbsEta = NAN, rawScore = NAN;
+  std::uint32_t sourcePhotonId = 0, sourceNativeClusterKey = 0;
+  float sourceClusterEt = NAN, sourceEta = NAN, sourcePhi = NAN;
+  std::int32_t bindingPolicy = 0, sourceIdentityAvailable = 0;
+  std::int32_t kinematicInputBitsAvailable = 0;
+  std::uint32_t inputEtBits = 0, inputEtaBits = 0;
+  std::int64_t sourceEncounterOrdinal = -1;
+  std::string sourceClusterNode, modelFile;
+  std::vector<std::string> featureNames;
+  std::vector<float> orderedInputs;
+  std::vector<std::int32_t> orderedInputFinite;
+};
+
+inline const std::vector<std::string>& npbFeatureNames()
+{
+  static const std::vector<std::string> names={
+    "cluster_Et","cluster_Eta","vertexz","e11_over_e33","e32_over_e35",
+    "e11_over_e22","e11_over_e13","e11_over_e15","e11_over_e17",
+    "e11_over_e31","e11_over_e51","e11_over_e71","e22_over_e33",
+    "e22_over_e35","e22_over_e37","e22_over_e53","cluster_weta_cogx",
+    "cluster_wphi_cogx","cluster_et1","cluster_et2","cluster_et3",
+    "cluster_et4","cluster_w32","cluster_w52","cluster_w72"};
+  return names;
+}
+
 // One shower-shape definition evaluated for one photon candidate.
 //
 // The complete rectangular family is stored, not a chosen subset, because the
@@ -1018,6 +1185,15 @@ struct PhotonTimingRecord
 struct ShowerShapeRecord
 {
   std::string definitionName;
+
+  // Frozen feature-view witnesses; undefined ratios/moments remain NaN.
+  double rawCenterEta = std::numeric_limits<double>::quiet_NaN();
+  double rawCenterPhi = std::numeric_limits<double>::quiet_NaN();
+  double e11OverE33 = std::numeric_limits<double>::quiet_NaN();
+  double e32OverE35 = std::numeric_limits<double>::quiet_NaN();
+  std::array<double, 6> momentSums{};
+  std::int32_t energySource = 0, rectangularMembership = 0, momentMembership = 1;
+  std::uint32_t activeSumCellCount = 0, activeMomentCellCount = 0;
 
   // Tower energy floor of this definition, GeV. Towers at or below it do not
   // enter the sums.
@@ -1057,8 +1233,8 @@ struct ShowerShapeRecord
   double wphiCogX = std::numeric_limits<double>::quiet_NaN();
 
   // Second moments restricted to the three-by-three core. The canonical Au+Au
-  // identification model takes these two. They remain NaN until the upstream
-  // photon builder supplies them; see the upstream reconciliation step.
+  // identification model takes these two. The configured photon builder
+  // supplies them; an unavailable measurement remains NaN.
   double weta33CogX = std::numeric_limits<double>::quiet_NaN();
   double wphi33CogX = std::numeric_limits<double>::quiet_NaN();
 
@@ -1129,6 +1305,7 @@ struct PhotonCellRecord
   double towerTimeSamples = std::numeric_limits<double>::quiet_NaN();
 
   std::uint32_t towerStatus = 0;
+  bool towerAvailable = false;
 
   bool ownedByCluster = false;
   bool inShowerSupport = false;
@@ -1164,6 +1341,23 @@ struct IsolationRecord
   bool candidateRemoved = false;
 
   bool valid = false;
+};
+
+// The reconstructed isolation witness of one candidate at one radius: the
+// cone sum of the system's nominal method (pp topological clusters, Au+Au
+// SUB1 towers), its configured working-point threshold and sideband, and
+// whether the cone passes. A cone without a valid sum keeps NaN and fails.
+struct IsolationWitnessRecord
+{
+  double radius = std::numeric_limits<double>::quiet_NaN();
+  std::int32_t subtractionMethod = 0;   // 1 pp raw, 2 Au+Au SUB1
+  std::int32_t reconstructedOrTruth = 0;  // 0 reconstructed
+  double coneSum = std::numeric_limits<double>::quiet_NaN();
+  double threshold = std::numeric_limits<double>::quiet_NaN();
+  double sidebandThreshold = std::numeric_limits<double>::quiet_NaN();
+  std::int32_t passState = 0;
+  // The historical witness never counted constituents; they are the isoc_ rows.
+  std::int32_t constituentCount = 0;
 };
 
 // One object entering an isolation cone.
@@ -1239,6 +1433,14 @@ struct PhotonRecord
 
   bool kinematicsFinite = false;
 
+  // Copy the builder's primary representation separately from factorial views:
+  // its double ratios and a view's float ratios have distinct persisted bits.
+  static constexpr std::array<const char*, 15> primaryShapeNames{{
+      "weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx",
+      "weta35_cogx", "wphi53_cogx", "et1", "et2", "et3", "et4",
+      "e11", "e33", "e32", "e35", "bdt_score"}};
+  std::array<double, primaryShapeNames.size()> primaryShapes{};
+
   // The vertex the reconstruction used to turn cluster position into
   // direction. Stored because it is part of the measurement.
   double producerVertexZ = std::numeric_limits<double>::quiet_NaN();
@@ -1246,8 +1448,16 @@ struct PhotonRecord
   PhotonTimingRecord timing;
   DominantTruthRecord dominantTruth;
 
+  ModelInvocationRecord npbCapture, auauNpbCapture;
+
+  // The configured producer score (ProductionScoreConfig) as the builder
+  // wrote it on this candidate: the model's unevaluated sentinel outside its
+  // invocation domain, NaN when no producer score is configured.
+  double productionScore = std::numeric_limits<double>::quiet_NaN();
+
   std::vector<ShowerShapeRecord> showerShapes;
   std::vector<IsolationRecord> isolation;
+  std::vector<IsolationWitnessRecord> isolationWitnesses;
 };
 
 //
@@ -1259,6 +1469,44 @@ struct PhotonRecord
 // identity, so a reader can tell which energy-scale correction produced the
 // stored value. Area is the measured jet area from the clustering, never a
 // geometric substitute.
+// Original signed constituent energies, accumulated in clustering order.
+// Source codes follow Jet::SRC / JetCalo layer semantics, including retowers.
+// Widen only the finished float fractions for the final double branches.
+struct JetCalorimeterEnergy
+{
+  std::array<float, 3> energy{{0.F, 0.F, 0.F}};
+
+  static int layer(const int source)
+  {
+    switch (source)
+    {
+      case 3: case 4: case 13: case 14: case 17: case 22:
+      case 25: case 28: case 29: case 32: case 33: return 0;
+      case 5: case 6: case 15: case 18: case 26: case 30:
+      case 34: case 35: return 1;
+      case 7: case 8: case 16: case 19: case 27: case 31:
+      case 36: case 37: return 2;
+      default: return -1;
+    }
+  }
+
+  void add(const int source, const float value)
+  {
+    const int index = layer(source);
+    if (index >= 0) energy[index] += value;
+  }
+
+  std::array<double, 3> fractions(const float rawJetEnergy) const
+  {
+    std::array<double, 3> result;
+    result.fill(std::numeric_limits<double>::quiet_NaN());
+    if (!std::isfinite(rawJetEnergy) || rawJetEnergy == 0.F) return result;
+    for (std::size_t i = 0; i < result.size(); ++i)
+      if (std::isfinite(energy[i])) result[i] = static_cast<float>(energy[i] / rawJetEnergy);
+    return result;
+  }
+};
+
 struct JetRecord
 {
   Identity eventId;
@@ -1285,6 +1533,12 @@ struct JetRecord
   double eta = std::numeric_limits<double>::quiet_NaN();
   double phi = std::numeric_limits<double>::quiet_NaN();
   double area = std::numeric_limits<double>::quiet_NaN();
+
+  // EMCal, inner HCal, outer HCal; signed SUB1 values are never clipped.
+  std::array<double, 3> calorimeterFractions{{
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::quiet_NaN()}};
 
   std::uint64_t qualityBitmask = 0;
 
@@ -1417,6 +1671,13 @@ struct PhotonTruthLinkRecord
   Identity photonId;
   Identity truthPhotonId;
 
+  // Raw inventory association is independent of the native signal selection.
+  // States follow the final association contract: 0 unknown, 1 no primary,
+  // 2 raw photon match, 3 non-photon primary. Truth-only rows carry state 0.
+  Identity associationTruthPhotonId;
+  std::int32_t associationState = 0;
+  double associationDeltaR = std::numeric_limits<double>::quiet_NaN();
+
   AssociationState state = AssociationState::Unknown;
 
   double energyContribution = std::numeric_limits<double>::quiet_NaN();
@@ -1425,10 +1686,9 @@ struct PhotonTruthLinkRecord
 
 // A reconstructed jet and a truth jet of the same clustering radius.
 //
-// Every candidate edge within the matching radius is retained; selectedMatch
-// marks the one chosen by the deterministic one-to-one assignment. Matching
-// runs independently in each reconstructed view, so one truth jet may be
-// matched once per view.
+// Every candidate edge within the matching radius is retained, followed by
+// separate selected-match rows. Same-radius reconstructed views share one
+// truth assignment, preserving the original production matching contract.
 struct JetTruthLinkRecord
 {
   Identity linkId;
@@ -1500,6 +1760,7 @@ struct TriggerScalerSnapshotRecord
   std::int64_t sourceEntryEnd = -1;
 
   std::uint64_t observedEvents = 0;
+  std::int64_t physicalEventEnd = -1;
 
   std::array<std::uint64_t, 64> raw{};
   std::array<std::uint64_t, 64> live{};
@@ -1527,6 +1788,10 @@ struct TriggerRunInfoRecord
   std::uint64_t rawCount = 0;
   std::uint64_t liveCount = 0;
   std::uint64_t scaledCount = 0;
+
+  // 0 named bit, 1 TriggerRunInfo node missing, 2 unsupported class,
+  // 3 unassigned bit.
+  std::int32_t state = 1;
 
   bool valid = false;
 };

@@ -1,0 +1,84 @@
+{
+  "artifacts": {
+    "model.tmva.root": "8328af75235c8bcbf63659ba791ceff4e1165018de269c889472c6a80a26a41f"
+  },
+  "cdb": null,
+  "definition": {
+    "domain": {
+      "centrality": "events.centrality (eventTree cent_value)",
+      "centrality_max_exclusive": 80.0,
+      "centrality_min": 0.0,
+      "et_max_exclusive": 35.0,
+      "et_min": 15.0
+    },
+    "features": {
+      "count": 14,
+      "floor_gev": 0.07,
+      "order": [
+        "cluster_Et",
+        "cluster_weta_cogx",
+        "cluster_wphi_cogx",
+        "cluster_weta33_cogx",
+        "cluster_wphi33_cogx",
+        "vertexz",
+        "cluster_Eta",
+        "e11_over_e33",
+        "cluster_et1",
+        "cluster_et2",
+        "cluster_et3",
+        "cluster_et4",
+        "e32_over_e35",
+        "centrality"
+      ],
+      "source": "the H70 shower view ordered_features (eventTree shv_features, the H70 position of the view order)",
+      "view": "H70",
+      "view_semantic_sha256": "fe6633650503f23cf3cfa662a2884d29efbcd7ca465b5b02cfe31ec220db3987"
+    },
+    "model": {
+      "base_score": 0.004885449539870024,
+      "cuts": 6724,
+      "evaluator": "ROOT TMVA Experimental RBDT",
+      "file": "auau_the134_h70.tmva.root",
+      "sha256": "8328af75235c8bcbf63659ba791ceff4e1165018de269c889472c6a80a26a41f",
+      "trees": 450
+    },
+    "regions": {
+      "fail": "otherwise",
+      "gap": "WP80(c) <= s <= WP70(c), excluded",
+      "non_tight": "0.1 < s < WP80(c)",
+      "tight": "s > WP70(c)"
+    },
+    "working_points": {
+      "WP70": {
+        "intercept": 0.6927385742113304,
+        "slope": 0.0010476808935335573
+      },
+      "WP80": {
+        "intercept": 0.6071724560222583,
+        "slope": 0.0013019695025559648
+      },
+      "WP90": {
+        "intercept": 0.4634577166843198,
+        "slope": 0.0015466253667456042
+      },
+      "axis": "centrality",
+      "bins": [
+        0,
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+        80
+      ],
+      "operator": "score > threshold"
+    }
+  },
+  "freeze_sha256": "c986e6f13c11e9dd8a9961ec0ccf2bfdb214ad8950159924da23cf52dec2d2a0",
+  "name": "nominal",
+  "schema": "PhotonIDFrozenNominalV1",
+  "score_branch": "pho_bdt_score",
+  "status": "FROZEN_BYTES_VERIFIED",
+  "system": "AuAu"
+}

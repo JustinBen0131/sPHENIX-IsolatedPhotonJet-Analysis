@@ -1,0 +1,25 @@
+{
+ "schema": "CanonicalIsolationFreezeV1",
+ "system": "auau",
+ "witness": {
+  "radius": 0.3,
+  "stride_index": 0,
+  "subtraction_method": 2,
+  "reconstructed": true
+ },
+ "threshold": {
+  "intercept_gev": 3.2191094665844817,
+  "slope_gev_per_percent": -0.024593317735450523,
+  "variable": "cent_value",
+  "efficiency": 0.8
+ },
+ "sideband_gap_gev": 0.8,
+ "domain": {
+  "centrality_min": 0.0,
+  "centrality_max_exclusive": 80.0
+ },
+ "derivation": {
+  "file": "AUAU_ISOLATION_PACKAGE_THE327.json",
+  "package_sha256": "c5b3c82c33c8ca309ed8e5ab42fd79028c9256e2b42b71ae15d4bc5ddd104f8c"
+ }
+}

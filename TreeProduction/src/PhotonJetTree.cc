@@ -1,48 +1,9 @@
 /**
  * @file PhotonJetTree.cc
- * @brief Lifecycle and event-flow spine of the isolated-photon + jet producer.
- *
- * PhotonJetTree is one Fun4All subsystem serving pp and AuAu, DATA and simulation. This file controls the lifecycle and the fixed order in which
- * one event is converted into canonical tree records; the physics algorithms themselves live in the responsibility-specific implementation files.
- *
- * Event flow
- * ----------
- *   reset
- *     -> source / event identity
- *     -> trigger and scaler state
- *     -> reconstructed vertex and MBD state
- *     -> centrality
- *     -> calorimeter event state
- *     -> reconstructed photons and isolation
- *     -> reconstructed jets and photon-jet pairs
- *     -> simulation truth and reco-truth associations
- *     -> producer weights
- *     -> ROOT output
- *
- * Implementation ownership
- * ------------------------
- *   internal/Event.cc
- *       Event identity, triggers/scalers, vertex, MBD, centrality,
- *       calorimeter state, weights, and exposure accounting.
- *
- *   internal/Photons.cc
- *       Photon candidates, timing, shower-shape views, cells, and isolation.
- *
- *   internal/Jets.cc
- *       Reconstructed jet collections and photon-jet relationships.
- *
- *   internal/Truth.cc
- *       Simulation truth and reconstruction-to-truth associations.
- *
- *   internal/Output.cc
- *       ROOT booking, serialization, provenance, and completion metadata.
- *
- * Failure policy
- * --------------
- * Setup or production-contract failures abort the run rather than silently changing the event population. Ordinary physics absence is not an error:
- * an event with no photon, jet, or truth match is still a valid event record with the corresponding object collections empty.
- *
- * This file deliberately does not own reconstruction algorithms, photon-ID models, working points, analysis selections, histogramming, or unfolding.
+ * Visible Fun4All lifecycle and event-processing order.
+ * Capture event context, photons, jets, truth and weights, then persist them.
+ * Setup or capture errors abort the run; End alone records completion.
+ * Empty events are retained, and interrupted files remain incomplete.
  */
 
 
@@ -105,7 +66,7 @@ PhotonJetTree::~PhotonJetTree()
    * omit completion metadata. Downstream consumers can therefore distinguish
    * an interrupted job from a legitimately short production.
    */
-  if (m_outputFile && !m_finalized)
+  if (m_directOutput && !m_finalized)
   {
     std::cerr << Name()
               << ": destroyed before End(); output is not marked complete"
@@ -194,7 +155,9 @@ int PhotonJetTree::Init(PHCompositeNode* /*topNode*/)
   {
     validateConfiguration();
     initializeSourceRecord();
-    loadWeightInputs();
+    // Empty logical sources still book the complete schema and provenance;
+    // they do not consume detector/model inputs or run the event loop.
+    if(m_config.source.maxEvents!=0)loadWeightInputs();
     initializeOutput();
     m_outputReady = true;
   }
@@ -328,7 +291,6 @@ int PhotonJetTree::process_event(PHCompositeNode* topNode)
     // This preserves the producer-level exposure denominator.
     // ------------------------------------------------------------------------
     fillEventOutput();
-    fillObjectOutput();
     ++m_source.retainedEvents;
   }
   catch (const std::exception& error)
@@ -422,8 +384,10 @@ void PhotonJetTree::recordUpstreamRejectedEvent(
   rejected.run = run;
   rejected.physicalEventSequence = physicalEventSequence;
   rejected.sourceEntry = sourceEntry;
+  fillRejectedOutput(rejected);
   m_upstreamRejectedEvents.push_back(rejected);
   ++m_source.upstreamRejectedEvents;
+  m_source.lastEntry=sourceEntry;
 }
 
 

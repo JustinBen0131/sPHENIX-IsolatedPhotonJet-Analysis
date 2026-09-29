@@ -1,0 +1,17 @@
+# Local qualification and generated build files are not public runtime inputs.
+tests/
+.work/
+histograms/
+src/autom4te.cache/
+src/Makefile
+src/Makefile.in
+src/aclocal.m4
+src/configure
+src/config.*
+!src/configure.ac
+src/libtool
+src/ltmain.sh
+src/compile
+src/depcomp
+src/install-sh
+src/missing

@@ -1,8 +1,0 @@
-numpy
-scipy
-pandas
-PyYAML
-uproot>=5
-matplotlib
-scikit-learn
-xgboost>=2

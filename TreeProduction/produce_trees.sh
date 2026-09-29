@@ -1,63 +1,11 @@
 #!/usr/bin/env bash
+# Public interface: select a maintained population and reconstruction preset.
+# All commands use one production runner; detector algorithms remain in C++.
 
-# /*
-#  * produce_trees.sh
-#  *
-#  * Public command-line interface for canonical PhotonJetTree production.
-#  *
-#  * This file owns only the vocabulary exposed to a user:
-#  *
-#  *   ./produce_trees.sh runPP
-#  *   ./produce_trees.sh runAuAu
-#  *   ./produce_trees.sh runPhotonJetSim
-#  *   ...
-#  *   ./produce_trees.sh runAll
-#  *
-#  * It does not know how detector reconstruction is performed, which nodes are
-#  * consumed, which calibration payloads are used, or how PhotonJetTree fills
-#  * its output. Those responsibilities remain below this interface:
-#  *
-#  *   produce_trees.sh
-#  *        |
-#  *        v
-#  *   scripts/produce.py
-#  *        |
-#  *        v
-#  *   Fun4All_PhotonJetTree.C
-#  *        |
-#  *        v
-#  *   Production.cc / Production*.cc
-#  *        |
-#  *        v
-#  *   PhotonJetTree
-#  *
-#  * Aggregate commands are composed entirely from the same primitive lanes.
-#  * There is therefore one production path for a single-source development
-#  * test, a complete lane, and a full runAll production.
-#  */
 
 set -euo pipefail
 
-
-# /*
-#  * Repository location
-#  *
-#  * Resolve TreeProduction from the location of this script rather than from
-#  * the caller's current working directory. All subsequent paths are therefore
-#  * stable whether the command is launched from the repository root, this
-#  * directory, or another working directory.
-#  */
-
 tree_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-
-
-# /*
-#  * Public interface
-#  *
-#  * These are the only production concepts a normal user needs to know.
-#  * Population manifests, source ordinals, output paths and the Fun4All macro
-#  * argument list are intentionally hidden behind this layer.
-#  */
 
 usage() {
     cat <<'EOF'
@@ -74,6 +22,8 @@ Data:
 Simulation:
   runPhotonJetSim
   runInclusiveJetSim
+  runPhotonJetDISim
+  runInclusiveJetDISim
   runEmbeddedPhotonJetSim
   runEmbeddedInclusiveJetSim
   runAllSim
@@ -82,43 +32,22 @@ Everything:
   runAll
 
 Options:
+  --run N      Select one DATA run from the maintained catalogue.
+  --sample ID  Select one exact SIM sample (for example photon5).
   --events N   Process at most N events per selected source (development).
   --source N   Select manifest source ordinal N (primitive commands only).
+  --catalogue FILE  Use an explicitly prepared alternative catalogue.
+  --output DIR Choose the output root; existing products are refused.
+  --resume     Reuse only identity-matched, validated source/piece outputs.
+  --timeout N Maximum seconds per reconstruction piece (default 43200).
   --dry-run    Check bindings and show the plan; create nothing, run no ROOT.
   --help       Show this help.
 
 Populations: config/production_populations.json
 Unbound populations fail; no input population or calibration is guessed.
+DI replay and final eventTree equivalence still require qualification.
 EOF
 }
-
-
-# /*
-#  * Command -> production-lane mapping
-#  *
-#  * Primitive commands map directly onto the canonical lane names understood
-#  * by production_populations.json.
-#  *
-#  * Aggregate commands recurse through those same primitive mappings. They do
-#  * not have an independent implementation:
-#  *
-#  *   runAllData
-#  *      -> runPP
-#  *      -> runAuAu
-#  *
-#  *   runAllSim
-#  *      -> runPhotonJetSim
-#  *      -> runInclusiveJetSim
-#  *      -> runEmbeddedPhotonJetSim
-#  *      -> runEmbeddedInclusiveJetSim
-#  *
-#  *   runAll
-#  *      -> runAllData
-#  *      -> runAllSim
-#  *
-#  * This is what guarantees that development and full-production workflows do
-#  * not drift into separate scientific code paths.
-#  */
 
 expand_command() {
     case "$1" in
@@ -126,12 +55,16 @@ expand_command() {
         runAuAu)                     printf '%s\n' auau_data ;;
         runPhotonJetSim)             printf '%s\n' pp_photon_sim ;;
         runInclusiveJetSim)          printf '%s\n' pp_inclusive_sim ;;
+        runPhotonJetDISim)           printf '%s\n' pp_photon_di ;;
+        runInclusiveJetDISim)        printf '%s\n' pp_inclusive_di ;;
         runEmbeddedPhotonJetSim)     printf '%s\n' auau_photon_embedded ;;
         runEmbeddedInclusiveJetSim)  printf '%s\n' auau_inclusive_embedded ;;
         runAllData) expand_command runPP; expand_command runAuAu ;;
         runAllSim)
             expand_command runPhotonJetSim
             expand_command runInclusiveJetSim
+            expand_command runPhotonJetDISim
+            expand_command runInclusiveJetDISim
             expand_command runEmbeddedPhotonJetSim
             expand_command runEmbeddedInclusiveJetSim
             ;;
@@ -139,14 +72,6 @@ expand_command() {
         *) return 2 ;;
     esac
 }
-
-
-# /*
-#  * Command selection
-#  *
-#  * Resolve the public command into its complete primitive lane set before
-#  * forwarding anything to the private helper.
-#  */
 
 if [[ $# -eq 0 || $1 == --help ]]; then
     usage
@@ -165,27 +90,13 @@ fi
 lanes=()
 while IFS= read -r lane; do lanes+=("$lane"); done <<< "$expanded"
 
-
-# /*
-#  * Development restrictions
-#  *
-#  * --events and --source narrow the canonical production path; they never
-#  * select a different producer or macro.
-#  *
-#  * --source is meaningful only for one primitive population. Applying a source
-#  * ordinal to an aggregate command would be ambiguous and is rejected here
-#  * before population resolution begins.
-#  *
-#  * Keep helper_args nonempty: Bash 3.2 treats an empty array as unset under -u.
-#  */
-
 helper_args=("$tree_dir/scripts/produce.py")
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --help) usage; exit 0 ;;
-        --dry-run) helper_args+=("$1"); shift ;;
-        --events|--source)
+        --dry-run|--resume) helper_args+=("$1"); shift ;;
+        --events|--source|--run|--timeout)
             if [[ $# -lt 2 || ! $2 =~ ^[0-9]+$ ]]; then
                 printf 'ERROR: %s requires an integer. See --help.\n' "$1" >&2
                 exit 2
@@ -197,32 +108,21 @@ while [[ $# -gt 0 ]]; do
             helper_args+=("$1" "$2")
             shift 2
             ;;
+        --sample|--catalogue|--output)
+            if [[ $# -lt 2 || -z $2 || $2 == --* ]]; then
+                printf 'ERROR: %s requires a value. See --help.\n' "$1" >&2
+                exit 2
+            fi
+            helper_args+=("$1" "$2")
+            shift 2
+            ;;
         *) printf 'ERROR: unknown option: %s\n\n' "$1" >&2; usage >&2; exit 2 ;;
     esac
 done
-
-
-# /*
-#  * Private orchestration dependency
-#  *
-#  * Python is used only for population binding, provenance validation and
-#  * execution orchestration. Event reconstruction itself remains entirely in
-#  * the existing C++/Fun4All TreeProduction path.
-#  */
 
 if ! command -v python3 >/dev/null 2>&1; then
     printf 'ERROR: python3 is required for population binding.\n' >&2
     exit 1
 fi
-
-
-# /*
-#  * Handoff
-#  *
-#  * The complete expanded lane set is passed in one invocation so produce.py
-#  * can preflight the entire request before the first source begins running.
-#  * This prevents an aggregate production from partially starting when a later
-#  * lane has an unresolved population or other binding problem.
-#  */
 
 exec python3 "${helper_args[@]}" "${lanes[@]}"

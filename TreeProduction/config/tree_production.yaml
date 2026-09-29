@@ -1,49 +1,9 @@
-# =============================================================================
-# TreeProduction/config/tree_production.yaml
-#
-# Canonical reconstruction and storage configuration for PhotonJetTree.
-#
-# One file defines every supported DST-to-tree production mode. The profile
-# selected at invocation determines whether the job processes p+p or Au+Au,
-# DATA or simulation, and which reconstruction path is required.
-#
-# Production flow
-#
-#   produce_trees.sh
-#       user-facing population command
-#
-#   scripts/produce.py
-#       resolves the reviewed source population and per-job provenance
-#
-#   Fun4All_PhotonJetTree.C
-#       passes one resolved job into Fun4All
-#
-#   production::LoadPlan
-#       combines that job with one profile from this file
-#
-#   Production*.cc
-#       constructs the required reconstruction and input streams
-#
-#   PhotonJetTree
-#       records the canonical model-independent analysis tree
-#
-# This file owns reconstruction and storage configuration only. It does not
-# define photon-ID models, working points, ABCD regions, purity corrections,
-# final recoil selections, response matrices, unfolding, histogram binning,
-# normalization, or plotting. Those decisions belong to PhotonID,
-# TreeToHists, FinalAnalysis, and config/measurement.yaml.
-#
-# Physics algorithms remain implemented in C++. YAML supplies explicit values
-# and bindings; it does not redefine algorithms.
-#
-# Job-specific information such as input lists, output files, run/segment,
-# entry ranges, and source digests is supplied by the production frontend and
-# is intentionally absent from this shared configuration.
-#
-# Unresolved required bindings remain null and must fail closed. Production
-# must never infer a population, payload, release, or calibration from nearby
-# files.
-# =============================================================================
+# Reconstruction presets and capture policy for PhotonJetTree.
+# The public command selects a profile and an exact maintained source catalogue.
+# Setup.cc binds conditions, reconstruction and synchronized input streams.
+# Photon-ID and isolation labels are applied by the shared final-format layer;
+# reconstruction never removes candidates based on those labels.
+# Missing required calibration or source bindings fail before event processing.
 
 schema_version: 1
 
@@ -79,6 +39,35 @@ runtime:
   producer_source_sha256: null
   producer_library_sha256: null
   macro_sha256: null
+
+
+# PPG12 relative event weights. Absolute normalization by generated exposure
+# remains in the histogram/analysis package. Each period binds its own fit.
+ppg12_weights:
+  total_luminosity_pb_inv: 64.3718
+  photon_jet:
+    reference_cross_section_pb: 130.4461
+    cross_sections_pb: {photon5: 146359.3, photon10: 6944.675, photon20: 130.4461}
+  inclusive_jet:
+    reference_cross_section_pb: 7.3113
+    cross_sections_pb: {jet5: 138780000.0, jet8: 11500000.0, jet12: 1490300.0, jet20: 62623.0, jet30: 2529.8, jet40: 135.53}
+  periods:
+    0mrad:
+      luminosity_pb_inv: 47.2076
+      double_fraction: 0.224
+      vertex_reweighting:
+        enabled: true
+        file: /sphenix/user/shuhangli/ppg12/efficiencytool/truth_vertex_reweight/output/0mrad/reweight.root
+        sha256: 4c2a50fa2dd4fe6e3f8b823454f19753367876edabc9fe48164447a0d07be6b9
+        histogram: h_w_iterative
+    1p5mrad:
+      luminosity_pb_inv: 17.1642
+      double_fraction: 0.079
+      vertex_reweighting:
+        enabled: true
+        file: /sphenix/user/shuhangli/ppg12/efficiencytool/truth_vertex_reweight/output/1p5mrad/reweight.root
+        sha256: 1429442b2cce368bcc4b4fd613f706f27b9c194f1e835d800238e059c0804d4d
+        histogram: h_w_iterative
 
 
 # -----------------------------------------------------------------------------
@@ -118,6 +107,7 @@ nodes:
 
   mbd_out: MbdOut
   mbd_pmts: MbdPmtContainer
+  mbd_pmts_fallback: MbdPmtContainer_data  # AuAu collaborator charge capture only
 
   cemc_towers: TOWERINFO_CALIB_CEMC
   ihcal_towers: TOWERINFO_CALIB_HCALIN
@@ -182,7 +172,7 @@ photons:
     # Reconstructed objects (photons and jets) are captured only when the
     # reconstructed vertex is valid and |z| is below this value. The event
     # row is retained either way. Analysis vertex windows are narrower and
-    # live in config/measurement.yaml.
+    # live in the TreeToHists selection profiles.
     object_vertex_abs_z_max_cm: 60.0
 
   # Reconstruction input/output nodes used by the photon builder and isolation.
@@ -201,13 +191,41 @@ photons:
     use_vertex_cut: true
     vertex_cut_cm: 60.0
 
+  # Named models the builder evaluates on every candidate. The PPG12 NPB
+  # score is the fixed preselection score of the historical production (never
+  # retrained); the digest is the production packet's dependency pin.
+  models:
+    - score_name: npb_score
+      file: /sphenix/user/shuhangli/ppg12/FunWithxgboost/npb_models/npb_score_split_tmva.root
+      sha256: d6086dadac534013cda15cdfb69c1683776d3456d9e439903589653e8ac19eab
+      features: [cluster_Et, cluster_Eta, vertexz, e11_over_e33, e32_over_e35, e11_over_e22, e11_over_e13,
+                 e11_over_e15, e11_over_e17, e11_over_e31, e11_over_e51, e11_over_e71, e22_over_e33,
+                 e22_over_e35, e22_over_e37, e22_over_e53, cluster_weta_cogx, cluster_wphi_cogx,
+                 cluster_et1, cluster_et2, cluster_et3, cluster_et4, cluster_w32, cluster_w52, cluster_w72]
+      min_et: 6.0
+      max_et: 40.0
+      max_abs_eta: 0.7
+      unevaluated_score: -1.0
+      configured_cut: 0.5
+
+  # The active photon preselection recorded as pho_presel_active: PPG12's
+  # newPPG12 definition, the NPB score above its cut plus the common shower
+  # cuts (open intervals, no weta cut). Nothing is removed in production.
+  preselection:
+    variant: newPPG12
+    npb_score: npb_score
+    et1: [0.6, 1.0]
+    e11_over_e33_max: 0.98
+    e32_over_e35: [0.8, 1.0]
+
   shower_shapes:
 
     # Definitions evaluated for every candidate. H = rectangular sums over the
     # full good-tower 7x7 grid, second moments over cluster-owned towers; the
-    # number is the tower energy floor in MeV. These are the two definitions
-    # the identification models have used.
-    definitions: [H70, H0]
+    # number is the tower energy floor in MeV. G uses grid moments, O uses
+    # owned sums and moments, and R uses RawCluster-map energies. One generic
+    # builder calculation supplies the seven retained feature views.
+    definitions: [H70, H0, G70, G0, O70, O0, R70]
 
   timing:
     sample_ns: 17.6
@@ -241,6 +259,36 @@ pp:
     # cones are stored beside it.
     method: topocluster
 
+    # Historical PPG12 sliding working point recorded with each cone
+    # (isow_*): threshold = intercept + slope * photon ET, sideband above it.
+    # The nominal pp isolation class reads these witnesses at R = 0.4.
+    witness:
+      r03: {intercept_gev: 0.490, slope: 0.037, sideband_gap_gev: 0.8}
+      r04: {intercept_gev: 0.490, slope: 0.037, sideband_gap_gev: 0.8}
+
+  photon_id:
+
+    # The frozen PPG12 classifier, evaluated by the builder on the primary
+    # H70 view exactly as the historical producer did (pho_prodbdt_*). Its
+    # file, digest and input order come from PhotonID/models/PP/<model>; the
+    # nominal pho_bdt_score copies this producer score after a recompute check.
+    production_score:
+      model: nominal
+      score_name: tight_bdt_score
+      min_et: 7.0               # the package domain; -1 is written below it
+      unevaluated_score: -1.0
+      validated_et: [15.0, 35.0]
+      # Historical per-ET working points of this model, recorded as witnesses
+      # inside the validated domain. The photon-ID regions come from PhotonID.
+      working_points:
+        et_edges: [15, 17, 19, 21, 23, 25, 28, 32, 35]
+        wp70: [0.79682856798172, 0.766527533531189, 0.764809787273407, 0.7529897093772888,
+               0.7708977460861206, 0.8068315982818604, 0.8892104029655457, 0.972591757774353]
+        wp80: [0.7195994257926941, 0.682415783405304, 0.6793394684791565, 0.6720289587974548,
+               0.6960929036140442, 0.7344872951507568, 0.8287723064422607, 0.9486955404281616]
+        wp90: [0.5593066215515137, 0.5007686018943787, 0.5124438405036926, 0.5229008793830872,
+               0.5534335374832153, 0.5945547223091125, 0.6987603907585144, 0.8794801831245422]
+
   jets:
 
     # Raw and JES-corrected reconstructed collections are retained for all three
@@ -270,6 +318,16 @@ auau:
     # Underlying-event subtracted tower cones; the raw cones are stored
     # beside them.
     method: sub1
+
+    # Historical working point recorded with each SUB1 cone (isow_*): a line
+    # in the truncated integer centrality inside centrality_range, the
+    # photon-ET fallback line otherwise. The nominal Au+Au isolation class
+    # uses the pinned TreeToHists freeze, not these thresholds.
+    witness:
+      centrality_range: [0, 80]
+      r03: {intercept_gev: 5.97, slope: -0.0507, sideband_gap_gev: 0.0}
+      r04: {intercept_gev: 7.57, slope: -0.0658, sideband_gap_gev: 0.0}
+      fallback: {intercept_gev: 0.081, slope: 0.019, sideband_gap_gev: 0.8}
 
   # Centrality is reconstructed for Au+Au DATA from explicitly bound run-level
   # payloads. The native centile remains stored; these coarse edges provide the
@@ -408,7 +466,7 @@ profiles:
     simulation_role: none
     dataset_token: isPP
     input_mode: reconstructed_dst
-    cdb_global_tag: null  # requires exact reviewed release/run binding
+    cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: none
 
 
@@ -419,18 +477,8 @@ profiles:
     simulation_role: photon_jet
     dataset_token: isSim
     input_mode: reconstructed_dst
-    cdb_global_tag: null  # requires exact reviewed release/run binding
+    cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: auto
-
-    # Producer-side simulated-vertex reweighting. Cross-section normalization,
-    # source ownership/stitching, SI/DI composition and luminosity remain
-    # downstream.
-    vertex_reweighting:
-      enabled: true
-      file: null  # bind reviewed payload and SHA256
-      sha256: null
-      histogram: h_w_iterative
-
 
   # p+p inclusive-jet simulation
   pp_inclusive_sim:
@@ -439,15 +487,8 @@ profiles:
     simulation_role: inclusive_jet
     dataset_token: isSimInclusive
     input_mode: reconstructed_dst
-    cdb_global_tag: null  # requires exact reviewed release/run binding
+    cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: auto
-
-    vertex_reweighting:
-      enabled: true
-      file: null  # bind reviewed payload and SHA256
-      sha256: null
-      histogram: h_w_iterative
-
 
   # Archived p+p photon+jet double-interaction simulation
   #
@@ -496,7 +537,7 @@ profiles:
     simulation_role: none
     dataset_token: isAuAu
     input_mode: reconstructed_dst
-    cdb_global_tag: null  # requires exact reviewed release/run binding
+    cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: none
     reconstruct_centrality: true
     require_minimum_bias_classifier: true
@@ -509,7 +550,7 @@ profiles:
     simulation_role: photon_jet
     dataset_token: isSimEmbedded
     input_mode: reconstructed_dst
-    cdb_global_tag: null  # requires exact reviewed release/run binding
+    cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: auto
 
     require_embedded_minimum_bias: false  # record observation; no producer selection
@@ -522,7 +563,7 @@ profiles:
     simulation_role: inclusive_jet
     dataset_token: isSimEmbeddedInclusive
     input_mode: reconstructed_dst
-    cdb_global_tag: null  # requires exact reviewed release/run binding
+    cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: dst
 
     require_embedded_minimum_bias: false  # record observation; no producer selection
@@ -532,8 +573,8 @@ profiles:
 # Optional high-volume witness tables
 #
 # Mandatory canonical tables are always written. These switches control large
-# reconstruction-level witness tables whose permanent disposition remains a
-# THE358 -> THE352 field-mapping decision.
+# reconstruction-level witness tables whose permanent disposition remains an
+# open field-mapping decision of the final layout.
 #
 # They remain enabled until equivalence work demonstrates that dropping them
 # would not remove information needed to reconstruct downstream quantities:

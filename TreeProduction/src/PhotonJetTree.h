@@ -3,39 +3,10 @@
 
 /**
  * @file PhotonJetTree.h
- * @brief Public interface and state of the isolated-photon + jet tree producer.
- *
- * PhotonJetTree is the single Fun4All producer used for pp and AuAu, DATA and simulation. Collision-system and sample differences are expressed through
- * typed configuration rather than through separate producer classes.
- *
- * The producer owns the conversion of reconstructed event state into canonical
- * analysis records:
- *
- *   source / event identity and exposure accounting
- *     -> trigger and scaler state
- *     -> vertex, MBD, centrality, and calorimeter state
- *     -> reconstructed photons, shower information, and isolation
- *     -> reconstructed jets and photon-jet relationships
- *     -> simulation truth and reco-truth associations
- *     -> producer-owned event weights
- *     -> ROOT serialization and provenance
- *
- * TreeProduction deliberately stops at reconstructed and truth-level facts.
- * Detector reconstruction is registered by the production layer; photon-ID models, working points, analysis selections, histogramming, corrections, unfolding, normalization, and plotting are downstream responsibilities.
- *
- * Candidates are therefore retained independently of photon-ID and isolation working points. The trees preserve the reconstruction primitives needed to train or evaluate later classifiers without rereading the DST.
- *
- * The implementation is split by responsibility while remaining one class:
- *
- *   PhotonJetTree.cc          lifecycle and explicit event-flow spine
- *   internal/Event.cc        event context, exposure, triggers, and weights
- *   internal/Photons.cc      photons, shower information, and isolation
- *   internal/Jets.cc         reconstructed jets and photon-jet relations
- *   internal/Truth.cc        simulation truth and reco-truth associations
- *   internal/Output.cc       ROOT serialization, provenance, and completion
- *
- * All persisted configuration and record types are defined once in
- * internal/Types.h.
+ * Public producer lifecycle and retained record state.
+ * Event, object, truth and output operations are implemented in internal/.
+ * Types.h owns record types; the producer never selects candidates by BDT.
+ * Empty object collections remain valid retained events.
  */
 
 #include "internal/Types.h"
@@ -43,7 +14,12 @@
 #include <fun4all/SubsysReco.h>
 
 #include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 class PHCompositeNode;
@@ -53,8 +29,9 @@ class TH1;
 class TTree;
 
 class RawCluster;
+class Jet;
 class TowerInfoContainer;
-class PhotonClusterBuilder;
+namespace photonjet { class PhotonClusterBuilder; class DirectEventWriter; }
 
 class PHG4Particle;
 
@@ -191,7 +168,16 @@ class PhotonJetTree : public SubsysReco
   // Non-owning binding to the registered reconstruction module. Its selected
   // event vertex distinguishes unavailable input from a complete empty photon
   // inventory without a second vertex-selection algorithm in capture.
-  void setPhotonBuilder(const PhotonClusterBuilder* builder) { m_photonBuilder = builder; }
+  void setPhotonBuilder(const photonjet::PhotonClusterBuilder* builder) { m_photonBuilder = builder; }
+
+  // Bind one raw collection to its current-event clustering results.
+  // Capture uses exact jet identity and never rematches fractions geometrically.
+  using JetFractionReader = std::function<std::array<double, 3>(const Jet*)>;
+  void setJetFractionReader(const std::string& node, JetFractionReader reader)
+  {
+    if (node.empty() || !reader || !m_jetFractionReaders.emplace(node, std::move(reader)).second)
+      throw std::invalid_argument("missing or duplicate jet-fraction reader for " + node);
+  }
 
  private:
   // ==========================================================================
@@ -275,7 +261,7 @@ class PhotonJetTree : public SubsysReco
   // ==========================================================================
   // Reconstructed photons
   //
-  // Implemented in internal/Photons.cc. This stage stores reconstruction facts
+  // Implemented in internal/Objects.cc. This stage stores reconstruction facts
   // and isolation observables; it does not apply photon-ID or isolation working
   // points.
   // ==========================================================================
@@ -310,7 +296,7 @@ class PhotonJetTree : public SubsysReco
   // ==========================================================================
   // Reconstructed jets
   //
-  // Implemented in internal/Jets.cc. Collection identity, calibrated/raw jet
+  // Implemented in internal/Objects.cc. Collection identity, calibrated/raw jet
   // information, and retained photon-jet relationships are kept explicit.
   // ==========================================================================
 
@@ -359,11 +345,10 @@ class PhotonJetTree : public SubsysReco
   // records and product metadata; it does not introduce new physics quantities.
   // ==========================================================================
 
-  void bookTrees();
   void writeFileMetadata();
 
   void fillEventOutput();
-  void fillObjectOutput();
+  void fillRejectedOutput(const UpstreamRejectedEventRecord& record);
 
   void writeCompletionMetadata();
 
@@ -375,41 +360,16 @@ class PhotonJetTree : public SubsysReco
   // ==========================================================================
 
   Config m_config;
-  const PhotonClusterBuilder* m_photonBuilder = nullptr;  // owned by Fun4AllServer
+  const photonjet::PhotonClusterBuilder* m_photonBuilder = nullptr;  // owned by Fun4AllServer
+  std::map<std::string, JetFractionReader> m_jetFractionReaders;
 
   // ==========================================================================
   // ROOT product handles
   //
-  // One handle per persisted table. The corresponding row buffers are declared
-  // separately below.
+  // One bounded direct writer. No intermediate object TTrees are created.
   // ==========================================================================
 
-  TFile* m_outputFile = nullptr;
-
-  TTree* m_sourceTree = nullptr;
-  TTree* m_upstreamRejectedTree = nullptr;
-  TTree* m_eventTree = nullptr;
-
-  TTree* m_photonTree = nullptr;
-  TTree* m_showerShapeTree = nullptr;
-  TTree* m_photonCellTree = nullptr;
-  TTree* m_isolationTree = nullptr;
-  TTree* m_isolationConstituentTree = nullptr;
-
-  TTree* m_jetTree = nullptr;
-  TTree* m_photonJetPairTree = nullptr;
-
-  TTree* m_truthVertexTree = nullptr;
-  TTree* m_truthPhotonTree = nullptr;
-  TTree* m_truthJetTree = nullptr;
-
-  TTree* m_photonTruthLinkTree = nullptr;
-  TTree* m_jetTruthLinkTree = nullptr;
-
-  TTree* m_weightTree = nullptr;
-
-  TTree* m_triggerScalerTree = nullptr;
-  TTree* m_triggerRunInfoTree = nullptr;
+  std::shared_ptr<photonjet::DirectEventWriter> m_directOutput;
 
   // ==========================================================================
   // Source- and run-lifetime state
@@ -459,38 +419,6 @@ class PhotonJetTree : public SubsysReco
   std::vector<JetTruthLinkRecord> m_jetTruthLinks;
 
   std::vector<WeightComponentRecord> m_weightComponents;
-
-  // ==========================================================================
-  // ROOT row buffers
-  //
-  // ROOT branches hold addresses into these records. Output.cc copies the row
-  // being serialized into the appropriate buffer before each TTree::Fill().
-  // ==========================================================================
-
-  SourceRecord m_sourceRow;
-  UpstreamRejectedEventRecord m_upstreamRejectedRow;
-  EventRecord m_eventRow;
-
-  PhotonRecord m_photonRow;
-  ShowerShapeRecord m_showerShapeRow;
-  PhotonCellRecord m_photonCellRow;
-  IsolationRecord m_isolationRow;
-  IsolationConstituentRecord m_isolationConstituentRow;
-
-  JetRecord m_jetRow;
-  PhotonJetPairRecord m_photonJetPairRow;
-
-  TruthVertexRecord m_truthVertexRow;
-  TruthPhotonRecord m_truthPhotonRow;
-  TruthJetRecord m_truthJetRow;
-
-  PhotonTruthLinkRecord m_photonTruthLinkRow;
-  JetTruthLinkRecord m_jetTruthLinkRow;
-
-  WeightComponentRecord m_weightRow;
-
-  TriggerScalerSnapshotRecord m_triggerScalerRow;
-  TriggerRunInfoRecord m_triggerRunInfoRow;
 
   // ==========================================================================
   // Lifecycle guards

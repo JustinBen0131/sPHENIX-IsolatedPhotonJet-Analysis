@@ -1,0 +1,74 @@
+# Shared nominal training contract. Ordinary users select a command and system.
+# Published group locations are deployment settings, supplied here or --group.
+version: 1
+datasets:
+  AuAu: []
+  PP: []
+features:
+  AuAu: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, cluster_weta33_cogx, cluster_wphi33_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35, centrality]
+  PP: [cluster_Et, cluster_weta_cogx, cluster_wphi_cogx, vertexz, cluster_Eta, e11_over_e33, cluster_et1, cluster_et2, cluster_et3, cluster_et4, e32_over_e35]
+sources:
+  AuAu:
+    # Exact source.sample identities in the maintained eventTree projection.
+    signal: [run28_embeddedphoton12, run28_embeddedphoton20]
+    background: [run28_embeddedjet12, run28_embeddedjet20, run28_embeddedjet30, run28_embeddedjet40]
+  PP:
+    # Bind the approved pp sample identities at deployment; do not infer the
+    # AuAu sample list or silently use every available simulation sample.
+    signal: []
+    background: []
+training:
+  train_fraction: 0.9
+  seed: 13
+  split_identity: centAsFeatBase3x3_pt15to35
+  # Same corrected-replay witness as the maintained eventTree training projection.
+  minimum_bias_branch: cent_mb_decision
+  minimum_bias_pass: 1
+weights:
+  bins: 20
+  eta_range: [-0.7, 0.7]
+  et_cap: 800
+bins:
+  et: [15, 17, 19, 21, 23, 25, 28, 32, 35]
+  centrality_coarse: [0, 20, 50, 80]
+  centrality_fine: [0, 10, 20, 30, 40, 50, 60, 80]
+learners:
+  bdt:
+    n_estimators: 450
+    max_depth: 4
+    learning_rate: 0.035
+    subsample: 0.85
+    colsample_bytree: 0.85
+    reg_alpha: 5.0
+    reg_lambda: 0.3
+    grow_policy: lossguide
+    max_bin: 256
+    tree_method: hist
+    n_jobs: 1
+  mlp:
+    hidden_layers: [48, 24]
+    learning_rate: 0.001
+    l2: 0.0001
+    batch_size: 4096
+    epochs: 80
+    input_clip: 0.0
+  logreg:
+    learning_rate: 0.018
+    l2: 0.002
+    batch_size: 262144
+    epochs: 60
+    input_clip: 8.0
+# Engineering gates, not a claim of physics acceptance. Calibrate performance
+# gates on the matched production inputs before calling a release canonical.
+validation:
+  min_rows_per_class_per_split: 100
+  min_holdout_auc: 0.55
+  max_train_holdout_auc_gap: 0.05
+  saved_score_atol: 0.0000000001
+working_points:
+  efficiencies: [0.7, 0.8, 0.9]
+  centrality_edges: [0, 10, 20, 30, 40, 50, 60, 80]
+  et_edges: [15, 17, 19, 21, 23, 25, 28, 32, 35]
+  max_efficiency_error: 0.02
+  max_fit_residual: 0.025
+  max_fit_rms: 0.015
