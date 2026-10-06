@@ -43,6 +43,30 @@ TreeToHists/
 
 `build/` (the compiled driver) is made on the machine that runs it and is not part of the package.
 
+## ROOT inputs and JSON metadata
+
+The events, photons and jets are read from the `eventTree` inside each input `.root` file. JSON describes those
+files and the analysis settings:
+
+- **Input catalogue (`catalogue.json`):** tells TreeToHists which produced ROOT files or published groups belong to
+  each DATA collection or simulation sample. TreeProduction's `.list` files select the DSTs used to produce trees;
+  this catalogue selects the resulting trees to histogram.
+- **Metadata inside each ROOT file:** TreeProduction writes JSON text under `meta/`. TreeToHists reads
+  `meta/schema` and `meta/source` to identify the system, sample and original source; `meta/photon_id` (or
+  `meta/photon_models` for an optional model) and `meta/isolation` bind the saved selections. Available trigger,
+  normalization, weighting and event-accounting records are carried forward. These checks catch duplicate sources,
+  incompatible selections and inconsistent weight settings. Users do not edit the embedded metadata.
+- **Published-group manifest (`MANIFEST.json`):** lists the group's ROOT files, source identities and checksums.
+  It is read when the catalogue names a published group; direct ROOT-file inputs do not require a group manifest.
+- **Settings and generated records:** photon-ID/isolation definitions and simulation stitching use JSON; the driver
+  also writes `plan.json`, `selection.json`, completion records and output sidecars automatically.
+
+`src/vendor/nlohmann/` contains the MIT-licensed nlohmann/json 3.11.3 C++ headers used to read and write these records.
+They are bundled so collaborators can build without installing a separate JSON library. No edits to those headers
+are needed for ordinary use.
+
+## Plan, fill and merge
+
 1. **Plan.** The catalogue names every sample and its files, or its published stage-2 groups (`GROUP/CURRENT` with a
    hash-bound `MANIFEST.json`). Each file's system, DATA/simulation family, source identity and score binding is checked
    against the resolved selection; Au+Au simulation must bind its 16 centrality weights, their evidence, the DATA
