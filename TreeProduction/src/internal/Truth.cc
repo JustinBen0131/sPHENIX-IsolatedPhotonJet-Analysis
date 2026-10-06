@@ -740,7 +740,7 @@ void PhotonJetTree::captureSimulationTruth(PHCompositeNode* topNode)
 //
 // The maximum stored truth photon pT of each established stitch definition and
 // the leading truth R=0.4 jet pT, as the producer computed them. The ownership
-// decision and its audit rows belong to the event classification (PPG12.cc).
+// decision and its audit rows belong to the event classification (Event.cc).
 // ============================================================================
 
 /**

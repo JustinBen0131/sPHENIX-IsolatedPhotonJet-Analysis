@@ -208,7 +208,7 @@ class PhotonJetTree : public SubsysReco
   bool isInclusiveJetSimulation() const;
 
   // pp simulation with PPG12 weights keeps the inputs of its PPG12 histogram
-  // bookkeeping (PPG12Simulation.cc).
+  // bookkeeping (Event.cc).
   bool recordsPPG12Simulation() const
   {
     return isSimulation() && isPP() && m_config.weights.ppg12Nominal;
@@ -292,8 +292,8 @@ class PhotonJetTree : public SubsysReco
   /*
    * The established producer's PPG12 bookkeeping: the vertex/period audit of
    * a classified event, pp simulation sample ownership and the DATA
-   * per-photon yield audit (PPG12.cc); in pp simulation, the histogram fills
-   * and occurrences after the weight configuration (PPG12Simulation.cc).
+   * per-photon yield audit; in pp simulation, the histogram-fill counts and
+   * occurrences after the weight configuration. Implemented in Event.cc.
    */
   void recordPPG12VertexAudit(bool preVertexCut);
   bool recordPPG12SampleOwnership(bool beforeEventCuts);

@@ -26,8 +26,6 @@ libPhotonJetTree_la_SOURCES = \
   internal/Event.cc \
   internal/Objects.cc \
   internal/Truth.cc \
-  internal/PPG12.cc \
-  internal/PPG12Simulation.cc \
   internal/Output.cc
 libPhotonJetTree_la_LIBADD = libEventTree.la $(PRODUCER_LIBS)
 libPhotonJetTree_la_LDFLAGS = -no-undefined -version-info 0:0:0
@@ -40,9 +38,6 @@ if BUILD_PRODUCER
 productioninclude_HEADERS += PhotonJetTree.h PhotonClusterBuilder.h
 internalinclude_HEADERS += internal/Production.h internal/Types.h internal/Configuration.h
 endif
-# Shared by the PPG12 bookkeeping sources only.
-noinst_HEADERS = internal/PPG12.h
-
 EXTRA_DIST = autogen.sh ../config/eventTree_v1.yaml
 
 # The one schema file expanded into the branch table compiled into
@@ -54,7 +49,7 @@ EventTreeSchema.h: $(schema_file)
 
 # Regenerate when a compiled source, installed header, build recipe or the
 # schema changes. The digest describes the actual compilation inputs.
-build_identity_sources = $(libEventTree_la_SOURCES) $(libPhotonJetTree_la_SOURCES) EventTree.h PhotonJetTree.h PhotonClusterBuilder.h internal/Production.h internal/Types.h internal/Configuration.h internal/PPG12.h Makefile.am configure.ac autogen.sh ../config/eventTree_v1.yaml
+build_identity_sources = $(libEventTree_la_SOURCES) $(libPhotonJetTree_la_SOURCES) EventTree.h PhotonJetTree.h PhotonClusterBuilder.h internal/Production.h internal/Types.h internal/Configuration.h Makefile.am configure.ac autogen.sh ../config/eventTree_v1.yaml
 BUILT_SOURCES = EventTreeSchema.h
 CLEANFILES = EventTreeSchema.h EventTreeSchema.h.tmp
 if BUILD_PRODUCER

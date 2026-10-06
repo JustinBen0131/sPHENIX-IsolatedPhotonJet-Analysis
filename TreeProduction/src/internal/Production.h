@@ -70,7 +70,7 @@ NominalPhotonRecord LabelNominalPhoton(const PhotonConfig& config, const PinnedM
                                        const PhotonRecord& photon, const EventRecord& event,
                                        NominalReceiptRecord& receipt);
 
-// The PPG12 weighting lane of a pp simulation sample (PPG12.cc): 1 photon+jet
+// The PPG12 weighting lane of a pp simulation sample (Event.cc): 1 photon+jet
 // single interaction, 2 photon+jet double interaction, 3 and 4 the
 // inclusive-jet equivalents; 0 without PPG12 weights.
 int PPG12WeightLaneCode(const WeightConfig& weights);

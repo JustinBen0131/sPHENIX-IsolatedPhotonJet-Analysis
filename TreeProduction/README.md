@@ -280,9 +280,8 @@ of jet and photon–jet kinematics relative to a differently split production.
 | `src/internal/Setup.cc` | Conditions, reconstruction modules, the input streams and their per-event entry check |
 | `src/internal/Types.h` | Configuration and record definitions, units and missing-value states |
 | `src/internal/Configuration.h` | Read-only access to the parsed configuration |
-| `src/internal/Event.cc` | Event context, triggers, weights and the event classification |
+| `src/internal/Event.cc` | Event context, weights, recorded classification and pp DATA/simulation bookkeeping |
 | `src/internal/Objects.cc` | Photons, jets, pairs, nominal labels and the PPG12 source arbitration |
 | `src/internal/Truth.cc` | Simulation truth, associations and the Au+Au embedded truth diagnostics |
-| `src/internal/PPG12.h/.cc`, `PPG12Simulation.cc` | The established producer's PPG12 bookkeeping |
 | `src/internal/Output.cc` | The eventTree writer: file metadata, one entry per event, completion |
 | `examples/` | Python and C++ readers |

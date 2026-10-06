@@ -800,9 +800,9 @@ struct PPG12IdLines
   static double nonTightHigh(const double et) { return 0.684375 + 0.0015625 * et; }
 };
 
-// The established pp producer's PPG12 bookkeeping (PPG12.cc and
-// PPG12Simulation.cc). Photons in these ET bins (GeV, [low, high)) entered its
-// per-photon audit. In simulation its histograms also used the recoil-jet
+// The established pp producer's PPG12 bookkeeping (Event.cc). Photons in
+// these ET bins (GeV, [low, high)) entered its per-photon audit. In simulation
+// its histograms also used the recoil-jet
 // definition and the unfolding axes below.
 struct PPG12BookkeepingConfig
 {
