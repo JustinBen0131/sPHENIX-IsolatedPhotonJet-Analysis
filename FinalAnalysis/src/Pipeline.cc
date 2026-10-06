@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "TEnv.h"
+#include "../../TreeToHists/src/Configuration.h"
 #include "THashList.h"
 #include "TROOT.h"
 #include "TFile.h"
@@ -34,17 +35,19 @@ std::vector<std::string> words(const std::string &s) {
   return out;
 }
 Config read(const fs::path &path) {
-  /* TEnv otherwise warns and silently keeps the first of two settings. */
-  std::ifstream source(path); std::set<std::string> keys;
-  for (std::string line; std::getline(source, line);) {
-    line = line.substr(0, line.find('#')); const auto colon = line.find(':');
-    if (colon == std::string::npos) continue;
-    const auto names = words(line.substr(0, colon));
-    if (names.size() == 1 && !keys.insert(names[0]).second)
-      throw std::runtime_error("duplicate configuration key " + names[0] + " in " + path.string());
+  if (!photonjet_config::isYaml(path.string())) {
+    /* TEnv otherwise warns and silently keeps the first of two settings. */
+    std::ifstream source(path); std::set<std::string> keys;
+    for (std::string line; std::getline(source, line);) {
+      line = line.substr(0, line.find('#')); const auto colon = line.find(':');
+      if (colon == std::string::npos) continue;
+      const auto names = words(line.substr(0, colon));
+      if (names.size() == 1 && !keys.insert(names[0]).second)
+        throw std::runtime_error("duplicate configuration key " + names[0] + " in " + path.string());
+    }
   }
   TEnv env;
-  if (env.ReadFile(path.c_str(), kEnvUser) != 0) throw std::runtime_error("cannot read " + path.string());
+  photonjet_config::readSettings(path.string(), env);
   Config out; TIter next(env.GetTable());
   while (auto *r = static_cast<TEnvRec *>(next())) out[r->GetName()] = r->GetValue();
   return out;
@@ -64,7 +67,7 @@ void atomic(const fs::path &p, const Json &j) {
 }
 void config(const fs::path &p, const Config &c) {
   std::ofstream out(p);
-  for (const auto &[k, v] : c) out << k << ": " << v << '\n';
+  for (const auto &[k, v] : c) out << k << ": " << Json(v).dump() << '\n';
   out.close(); if (!out) throw std::runtime_error("cannot save " + p.string());
 }
 /* Exact argv, no shell evaluation. A signal reaches the complete child process group. */
@@ -201,7 +204,7 @@ int pipeline(const std::string &file, const std::string &home) {
       }
       fs::path packages = nominalPackages;
       if (trees && (name == "nominal" || differentReduction)) {
-        const auto cfg = output / "config" / (name + "_reduction.cfg"); config(cfg, fill);
+        const auto cfg = output / "config" / (name + "_reduction.yaml"); config(cfg, fill);
         packages = output / ("packages_" + name);
         step(name + "_reduction", {(tth / "tree_to_hists.sh").string(), "local", "--settings", cfg.string(), "--inputs", input.string(), "--work", (output / ("work_" + name)).string(), "--out", packages.string(), "--parallel", parallel});
         if (name == "nominal") nominalPackages = packages;
@@ -209,7 +212,7 @@ int pipeline(const std::string &file, const std::string &home) {
       if (name == "nominal" || differentReduction) {
         for (const auto &e : fs::recursive_directory_iterator(packages)) if (e.is_regular_file() && e.path().extension() == ".root") pin(e.path());
       }
-      const auto result = output / "results" / (name + ".root"), qa = output / "results" / (name + "_qa.root"), cfg = output / "config" / (name + "_analysis.cfg");
+      const auto result = output / "results" / (name + ".root"), qa = output / "results" / (name + "_qa.root"), cfg = output / "config" / (name + "_analysis.yaml");
       analysis["Input.Directory"] = packages.string(); analysis["Output.Results"] = result.string(); analysis["Output.QA"] = qa.string();
       config(cfg, analysis); results[name] = result;
       step(name + "_qa", {(package / "final_analysis.sh").string(), "qa", "--config", cfg.string()});
@@ -235,7 +238,7 @@ int pipeline(const std::string &file, const std::string &home) {
           value = rebuilt;
         }
       }
-      const auto cfg = output / "config/systematics.cfg"; config(cfg, sys);
+      const auto cfg = output / "config/systematics.yaml"; config(cfg, sys);
       step("systematics", {(package / "final_analysis.sh").string(), "systematics", "--config", cfg.string()});
     }
     std::vector<std::string> draw = {(package / "final_analysis.sh").string(), "draw", "--results", results.at("nominal").string(), "--qa", (output / "results/nominal_qa.root").string(), "--fig", (output / "fig").string()};

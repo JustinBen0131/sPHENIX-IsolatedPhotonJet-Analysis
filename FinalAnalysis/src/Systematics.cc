@@ -1,6 +1,6 @@
 /* Systematics: the systematic uncertainties of the per-photon results, from results files that differ by one change each. */
 
-/* final_analysis --systematics config/systematics.cfg */
+/* final_analysis --systematics config/systematics.yaml */
 
 /* The settings name the nominal results file and every source; a variation is a copy of the analysis settings with one
    change, run like the nominal. Per source and result, the signed shifts (varied minus nominal, per reported xJ bin):
@@ -23,6 +23,7 @@
 #include <stdexcept>
 
 #include "TEnv.h"
+#include "../../TreeToHists/src/Configuration.h"
 #include "TFile.h"
 #include "TH1D.h"
 #include "TH2D.h"
@@ -129,7 +130,7 @@ TVectorD diagonalSqrt(const TMatrixD &m) {
    Variation production is a separate step; this command does not reread or reprocess eventTrees. */
 int systematics(const std::string &configPath) {
   TEnv env;
-  if (env.ReadFile(configPath.c_str(), kEnvUser) != 0) throw std::runtime_error("cannot read " + configPath);
+  photonjet_config::readSettings(configPath, env);
   const std::string base = gSystem->GetDirName(configPath.c_str()).Data();
   auto path = [&](const std::string &p) { return p.empty() || p[0] == '/' ? p : base + "/" + p; };
   std::set<std::string> known = {"Systematics.Nominal", "Systematics.Output", "Systematics.Sources", "Systematics.Ratios"};

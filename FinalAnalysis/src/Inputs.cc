@@ -16,6 +16,7 @@
 #include <stdexcept>
 
 #include "TEnv.h"
+#include "../../TreeToHists/src/Configuration.h"
 #include "TFile.h"
 #include "THashList.h"
 #include "TH1.h"
@@ -239,7 +240,7 @@ TMatrixD reshape(const TVectorD &v, int rows, int cols) {
 
 Settings Settings::read(const std::string &path) {
   TEnv env;
-  if (env.ReadFile(path.c_str(), kEnvUser) != 0) throw std::runtime_error("cannot read settings " + path);
+  photonjet_config::readSettings(path, env);
   Settings s;
   s.name = text(env, "Analysis.Name");
   s.inputDirectory = text(env, "Input.Directory");

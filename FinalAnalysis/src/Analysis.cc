@@ -1,6 +1,6 @@
 /* Analysis: the ordered chain of every configured result, its data toys, and results.root. */
 
-/* final_analysis --config config/analysis.cfg */
+/* final_analysis --config config/analysis.yaml */
 
 /* For each result: measured data and response -> purity and combinatoric correction -> photon-yield unfolding and the
    joint (photon pT, xJ) unfolding from the data-fitted prior -> per-photon xJ. Data toys (independent Poisson counts of

@@ -7,7 +7,7 @@
    Prior.cc       the data-fitted prior of the joint unfolding
    Analysis.cc    the ordered chain, the data and response toys, the iteration rule and results.root
    Systematics.cc the systematic uncertainties from results of one change each
-   Every physics choice is a setting in the configuration file (config/analysis.cfg); nothing below chooses one. The
+   Every physics choice is a setting in the configuration file (config/analysis.yaml); nothing below chooses one. The
    reported xJ range starts where the distribution is fully populated: the first xJ edge at or above the recoil-jet
    threshold over the lowest photon pT. It follows the binning by itself and is never typed in. */
 #pragma once

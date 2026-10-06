@@ -66,7 +66,7 @@ sidecars are read automatically.
 | Configuration | Purpose |
 |---|---|
 | [tree_production.yaml](config/tree_production.yaml) | Reconstruction profiles, conditions and pinned definitions |
-| [production_populations.json](config/production_populations.json) | Maintained populations and default output location |
+| [production_populations.yaml](config/production_populations.yaml) | Maintained populations and default output location |
 | [eventTree_v1.yaml](config/eventTree_v1.yaml) | Output branch contract |
 
 `lists/pp_data/runs.list`, `lists/auau_data/runs.list` and

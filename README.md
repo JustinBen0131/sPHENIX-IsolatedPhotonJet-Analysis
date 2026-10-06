@@ -37,9 +37,9 @@ in the package configuration files before running.
 ```bash
 ./TreeProduction/produce_trees.sh --help
 ./PhotonID/photon_id.sh --help
-./TreeToHists/tree_to_hists.sh local --settings TreeToHists/config/treetohists.cfg \
-    --inputs catalogue.json --work work --out histograms
-./FinalAnalysis/final_analysis.sh all --config FinalAnalysis/config/pipeline.cfg
+./TreeToHists/tree_to_hists.sh local --settings TreeToHists/config/treetohists.yaml \
+    --inputs inputs.yaml --work work --out histograms
+./FinalAnalysis/final_analysis.sh all --config FinalAnalysis/config/pipeline.yaml
 ```
 
 Each package has its own configuration and a short source map in its README.
@@ -53,6 +53,7 @@ Figures read saved analysis results.
 - **Histograms:** one ROOT package and JSON sidecar per DATA collection or SIM sample.
 - **Analysis:** results, QA and systematic ROOT files, then figures and tables.
 
-TreeProduction's `.list` files select DST inputs. TreeToHists' catalogue selects
-the resulting ROOT files or published groups. The package guides explain the
+TreeProduction's `.list` files select DST inputs. Other core settings use YAML;
+TreeToHists' [`inputs.yaml`](TreeToHists/config/inputs.yaml) names the resulting
+ROOT files or published groups. The package guides explain the
 required settings and current scientific qualification limits.

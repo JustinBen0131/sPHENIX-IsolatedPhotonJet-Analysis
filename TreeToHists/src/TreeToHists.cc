@@ -1,15 +1,16 @@
 /* TreeToHists: eventTree v1 files -> one histogram package per DATA collection or simulated sample. */
 
-/* tree_to_hists plan       --settings CFG --inputs CATALOGUE.json --work DIR [--sample SYSTEM/NAME]...
+/* tree_to_hists plan       --settings CFG --inputs INPUTS.yaml --work DIR [--sample SYSTEM/NAME]...
    tree_to_hists fill       --work DIR --job N
    tree_to_hists merge      --work DIR --sample SYSTEM/NAME --out DIR
-   tree_to_hists centrality --settings CFG --inputs CATALOGUE.json --data AuAu/data.root --out weights.json
+   tree_to_hists centrality --settings CFG --inputs INPUTS.yaml --data AuAu/data.root --out weights.json
    tree_to_hists isolation  population|derive|freeze|check ... (Isolation.cc) */
 
 /* Sections: the settings and the resolved selection; the package (inventory and merge); the catalogue, the plan and
    one fill job; the Au+Au centrality weights; main. The physics lives in the fills (FillPhotonJet.C,
    FillPhotonJetResponse.C, FillPhotonQA.C) and PhotonJet.h. */
 #include "TreeToHists.h"
+#include "Configuration.h"
 #include "FillPhotonQA.C"
 #include "FillPhotonJet.C"
 #include "FillPhotonJetResponse.C"
@@ -65,7 +66,7 @@ Json readJson(const std::string &path);
 Json reductionCode() {
   Json code = Json::object();
   const std::filesystem::path src = std::filesystem::path(__FILE__).parent_path();
-  for (const char *name : {"TreeToHists.cc", "Isolation.cc", "PhotonJet.h", "FillPhotonJet.C", "FillPhotonQA.C", "FillPhotonJetResponse.C"})
+  for (const char *name : {"TreeToHists.cc", "Isolation.cc", "Configuration.h", "PhotonJet.h", "FillPhotonJet.C", "FillPhotonQA.C", "FillPhotonJetResponse.C"})
     code[name] = sha256File((src / name).string());
   return code;
 }
@@ -328,7 +329,7 @@ Json readJson(const std::string &path) {
 
 Settings Settings::read(const std::string &path, const std::string &home) {
   TEnv env;
-  if (env.ReadFile(path.c_str(), kEnvUser) != 0) throw std::runtime_error("cannot read settings " + path);
+  photonjet_config::readSettings(path, env);
   const std::filesystem::path here = std::filesystem::absolute(path).parent_path(), root = std::filesystem::absolute(home);
   auto relative = [&](const std::string &p) { return std::filesystem::path(p).is_absolute() ? std::filesystem::path(p) : here / p; };
   Settings s;
@@ -913,6 +914,17 @@ void writeText(const fs::path &path, const std::string &text) {  /* atomic: a re
   fs::rename(partial, path);
 }
 
+/* YAML names the produced ROOT files or published groups and their supplied
+   normalization/weighting bindings. The existing planner checks them below.
+   Previously prepared JSON catalogues retain their original reader. */
+Json readInputCollection(const std::string &path) {
+  if (!photonjet_config::isYaml(path)) return readJson(path);
+  Json collection = photonjet_config::readYaml(path);
+  if (!collection.is_object()) throw std::runtime_error(path + ": inputs must be a YAML mapping");
+  if (!collection.contains("schema")) collection["schema"] = "PhotonJetInputCollectionV1";
+  return collection;
+}
+
 /* The files of a published stage-2 group: GROUP/CURRENT -> versions/<version>/ with a hash-bound MANIFEST.json. */
 std::vector<std::pair<fs::path, std::string>> groupFiles(const fs::path &group) {
   const fs::path current = group / "CURRENT";
@@ -990,7 +1002,7 @@ Json sourceInfo(const fs::path &path, const Json &selection, std::string &family
 
 /* Expand and check every catalogued sample. */
 Json plan(const Settings &s, const std::string &catalogue, const std::vector<std::string> &only) {
-  const Json c = readJson(catalogue);
+  const Json c = readInputCollection(catalogue);
   if (c.value("schema", "") != "PhotonJetInputCollectionV1" || c.value("samples", Json::array()).empty())
     throw std::runtime_error("expected PhotonJetInputCollectionV1 with samples");
   const fs::path base = fs::absolute(catalogue).parent_path();
@@ -1223,7 +1235,7 @@ std::string option(int argc, char **argv, const std::string &name, bool required
 /* === Centrality weights ==============================================================================================
    Centrality: the Au+Au simulation centrality weights, w(c_i) = p_DATA(c_i) / p_SIM(c_i) for the 5% slices c_i of 0-80%. */
 
-/* tree_to_hists centrality --settings CFG --inputs CATALOGUE.json --data AuAu/data.root --out weights.json */
+/* tree_to_hists centrality --settings CFG --inputs INPUTS.yaml --data AuAu/data.root --out weights.json */
 
 /* p_X(c_i) is the fraction of the centrality distribution of X inside 0-80% in slice i. DATA: the events that fired the
    selection's Au+Au trigger, minimum-bias classified and inside the vertex window (qa/events/centrality_scaled_bits of
@@ -1304,7 +1316,7 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
   }
   const std::vector<double> dataSlices = sliceCounts(data, centralityEdges);
   /* simulation: every Au+Au simulated sample of the catalogue, weighted by its cross section per generated event */
-  const Json c = readJson(catalogue);
+  const Json c = readInputCollection(catalogue);
   const fs::path base = fs::absolute(catalogue).parent_path();
   std::vector<double> simulation(16);
   Json samples = Json::object();

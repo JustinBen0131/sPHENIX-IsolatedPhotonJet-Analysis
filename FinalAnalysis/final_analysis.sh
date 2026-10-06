@@ -1,5 +1,5 @@
 #!/bin/sh
-# FinalAnalysis entry point. Needs ROOT (root-config and root on PATH).
+# FinalAnalysis entry point. Needs ROOT, libyaml and nlohmann/json.hpp in the selected environment.
 #
 #   final_analysis.sh run         --config SETTINGS              the measurement: the results file named in SETTINGS
 #   final_analysis.sh qa          --config SETTINGS              the photon and event QA inputs: the QA file named in SETTINGS
@@ -20,10 +20,11 @@ usage_draw="usage: final_analysis.sh draw [--results FILE] [--qa FILE] [--system
 usage_tables="usage: final_analysis.sh tables --results FILE [--systematics FILE] --out DIR"
 compile() {
   mkdir -p "$build"
-  if [ ! -x "$build/final_analysis" ] || [ -n "$(find "$package/src" -type f -newer "$build/final_analysis")" ]; then
+  if [ ! -x "$build/final_analysis" ] || [ "$package/../TreeToHists/src/Configuration.h" -nt "$build/final_analysis" ] || \
+     [ -n "$(find "$package/src" -type f -newer "$build/final_analysis")" ]; then
     # shellcheck disable=SC2046
-    $(root-config --cxx) -O2 -std=c++17 $(root-config --cflags) -I"$package/src/vendor" -I"$package/src" "$package"/src/*.cc \
-      -o "$build/final_analysis" $(root-config --libs)
+    $(root-config --cxx) -O2 -std=c++17 $(root-config --cflags) -I"$package/src" "$package"/src/*.cc \
+      -o "$build/final_analysis" $(root-config --libs) -lyaml
   fi
 }
 cpp_string() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -55,7 +56,7 @@ case "${1:-}" in
     [ "$#" -eq 0 ] || { echo "$usage_draw" >&2; exit 2; }
     [ -n "$fig" ] && { [ -n "$results" ] || [ -n "$qa" ]; } || { echo "$usage_draw" 1>&2; exit 2; }
     mkdir -p "$build"
-    exec root -l -b -q -e "gSystem->SetBuildDir(\"$(cpp_string "$build")\", true); gSystem->AddIncludePath(\"-I$(cpp_string "$package")/plots -I$(cpp_string "$package")/src/vendor\");" \
+    exec root -l -b -q -e "gSystem->SetBuildDir(\"$(cpp_string "$build")\", true); gSystem->AddIncludePath(\"-I$(cpp_string "$package")/plots\");" \
       "$package/plots/IANFigures.C+(\"$(cpp_string "$results")\", \"$(cpp_string "$fig")\", \"$(cpp_string "$systematics")\", \"$(cpp_string "$qa")\")" ;;
   tables)
     shift
@@ -72,7 +73,7 @@ case "${1:-}" in
     [ "$#" -eq 0 ] || { echo "$usage_tables" >&2; exit 2; }
     [ -n "$results" ] && [ -n "$out" ] || { echo "$usage_tables" 1>&2; exit 2; }
     mkdir -p "$build"
-    exec root -l -b -q -e "gSystem->SetBuildDir(\"$(cpp_string "$build")\", true); gSystem->AddIncludePath(\"-I$(cpp_string "$package")/src/vendor\");" \
+    exec root -l -b -q -e "gSystem->SetBuildDir(\"$(cpp_string "$build")\", true);" \
       "$package/plots/IANTables.C+(\"$(cpp_string "$results")\", \"$(cpp_string "$out")\", \"$(cpp_string "$systematics")\")" ;;
   *)
     sed -n '2,14p' "$0" 1>&2; exit 2 ;;

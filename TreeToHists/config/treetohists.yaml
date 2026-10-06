@@ -1,0 +1,29 @@
+# One shared selection for DATA, simulation, spectra, QA and responses.
+# Paths are relative to this file; omitted frozen definitions use package defaults.
+Selection:
+  Name: nominal
+  # PhotonIDPackage: /path/to/photon_id_freeze.json
+  # AuAuIsolationPackage: /path/to/isolation_freeze.json
+
+pp:
+  DataTrigger: photon4
+  # PhotonIDSelection: /path/to/optional_model/selection.json
+auau:
+  DataTrigger: photon12
+  # PhotonIDSelection: /path/to/optional_model/selection.json
+
+# Optional per-system overrides:
+# Tight, NonTightLow, NonTightHigh: [intercept, slope] in photon ET (pp) or centrality (AuAu).
+# IsolationThreshold: [intercept, slope]; IsolationRadius: 0.3 or 0.4; IsolationSidebandGap: GeV.
+# ScoreBranch, StateBranch, ScoreMetadata: bindings of a qualified augmented score.
+# A changed AuAu isolation radius needs a matching frozen isolation definition.
+
+# Storage axes; FinalAnalysis uses exact unions of these bins.
+Axes:
+  XjEdges: [0, 0.2, 0.24, 0.29, 0.3, 0.35, 0.41, 0.5, 0.6, 0.7, 0.72, 0.8, 0.86, 0.9, 1.0, 1.03, 1.1, 1.24, 1.25, 1.49, 1.5, 1.78, 2.0, 2.14, 3.0]
+  RecoResponseEdges: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+  TruthResponseEdges: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+
+Fill:
+  RequireStage3Fractions: 0  # 1 requires filled jet calorimeter fractions.
+  ResponseVariation: ""  # Nominal; a study may set jet_scale=1.03 seed=1.

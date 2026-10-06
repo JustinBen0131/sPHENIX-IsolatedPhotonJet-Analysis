@@ -1,13 +1,13 @@
 #!/bin/bash
-# TreeToHists entry point: eventTree v1 files -> one histogram package per sample. Needs ROOT (root-config) with the
-# bundled nlohmann/json headers (MIT).
+# TreeToHists entry point: eventTree v1 files -> one histogram package per sample.
+# Needs ROOT (root-config), libyaml and nlohmann/json.hpp in the selected environment.
 #
 #   tree_to_hists.sh build
-#   tree_to_hists.sh plan   --settings CFG --inputs CATALOGUE.json --work DIR [--sample SYSTEM/NAME]...
+#   tree_to_hists.sh plan   --settings YAML --inputs INPUTS.yaml --work DIR [--sample SYSTEM/NAME]...
 #   tree_to_hists.sh fill   --work DIR --job N
 #   tree_to_hists.sh merge  --work DIR --sample SYSTEM/NAME --out DIR
-#   tree_to_hists.sh centrality --settings CFG --inputs CATALOGUE.json --data AuAu/data.root --out weights.json
-#   tree_to_hists.sh local  --settings CFG --inputs CATALOGUE.json --work DIR --out DIR [--parallel N] [--sample ...]
+#   tree_to_hists.sh centrality --settings YAML --inputs INPUTS.yaml --data AuAu/data.root --out weights.json
+#   tree_to_hists.sh local  --settings YAML --inputs INPUTS.yaml --work DIR --out DIR [--parallel N] [--sample ...]
 #   tree_to_hists.sh condor --work DIR --logs DIR --events-log /tmp/$USER/<campaign>/events.log --setup "SCRIPT [ARGS]"
 #   tree_to_hists.sh isolation population --out population.root EVENTTREE...
 #   tree_to_hists.sh isolation derive --out package.json POPULATION...
@@ -29,8 +29,8 @@ sources=("$package/src/TreeToHists.cc" "$package/src/Isolation.cc")
 build() {
   mkdir -p "$package/build"
   # shellcheck disable=SC2046
-  "$(root-config --cxx)" -O2 -std=c++17 $(root-config --cflags) -I"$package/src/vendor" -I"$package/src" "${sources[@]}" \
-    -o "$binary" $(root-config --libs) -lTreePlayer
+  "$(root-config --cxx)" -O2 -std=c++17 $(root-config --cflags) -I"$package/src" "${sources[@]}" \
+    -o "$binary" $(root-config --libs) -lTreePlayer -lyaml
 }
 current() {  # build when a source is newer than the binary (never inside a fill job)
   if [ ! -x "$binary" ] || [ -n "$(find "$package/src" -type f -newer "$binary")" ]; then build; fi

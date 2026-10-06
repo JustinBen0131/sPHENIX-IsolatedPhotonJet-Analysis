@@ -2,15 +2,16 @@
 
 Fill histogram packages from eventTree v1 files using one shared selection
 for spectra, QA and simulation responses. Inputs are read only.
-Requires ROOT 6, its C++ compiler and a POSIX shell.
+Requires ROOT 6, its C++ compiler, libyaml, `nlohmann/json.hpp` and a POSIX shell.
+The supplied conda environment includes these dependencies.
 
 ## Run locally
 
 From the repository root:
 
 ```bash
-./TreeToHists/tree_to_hists.sh local --settings TreeToHists/config/treetohists.cfg \
-    --inputs catalogue.json --work work --out histograms --parallel 8
+./TreeToHists/tree_to_hists.sh local --settings TreeToHists/config/treetohists.yaml \
+    --inputs inputs.yaml --work work --out histograms --parallel 8
 ```
 
 `local` builds the driver, plans one job per input file, fills and merges.
@@ -19,40 +20,37 @@ directory for changed settings. Existing output packages are not replaced.
 
 ## Inputs and settings
 
-The input catalogue names produced ROOT files or published tree groups.
+Copy [config/inputs.yaml](config/inputs.yaml) and name your DATA and SIM inputs.
 TreeProduction's DST `.list` files are used earlier, when making the trees.
 
-```json
-{
-  "schema": "PhotonJetInputCollectionV1",
-  "samples": [
-    {"system": "PP", "name": "data", "family": "data",
-     "groups": ["trees/PP/run51109"]}
-  ]
-}
+```yaml
+samples:
+  - system: PP
+    name: data
+    family: data
+    files: [/path/to/eventTree.root]
 ```
 
-Use `files` instead of `groups` for direct ROOT-file paths. Paths are relative
-to the catalogue. Simulation families are `photonjet` and `inclusivejet`;
-supply their qualified normalization and weighting bindings. AuAu simulation
-also requires selection-matched centrality and truth-vertex weights.
+Paths are relative to the input YAML file. Use `groups` instead of `files`
+for published tree-group directories. The template documents simulation
+normalization and AuAu centrality/vertex bindings.
 
-[config/treetohists.cfg](config/treetohists.cfg) uses ROOT TEnv `Key: value`
-settings. It selects photon ID, isolation, DATA triggers and storage axes.
+[config/treetohists.yaml](config/treetohists.yaml) selects photon ID,
+isolation, DATA triggers and storage axes.
 The defaults use the frozen nominal photon-ID definition and AuAu isolation
 line. The DATA triggers are pp Photon4 and AuAu Photon12.
-For an optional model, set `auau.PhotonIDSelection` or
-`pp.PhotonIDSelection` to its `selection.json`.
+For an optional model, set `PhotonIDSelection` under `auau` or `pp`
+to its `selection.json`.
 
-The bundled MIT-licensed nlohmann/json headers read catalogues, ROOT metadata
-and selection definitions and write package records. No separate JSON-library
-installation is needed.
+Frozen definitions, JSON records inside ROOT files and package sidecars retain
+the source identity, selection and normalization needed by FinalAnalysis. The driver reads these
+automatically; analysts supply YAML settings and tree inputs.
 
 ## Run on Condor
 
 ```bash
-./TreeToHists/tree_to_hists.sh plan --settings TreeToHists/config/treetohists.cfg \
-    --inputs catalogue.json --work work
+./TreeToHists/tree_to_hists.sh plan --settings TreeToHists/config/treetohists.yaml \
+    --inputs inputs.yaml --work work
 ./TreeToHists/tree_to_hists.sh condor --work work --logs logs \
     --events-log /tmp/$USER/photonjet/events.log \
     --setup "/opt/sphenix/core/bin/sphenix_setup.sh -n new"
@@ -97,6 +95,7 @@ Start at `TreeToHists.cc::main`. `plan` resolves inputs and settings;
 | File | Responsibility |
 |---|---|
 | [TreeToHists.cc](src/TreeToHists.cc) | Settings, catalogue, planning, filling and merge |
+| [Configuration.h](src/Configuration.h) | YAML reader shared with FinalAnalysis |
 | [PhotonJet.h](src/PhotonJet.h) | Shared cuts, regions, weights and truth relations |
 | [FillPhotonJet.C](src/FillPhotonJet.C) | Measurement histograms and event records |
 | [FillPhotonJetResponse.C](src/FillPhotonJetResponse.C) | Simulation response, misses and fakes |

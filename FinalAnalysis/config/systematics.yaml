@@ -1,0 +1,59 @@
+# FinalAnalysis systematics: the sources of the systematic uncertainty of the per-photon results.
+# YAML format; "#" starts a comment. Paths are relative to this file.
+#
+# Every results file below comes from a copy of config/analysis.yaml with exactly one change, run like the nominal:
+#   final_analysis.sh run --config <copy>
+# A source gives Up and Down (two-sided), one Alternative (mirrored), or Alternatives name=path ... with a Representative
+# (an envelope: its band is the largest |shift|, its covariance the representative's). Correlated: 1 when the source is the
+# same physical input in every system (varied together in the ratios). A source applies to the results its files hold.
+
+Systematics:
+  Nominal: /path/to/results/results.root
+  Output: /path/to/results/systematics.root
+  Sources: [prior_power, prior_form, iterations, combinatoric_shape, background_correlation, purity_nonclosure, jet_energy_scale]
+  Ratios: [auau_cent0_20/pp, auau_cent20_50/pp, auau_cent50_80/pp]
+prior_power:
+
+  # Prior.Power 1.5 and 0.5 (the ATLAS prior bracket).
+  Family: unfolding
+  Correlated: 1
+  Up: /path/to/results_prior_p15/results.root
+  Down: /path/to/results_prior_p05/results.root
+prior_form:
+
+  # Prior.Form exp2.
+  Family: unfolding
+  Correlated: 1
+  Alternative: /path/to/results_prior_exp2/results.root
+iterations:
+
+  # PairIterations one below and one above the rule's choice (fixed numbers in the copies).
+  Family: unfolding
+  Correlated: 0
+  Alternatives: [minus=/path/to/results_k_minus/results.root, plus=/path/to/results_k_plus/results.root]
+  Representative: plus
+combinatoric_shape:
+
+  # Combinatoric.Shape flat.
+  Family: combinatoric
+  Correlated: 0
+  Alternative: /path/to/results_combinatoric_flat/results.root
+background_correlation:
+
+  # BackgroundCorrelation qa: R_bkg of the simulated non-signal candidates per photon bin (the qa step) instead of 1.
+  Family: purity
+  Correlated: 0
+  Alternative: /path/to/results_rbkg/results.root
+purity_nonclosure:
+
+  # PurityScale qa: the simulated purity non-closure per photon bin (the qa step; refused outside 0.5-1.5).
+  Family: purity
+  Correlated: 0
+  Alternative: /path/to/results_purity_nonclosure/results.root
+jet_energy_scale:
+
+  # The simulated response with Fill.ResponseVariation "jet_scale=1.03 seed=1" and "jet_scale=0.97 seed=1" (TreeToHists).
+  Family: jet_response
+  Correlated: 1
+  Up: /path/to/results_jes_up/results.root
+  Down: /path/to/results_jes_down/results.root

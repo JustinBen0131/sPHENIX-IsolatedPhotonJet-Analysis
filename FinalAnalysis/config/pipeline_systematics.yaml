@@ -1,0 +1,38 @@
+# The same sources as systematics.yaml, bound to the declared pipeline variations.
+# Existing manual systematics.yaml commands still take ordinary results-file paths.
+Systematics:
+  Nominal: '@nominal'
+  Output: systematics.root
+  Sources: [prior_power, prior_form, iterations, combinatoric_shape, background_correlation, purity_nonclosure, jet_energy_scale]
+  Ratios: [auau_cent0_20/pp, auau_cent20_50/pp, auau_cent50_80/pp]
+prior_power:
+  Family: unfolding
+  Correlated: 1
+  Up: '@prior_p15'
+  Down: '@prior_p05'
+prior_form:
+  Family: unfolding
+  Correlated: 1
+  Alternative: '@prior_exp2'
+iterations:
+  Family: unfolding
+  Correlated: 0
+  Alternatives: [minus=@k_minus, plus=@k_plus]
+  Representative: plus
+combinatoric_shape:
+  Family: combinatoric
+  Correlated: 0
+  Alternative: '@combinatoric_flat'
+background_correlation:
+  Family: purity
+  Correlated: 0
+  Alternative: '@rbkg'
+purity_nonclosure:
+  Family: purity
+  Correlated: 0
+  Alternative: '@purity_nonclosure'
+jet_energy_scale:
+  Family: jet_response
+  Correlated: 1
+  Up: '@jes_up'
+  Down: '@jes_down'

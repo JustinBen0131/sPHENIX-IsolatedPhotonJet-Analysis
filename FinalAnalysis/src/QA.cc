@@ -37,7 +37,7 @@
 
 /* QA: the inputs of the photon and event QA figures, written once under qa/<package>/ of the QA file (Output.QA). */
 
-/* final_analysis --qa config/analysis.cfg */
+/* final_analysis --qa config/analysis.yaml */
 
 /* Per package (PP, AuAu): every histogram under qa/ of the DATA package (data/), and of the simulated samples summed
    with their cross section per generated event, per family (phosim/: the photon samples of the results, jetsim/: the

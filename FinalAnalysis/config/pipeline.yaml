@@ -1,0 +1,99 @@
+# One command from scored eventTrees to histogram packages, results, IAN figures and tables:
+#   ./FinalAnalysis/final_analysis.sh all --config /path/to/copied/pipeline.yaml
+# Paths are relative to this configuration. The output directory must be new.
+Pipeline:
+  InputCollection: /path/to/inputs.yaml
+  ReductionSettings: /path/to/copied/treetohists.yaml
+  AnalysisSettings: /path/to/copied/analysis.yaml
+  SystematicsSettings: /path/to/copied/pipeline_systematics.yaml
+  OutputDirectory: ./outputs/analysis_v1
+  Parallel: 1
+
+  # List exact PNG names relative to fig/ to require figure coverage. 'none' runs the
+  # components but reports coverage UNQUALIFIED; it cannot certify the IAN inventory.
+  ExpectedFigures: /path/to/required_figures.txt
+  Variations: [prior_p15, prior_p05, prior_exp2, k_minus, k_plus, combinatoric_flat, rbkg, purity_nonclosure, jes_up, jes_down]
+prior_p15:
+  Analysis:
+    Prior:
+
+      # Overrides change existing settings; misspelled or absent keys fail.
+      Power: 1.5
+prior_p05:
+  Analysis:
+    Prior:
+      Power: 0.5
+prior_exp2:
+  Analysis:
+    Prior:
+      Form: exp2
+combinatoric_flat:
+  Analysis:
+    Combinatoric:
+      Shape: flat
+k_minus:
+  Analysis:
+    pp:
+
+      # Freeze the nominal rule's selected iterations before taking its bracket.
+      PairIterations: nominal-1
+      PhotonIterations: nominal-1
+    auau_cent0_20:
+      PairIterations: nominal-1
+      PhotonIterations: nominal-1
+    auau_cent20_50:
+      PairIterations: nominal-1
+      PhotonIterations: nominal-1
+    auau_cent50_80:
+      PairIterations: nominal-1
+      PhotonIterations: nominal-1
+k_plus:
+  Analysis:
+    pp:
+      PairIterations: nominal+1
+      PhotonIterations: nominal+1
+    auau_cent0_20:
+      PairIterations: nominal+1
+      PhotonIterations: nominal+1
+    auau_cent20_50:
+      PairIterations: nominal+1
+      PhotonIterations: nominal+1
+    auau_cent50_80:
+      PairIterations: nominal+1
+      PhotonIterations: nominal+1
+rbkg:
+  Analysis:
+    pp:
+
+      BackgroundCorrelation: qa
+    auau_cent0_20:
+      BackgroundCorrelation: qa
+    auau_cent20_50:
+      BackgroundCorrelation: qa
+    auau_cent50_80:
+      BackgroundCorrelation: qa
+purity_nonclosure:
+  Analysis:
+    pp:
+      PurityScale: qa
+    auau_cent0_20:
+      PurityScale: qa
+    auau_cent20_50:
+      PurityScale: qa
+    auau_cent50_80:
+      PurityScale: qa
+jes_up:
+  Reduction:
+    Fill:
+
+      # Only response-changing variations reread the same pinned eventTree population.
+      ResponseVariation: jet_scale=1.03 seed=1
+jes_down:
+  Reduction:
+    Fill:
+      ResponseVariation: jet_scale=0.97 seed=1
+
+# To start from an existing histogram collection instead, replace InputCollection
+# and ReductionSettings with Pipeline.HistogramCollection. Omit response-changing
+# variations unless their separately qualified histogram packages are supplied.
+# SystematicsSettings and Variations may both be 'none' for a nominal-only run.

@@ -24,7 +24,7 @@ import tempfile
 import time
 
 TREE_DIR = Path(__file__).resolve().parents[1]
-BINDINGS = TREE_DIR / "config" / "production_populations.json"
+BINDINGS = TREE_DIR / "config" / "production_populations.yaml"
 MACRO = TREE_DIR / "macros" / "Fun4All_PhotonJetTree.C"
 SCHEMA = TREE_DIR / "config" / "eventTree_v1.yaml"
 PHOTON_ID = TREE_DIR.parent / "PhotonID" / "models" / "nominal.json"
@@ -91,6 +91,11 @@ def read_json(path):
     return result
 
 
+def read_configuration(path):
+    """YAML is the public configuration format; existing JSON recipes remain readable."""
+    return configuration_document(path.read_bytes()) if path.suffix in ('.yaml', '.yml') else read_json(path)
+
+
 def tsv_rows(path, columns):
     """Read a fixed-column source/index table; reject malformed or extra fields."""
     with path.open(newline='') as stream:
@@ -114,7 +119,7 @@ def stream_lists(lane):
 def read_population(path, lane, campaign):
     """Join aligned conventional DST lists with their pinned source metadata."""
     if path.suffix != '.tsv':
-        return read_json(path)  # Existing custom JSON catalogues remain readable.
+        return read_configuration(path)
     rows = tsv_rows(path, SOURCE_COLUMNS)
     streams = [(path.parent / name).read_text().splitlines() for name in stream_lists(lane)]
     require(all(len(values) == len(rows) and all(values) for values in streams),
@@ -780,7 +785,7 @@ def main():
         require(len(args.lanes) == 1, "--source requires a primitive command")
 
 
-    settings = read_json(BINDINGS)
+    settings = read_configuration(BINDINGS)
     known_keys(settings, "schema_version campaign output_root production_config producer_library lanes", "binding")
     require(settings.get("schema_version") == 1, "unsupported population bindings schema")
     bindings = settings.get("lanes")

@@ -45,7 +45,7 @@ Options:
   --dry-run    Check bindings and show the plan; create nothing, run no ROOT.
   --help       Show this help.
 
-Populations: config/production_populations.json (or --catalogue FILE).
+Populations: config/production_populations.yaml (or --catalogue FILE).
 Unbound populations fail; no input population or calibration is guessed.
 EOF
 }
