@@ -6,9 +6,18 @@ with `systematics.root` when given) and `plots/QAFigures.C` (photon and event QA
 into the manuscript as it is. `FIGURES.txt` lists what one `draw` wrote and every figure it could not draw, with the
 reason.
 
+Every figure follows the IAN's layout: the sPHENIX mark and its physics lines (collision system and energy, photon
+window, recoil-jet definition, all compiled from the saved metadata) at the top left inside the frame, the legend at the
+top right, a y range opened until no point reaches either block, and the IAN's palette and markers. Maps add a
+data-free band above the data for the header instead of covering cells.
+
 Every xJ figure shows only the reported range, where the distribution is fully populated: from the first xJ edge at or
 above the recoil-jet threshold over the lowest photon pT (derived by the analysis, so it follows any rebinning) to
 `Measurement.ReportedXjMax`. The axis always starts at 0.
+
+The iteration-stability figures draw the frozen iteration rule's saved table (data and response statistics, the change
+from k - 1 and their quadrature Q_k, with the selected k); a result unfolded with configured iterations has no table and
+lists them as not drawn.
 
 The tables below map generated output filenames to the measurement and QA figures.
 
@@ -23,7 +32,7 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/pp_photon_closure_overlay.png` | fig:photon_closure |  |
 | `Unfolding/pp_photon_yield_unfolding_nominal_2bin_k2.png` | fig:photon_yield_unfolding | IAN slot pp_photon_yield_unfolding_nominal_2bin_k3.png: the file name carries the iteration count |
 | `Unfolding/pp_xj_prior_reweighting.png` | new: no IAN slot yet |  |
-| `FinalResults/pp_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
+| `Unfolding/pp_xj_before_after_unfolding.png` | fig:xjg_before_after_unfolding |  |
 | `purityAndCombSub/auau020_xj_purity_correction.png` | fig:xjg_purity_correction |  |
 | `purityAndCombSub/auau020_xj_combinatoric_subtraction.png` | fig:xjg_combinatorial_subtraction |  |
 | `Unfolding/auau_0to20_photon_response.png` | fig:photon_response |  |
@@ -33,7 +42,7 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/auau020_photon_closure_overlay.png` | fig:photon_closure |  |
 | `Unfolding/auau020_photon_yield_unfolding_nominal_2bin_k2.png` | fig:photon_yield_unfolding |  |
 | `Unfolding/auau020_xj_prior_reweighting.png` | new: no IAN slot yet |  |
-| `FinalResults/auau020_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
+| `Unfolding/auau020_xj_before_after_unfolding.png` | fig:xjg_before_after_unfolding |  |
 | `purityAndCombSub/auau2050_xj_purity_correction.png` | new: no IAN slot yet |  |
 | `purityAndCombSub/auau2050_xj_combinatoric_subtraction.png` | new: no IAN slot yet |  |
 | `Unfolding/auau_20to50_photon_response.png` | new: no IAN slot yet |  |
@@ -43,7 +52,7 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/auau2050_photon_closure_overlay.png` | new: no IAN slot yet |  |
 | `Unfolding/auau2050_photon_yield_unfolding_nominal_2bin_k2.png` | new: no IAN slot yet |  |
 | `Unfolding/auau2050_xj_prior_reweighting.png` | new: no IAN slot yet |  |
-| `FinalResults/auau2050_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
+| `Unfolding/auau2050_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
 | `purityAndCombSub/auau5080_xj_purity_correction.png` | new: no IAN slot yet |  |
 | `purityAndCombSub/auau5080_xj_combinatoric_subtraction.png` | new: no IAN slot yet |  |
 | `Unfolding/auau_50to80_photon_response.png` | new: no IAN slot yet |  |
@@ -53,8 +62,9 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/auau5080_photon_closure_overlay.png` | new: no IAN slot yet |  |
 | `Unfolding/auau5080_photon_yield_unfolding_nominal_2bin_k2.png` | new: no IAN slot yet |  |
 | `Unfolding/auau5080_xj_prior_reweighting.png` | new: no IAN slot yet |  |
-| `FinalResults/auau5080_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
-| `FinalResults/pp_vs_auau_centrality_xj_unfolded.png` | new: no IAN slot yet |  |
+| `Unfolding/auau5080_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
+| `Unfolding/pp_vs_auau_xj_unfolded.png` | fig:final_xjg_pp_auau | p+p and the most central Au+Au class |
+| `FinalResults/pp_vs_auau_centrality_xj_unfolded.png` | new: no IAN slot yet | every class |
 | `LHCComparison/pp_xj_atlas_overlay.png` | new: no IAN slot yet | ATLAS p+p 5.02 TeV, PLB 789 (2019) 167 |
 | `LHCComparison/auau020_xj_atlas_overlay.png` | new: no IAN slot yet | ATLAS 0-10% Pb+Pb 5.02 TeV, PLB 789 (2019) 167 |
 

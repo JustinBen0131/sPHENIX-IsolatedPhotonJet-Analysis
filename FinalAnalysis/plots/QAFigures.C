@@ -21,18 +21,9 @@
 namespace {
 
 std::unique_ptr<TFile> gQA;
-std::vector<std::string> gNotDrawn;
-int gUnique = 0;
-TH1F *gFrame = nullptr;                /* the last single-panel frame and its y range */
-double gFrameLow = 0, gFrameHigh = 1;
-const int cBlack = kBlack, cBlue = kAzure + 2, cOrange = kOrange + 7, cGreen = kGreen + 3, cRed = kRed + 1, cPurple = kViolet + 1;
-
-std::string fresh() { return Form("qa%d", ++gUnique); }
-
-void missing(const std::string &name, const std::string &why) {
-  gNotDrawn.push_back(name + ": " + why);
-  printf("IANFigures: not drawn %s (%s)\n", name.c_str(), why.c_str());
-}
+/* The IAN palette of IANFigures.C (set by ianPalette() before any figure is drawn). */
+const int cBlack = kBlack;
+const int &cBlue = gBlue, &cOrange = gVermilion, &cGreen = gGreen, &cRed = gRed, &cPurple = gPurple;
 
 bool empty(const TH1 *h) {
   for (int b = 0; b < h->GetNcells(); ++b)
@@ -255,11 +246,6 @@ Bins binsOf(const TH1 *h) {
   return out;
 }
 
-std::vector<double> edgesOf(const TAxis *a) {
-  std::vector<double> e;
-  for (int b = 1; b <= a->GetNbins() + 1; ++b) e.push_back(a->GetBinLowEdge(b));
-  return e;
-}
 
 /* ---- drawing --------------------------------------------------------------------------------------------------- */
 
@@ -322,38 +308,21 @@ void hline(double y, double x0, double x1, int style = 2) {
   l.DrawLine(x0, y, x1, y);
 }
 
-/* A single-panel frame: the header at the top left and a legend of `entries` below it; the y range keeps the drawn
-   values [low, high] (on a log scale low is the smallest positive value) below the legend. Returns the legend. */
-TLegend *frame(double x0, double x1, double low, double high, bool logy, const char *xtitle, const char *ytitle,
-               const std::vector<std::string> &lines, int entries, double x = 0.16, double quietHigh = std::nan("")) {
-  const double y = 0.90;
-  const int columns = entries > 4 ? 2 : 1, rows = (entries + columns - 1) / columns;
-  const bool compact = std::isfinite(quietHigh);
-  const double y2 = header(x, y, lines, false, compact) - 0.02, y1 = y2 - 0.042 * rows;
-  const double bottom = gPad->GetBottomMargin(), plot = 1 - bottom - gPad->GetTopMargin();
-  const double f = std::max(0.25, (y1 - 0.03 - bottom) / plot);
-  if (!std::isfinite(high)) high = 1;
-  if (logy) {
-    gFrameLow = std::isfinite(low) && low > 0 ? low / 2 : std::max(high, 1e-9) * 1e-4;
-    gFrameHigh = compact ? std::max(high*1.15,gFrameLow*std::pow(std::max(quietHigh,2*gFrameLow)/gFrameLow,1/f)) :
-                          gFrameLow * std::pow(std::max(high, 2 * gFrameLow) / gFrameLow, 1 / f);
-  } else {
-    gFrameLow = std::isfinite(low) ? std::min(0.0, low) : 0.0;
-    if (gFrameLow<0) gFrameLow-=0.04*std::max(high-gFrameLow,1e-9);
-    gFrameHigh = compact ? std::max(high+(high-gFrameLow)*0.12,gFrameLow+(quietHigh-gFrameLow)/f) : gFrameLow + (high - gFrameLow) / f;
-    if (!(gFrameHigh > gFrameLow)) gFrameHigh = gFrameLow + 1;
-  }
-  gPad->SetLogy(logy);
-  gFrame = gPad->DrawFrame(x0, gFrameLow, x1, gFrameHigh);
-  gFrame->GetXaxis()->SetTitle(xtitle);
-  gFrame->GetYaxis()->SetTitle(ytitle);
-  header(x, y, lines, true, compact);
-  auto *leg = new TLegend(x, y1, compact && x<0.4 ? 0.59 : 0.95, y2);
-  leg->SetBorderSize(0);
-  leg->SetFillStyle(0);
-  leg->SetTextSize(0.030);
-  leg->SetNColumns(columns);
-  return leg;
+/* The drawn values inside [x0, x1] as extents, for the IAN frame's y range. */
+void extents(std::vector<Extent> &out, const Bins &b, bool errors, double x0, double x1) {
+  for (int i = 0; i < b.n(); ++i)
+    if (b.edges[i + 1] > x0 + 1e-9 && b.edges[i] < x1 - 1e-9 && std::isfinite(b.v[i]))
+      out.push_back({b.edges[i], b.edges[i + 1], b.v[i] + (errors && std::isfinite(b.e2[i]) ? std::sqrt(b.e2[i]) : 0.0)});
+}
+
+/* A single-panel frame in the IAN's layout (ianFrame) for the drawn values; low: the smallest drawn value (on a log
+   scale the smallest positive one). Returns the empty legend for `labels`. */
+TLegend *frame(double x0, double x1, const std::vector<Extent> &drawn, double low, bool logy, const char *xtitle, const char *ytitle,
+               const std::vector<std::string> &lines, const std::vector<std::string> &labels) {
+  double bottom = 0;
+  if (logy) bottom = std::isfinite(low) && low > 0 ? low / 2 : 0;
+  else if (std::isfinite(low) && low < 0) bottom = 1.08 * low;
+  return ianFrame(x0, x1, bottom, drawn, logy, xtitle, ytitle, lines, labels);
 }
 
 /* One curve of a single-panel figure: a line (simulation) or points (DATA). */
@@ -370,21 +339,18 @@ Curve pointCurve(const Bins &b, int color, int marker, const std::string &text, 
   return c;
 }
 
-/* A single-panel figure of curves: lines under points, x from x0 to x1, the y range from the drawn values. */
+/* A single-panel figure of curves in the IAN's layout: lines under points, x from x0 to x1, the y range from the drawn
+   values; the legend lists the lines, then the points. */
 void drawCurves(const std::vector<Curve> &curves, double x0, double x1, bool logy, const char *xtitle, const char *ytitle,
                 const std::vector<std::string> &lines, const std::string &name, const std::function<void()> &extra = nullptr) {
   TCanvas cv("cv", "", 700, 600);
   Span s;
-  for (const auto &c : curves) s.add(c.bins, c.points && c.errors, x0, x1);
-  const double split=(0.52-gStyle->GetPadLeftMargin())/(1-gStyle->GetPadLeftMargin()-gStyle->GetPadRightMargin())*(x1-x0)+x0;
-  const double leftEnd=(0.59-gStyle->GetPadLeftMargin())/(1-gStyle->GetPadLeftMargin()-gStyle->GetPadRightMargin())*(x1-x0)+x0;
-  Span left,right;
-  for (const auto &c : curves) {
-    left.add(c.bins,c.points && c.errors,x0,leftEnd); right.add(c.bins,c.points && c.errors,split,x1);
-  }
-  const bool onRight=right.high<=left.high;
-  const double quiet=std::isfinite(onRight?right.high:left.high)?(onRight?right.high:left.high):0;
-  TLegend *leg = frame(x0, x1, s.lowFor(logy), s.high, logy, xtitle, ytitle, lines, curves.size(),onRight?0.52:0.16,quiet);
+  std::vector<Extent> drawn;
+  std::vector<std::string> labels;
+  for (const auto &c : curves) s.add(c.bins, c.points && c.errors, x0, x1), extents(drawn, c.bins, c.points && c.errors, x0, x1);
+  for (const auto &c : curves) if (!c.points) labels.push_back(c.text);
+  for (const auto &c : curves) if (c.points) labels.push_back(c.text);
+  TLegend *leg = frame(x0, x1, drawn, s.lowFor(logy), logy, xtitle, ytitle, lines, labels);
   for (const auto &c : curves)
     if (!c.points) {
       TH1D *h = line(c.bins, c.color);
@@ -402,23 +368,24 @@ void drawCurves(const std::vector<Curve> &curves, double x0, double x1, bool log
   save(cv, name);
 }
 
-/* A map: the header above the frame, the palette on the right. */
+/* A map in the IAN's layout: the header at the top left inside the frame over a data-free band (withHeaderBand), and
+   the palette on the right. */
 void drawMap(TH2 *m, const char *xtitle, const char *ytitle, const char *ztitle, const std::vector<std::string> &lines, bool logz, const std::string &name) {
-  TCanvas cv("cv", "", 760, 700);
-  cv.SetRightMargin(0.2);
-  cv.SetTopMargin(0.09 + 0.05 * lines.size());
+  TCanvas cv("cv", "", 760, 680);
+  cv.SetRightMargin(0.19);
   cv.SetLogz(logz);
-  m->GetXaxis()->SetTitle(xtitle);
-  m->GetYaxis()->SetTitle(ytitle);
-  m->GetZaxis()->SetTitle(ztitle);
-  m->GetZaxis()->SetTitleOffset(1.3);
+  TH2D *b = withHeaderBand(m, lines);
+  b->GetXaxis()->SetTitle(xtitle);
+  b->GetYaxis()->SetTitle(ytitle);
+  b->GetZaxis()->SetTitle(ztitle);
+  b->GetZaxis()->SetTitleOffset(1.35);
   if (logz) {
     double low = std::numeric_limits<double>::infinity();
-    for (int b = 0; b < m->GetNcells(); ++b) if (m->GetBinContent(b) > 0) low = std::min(low, m->GetBinContent(b));
-    if (std::isfinite(low)) m->SetMinimum(low);
+    for (int c = 0; c < b->GetNcells(); ++c) if (b->GetBinContent(c) > 0) low = std::min(low, b->GetBinContent(c));
+    if (std::isfinite(low)) b->SetMinimum(low);
   }
-  m->Draw("COLZ");
-  header(0.16, 0.95, lines);
+  b->Draw("COLZ");
+  mapHeader(lines);
   save(cv, name);
 }
 
@@ -499,28 +466,6 @@ TLegend *panelLegend(double x1, double y1, double x2, double y2) {
   l->SetTextFont(43);
   l->SetTextSize(15);
   return l;
-}
-
-/* A figure with a ratio panel below: the upper (70%) and lower (30%) pads. */
-std::pair<TPad *, TPad *> ratioPads(TCanvas &cv) {
-  cv.cd();
-  auto *top = new TPad(fresh().c_str(), "", 0, 0.3, 1, 1), *bottom = new TPad(fresh().c_str(), "", 0, 0, 1, 0.3);
-  top->SetBottomMargin(0.02);
-  bottom->SetTopMargin(0.02);
-  bottom->SetBottomMargin(0.35);
-  top->Draw();
-  bottom->Draw();
-  return {top, bottom};
-}
-
-TH1F *ratioFrame(double x0, double x1, double y0, double y1, const char *xtitle, const char *ytitle) {
-  TH1F *f = gPad->DrawFrame(x0, y0, x1, y1);
-  f->GetXaxis()->SetTitle(xtitle);
-  f->GetYaxis()->SetTitle(ytitle);
-  f->GetYaxis()->SetTitleSize(0.1), f->GetYaxis()->SetLabelSize(0.09), f->GetYaxis()->SetTitleOffset(0.65);
-  f->GetXaxis()->SetTitleSize(0.12), f->GetXaxis()->SetLabelSize(0.1), f->GetXaxis()->SetTitleOffset(1.2);
-  f->GetYaxis()->SetNdivisions(504);
-  return f;
 }
 
 bool anyFinite(const Bins &b) {
@@ -759,10 +704,13 @@ void truthPtAfterIsolation() {
     auto [top, bottom] = ratioPads(cv);
     top->cd();
     Span s;
-    for (const Bins *b : {&all, &direct, &fragmentation}) s.add(perWidth(*b), true, domain.first, domain.second);
-    TLegend *leg = frame(domain.first, domain.second, s.positive, s.high, true, "", "Weighted photons / GeV",
-                         {classLabel(c) + ", " + energyOf(pkg), Form("0 #leq E_{T,truth}^{iso} < %g GeV; ",isoMax)+truthSelectionLabel(pkg)}, 3);
-    gFrame->GetXaxis()->SetLabelSize(0);
+    std::vector<Extent> drawn;
+    for (const Bins *b : {&all, &direct, &fragmentation})
+      s.add(perWidth(*b), true, domain.first, domain.second), extents(drawn, perWidth(*b), true, domain.first, domain.second);
+    TLegend *leg = frame(domain.first, domain.second, drawn, s.positive, true, "", "Weighted photons / GeV",
+                         {classLabel(c) + ", " + energyOf(pkg), Form("0 #leq E_{T,truth}^{iso} < %g GeV; ",isoMax)+truthSelectionLabel(pkg)},
+                         {"All prompt photons", "Direct", "Fragmentation"});
+    upperAxes(gFrame);
     for (const auto &[b, color, marker, text] : {std::make_tuple(&all, cBlack, 20, "All prompt photons"), std::make_tuple(&direct, cRed, 21, "Direct"),
                                                  std::make_tuple(&fragmentation, cBlue, 22, "Fragmentation")}) {
       TGraphErrors *g = markers(perWidth(*b), color, marker);
@@ -816,11 +764,14 @@ void isolationStacks() {
     const Bins t = rebin(tight, k), b = rebin(background, k), stacked = sum(rebin(signal, k), b);
     const double x0 = pkg == "PP" ? -5 : -20;
     Span s;
+    std::vector<Extent> drawn;
     s.add(t, true, x0, 20), s.add(stacked, false, x0, 20);
+    extents(drawn, t, true, x0, 20), extents(drawn, stacked, false, x0, 20);
     TCanvas cv("cv", "", 700, 600);
-    TLegend *leg = frame(x0, 20, s.low, s.high, false, "E_{T}^{iso,reco} [GeV]", "Counts / 1 GeV",
+    TLegend *leg = frame(x0, 20, drawn, s.low, false, "E_{T}^{iso,reco} [GeV]", "Counts / 1 GeV",
                          {classLabel(c) + ", " + energyOf(pkg), photonWindowLabel(domain.first,domain.second)+", "+photonEtaLabel(pkg),
-                          Form("non-tight normalized at E_{T}^{iso} #geq %g GeV", sideband)}, 3);
+                          Form("non-tight normalized at E_{T}^{iso} #geq %g GeV", sideband)},
+                         {"Non-tight data control", "Signal MC", "Tight-photon data"});
     TH1D *all = line(stacked, cBlue, 1, 2), *under = line(b, TColor::GetColor("#F4B6B6"), 1, 1);
     all->SetFillColor(TColor::GetColor("#B8C0EE"));
     under->SetFillColor(TColor::GetColor("#F4B6B6"));
@@ -1001,8 +952,8 @@ void centralityTarget() {
   if (!data && !sims[0] && !sims[1]) return missing(name, "no DATA target events and no simulation QA");
   auto twoPercent = [](const Bins &b) { return unit(within(rebin(b, std::max(1L, std::lround(2.0 / b.width(0)))), 0, 80)); };
   std::vector<Curve> curves;
-  if (data) curves.push_back(pointCurve(twoPercent(binsOf(data)), cBlack, 33, "DATA (centrality-weight target)", false));
-  const std::array<std::tuple<int, int, const char *, double>, 2> looks = {{{cBlue, 21, "Photon+jet SIM", 0.0}, {cOrange, 22, "Inclusive-jet SIM", 0.3}}};
+  if (data) curves.push_back(pointCurve(twoPercent(binsOf(data)), cBlack, 20, "DATA (centrality-weight target)", false));
+  const std::array<std::tuple<int, int, const char *, double>, 2> looks = {{{cBlue, 21, "Photon+jet SIM", 0.0}, {cOrange, 26, "Inclusive-jet SIM", 0.3}}};
   for (int f = 0; f < 2; ++f)
     if (sims[f]) {
       Curve c = pointCurve(twoPercent(project(sims[f], 0, {{1, 0, 1}})), std::get<0>(looks[f]), std::get<1>(looks[f]), std::get<2>(looks[f]), false);
@@ -1106,14 +1057,17 @@ void stitching(const std::string &pkg, const std::string &family, bool generator
   auto [top, bottom] = ratioPads(cv);
   top->cd();
   Span s;
-  s.add(all, true, lo, hi);
-  for (const auto &sample : samples) s.add(sample.second, true, lo, hi);
+  std::vector<Extent> drawn;
+  std::vector<std::string> labels;
+  s.add(all, true, lo, hi), extents(drawn, all, true, lo, hi);
+  for (const auto &sample : samples) s.add(sample.second, true, lo, hi), extents(drawn, sample.second, true, lo, hi), labels.push_back(sample.first);
+  labels.push_back("Stitched sum");
   const std::string central = classesOf(pkg).empty() ? "" : classesOf(pkg).front();
-  TLegend *leg = frame(lo, hi, s.positive, s.high, true, "", "Weighted spectrum / GeV",
+  TLegend *leg = frame(lo, hi, drawn, s.positive, true, "", "Weighted spectrum / GeV",
                        {(pp ? "p+p SIM, " : "Au+Au SIM, ") + energyOf(pkg), photons ? "Photon+jet samples" : "Inclusive-jet samples",
                         generator ? "Generator truth" : "Leading tight, isolated photon" + (pp ? std::string() : ", " + percent(lowOf(central), highOf(central)))},
-                       samples.size() + 1);
-  gFrame->GetXaxis()->SetLabelSize(0);
+                       labels);
+  upperAxes(gFrame);
   const int colors[] = {cOrange, cPurple, cGreen, cRed, cBlue, kOrange + 3, kCyan + 2, kSpring + 5};
   const int open[] = {24, 25, 26, 27, 28, 30, 32, 46};
   for (size_t i = 0; i < samples.size(); ++i) {
@@ -1140,9 +1094,11 @@ void stitching(const std::string &pkg, const std::string &family, bool generator
     if (rms && std::isfinite(rms->GetVal())) {
       TLatex t;
       t.SetNDC();
-      t.SetTextSize(0.1);
-      t.SetTextAlign(31);
-      t.DrawLatex(0.93, 0.8, Form("RMS %.1f%%", 100 * rms->GetVal()));
+      t.SetTextFont(43);
+      t.SetTextSize(kLinePx);
+      t.SetTextAlign(33);
+      t.DrawLatex(1 - gPad->GetRightMargin() - 14 / padWidthPx(), 1 - gPad->GetTopMargin() - 10 / padHeightPx(),
+                  Form("RMS %.1f%%", 100 * rms->GetVal()));
     }
   }
   save(cv, name);
@@ -1254,8 +1210,8 @@ void triggerStudy(const std::string &pkg) {
     return std::atof(a.c_str() + a.find_first_of("0123456789")) < std::atof(b.c_str() + b.find_first_of("0123456789"));
   });
   const std::vector<std::string> lines = {(pp ? "p+p, " : "Au+Au, ") + energyOf(pkg), Form("scaled-trigger study, %d runs", runs)};
-  const int colors[] = {cRed, cBlue, cGreen, cPurple};
-  std::vector<Curve> curves = {lineCurve(binsOf(static_cast<TH1 *>(d->Get("reference"))), cBlack, info["reference"])};
+  const int colors[] = {cBlue, cRed, cGreen, cPurple};  /* the IAN's order: the lowest photon threshold blue, then red */
+  std::vector<Curve> curves = {lineCurve(binsOf(static_cast<TH1 *>(d->Get("reference"))), cBlack, latexCuts(info["reference"]))};
   for (size_t i = 0; i < photons.size(); ++i) curves.push_back(lineCurve(binsOf(static_cast<TH1 *>(d->Get(("spectrum_" + photons[i]).c_str()))), colors[i % 4], photons[i]));
   const Bins &reference = curves.front().bins;
   drawCurves(curves, reference.edges.front(), reference.edges.back(), true, "Maximum cluster energy [GeV]", "Scaled-trigger events", lines, spectra);

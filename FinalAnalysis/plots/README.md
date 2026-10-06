@@ -5,7 +5,7 @@ They are built and run by `final_analysis.sh`.
 
 | File | Responsibility |
 |---|---|
-| [IANFigures.C](IANFigures.C) | Measurement figures and the `draw` entry point |
+| [IANFigures.C](IANFigures.C) | Measurement figures, the figure layout QA shares, and the `draw` entry point |
 | [QAFigures.C](QAFigures.C) | Photon and event QA figures |
 | [IANTables.C](IANTables.C) | LaTeX and CSV result tables |
 | [sPhenixStyle.C](sPhenixStyle.C), [sPhenixStyle.h](sPhenixStyle.h) | Shared plot style |
