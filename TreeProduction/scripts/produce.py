@@ -5,6 +5,63 @@ resolves source identities, launches Fun4All in bounded pieces, and calls the
 installed ROOT-only eventTree library to check each saved piece and assemble
 one proven file per logical source before collision-safe publication.
 """
+# =============================================================================
+# TreeProduction orchestration driver
+# =============================================================================
+#
+# Role in the pipeline
+# --------------------
+# This module is the operational bridge between the public shell launcher and
+# the native C++ TreeProduction implementation.
+#
+# The shell wrapper (`produce_trees.sh`) translates user-facing commands into
+# one or more internal production lanes and forwards them here. This driver then
+# resolves the exact maintained population, constructs source jobs, verifies
+# immutable identities, launches the ROOT/Fun4All steering macro in bounded
+# pieces, validates every saved eventTree through the installed ROOT-only
+# `libEventTree`, assembles one proven file per logical source, and publishes
+# complete run/sample groups.
+#
+# Authority boundaries
+# --------------------
+# Python owns orchestration and integrity:
+#   - catalogue and manifest resolution,
+#   - source selection and scheduling,
+#   - SHA-256 binding of mutable filesystem inputs,
+#   - bounded piece execution,
+#   - resume identity,
+#   - saved-file validation,
+#   - source consolidation,
+#   - group publication.
+#
+# Python does NOT own detector or analysis physics. Physics configuration is
+# parsed here only into a transport-safe representation; the native production
+# plan in C++ remains authoritative for physics decisions, conditions, node
+# bindings, reconstruction, object capture, labels, truth, and weights.
+#
+# High-level control flow
+# -----------------------
+#
+#   produce_trees.sh
+#          |
+#          v
+#   main()
+#     -> population_plans()
+#     -> plan_population()
+#     -> native mapping preflight
+#     -> execute_source()
+#          -> execute_piece()
+#               -> ROOT/Fun4All steering macro
+#               -> C++ PhotonJetTree producer
+#               -> check_completion()
+#          -> consolidate_source()
+#     -> publish_groups()
+#
+# Failure model
+# -------------
+# The driver is fail-closed. A mismatched manifest, configuration, input list,
+# producer library, schema, receipt, or saved output stops reuse/publication
+# rather than guessing which artifact should be trusted.
 import argparse
 import csv
 from collections import deque
@@ -23,6 +80,26 @@ import sys
 import tempfile
 import time
 
+# =============================================================================
+# Repository anchors and production contracts
+# =============================================================================
+#
+# All package-relative paths are anchored to this file so production behavior
+# does not depend on the caller's working directory.
+#
+# `production_populations.yaml` binds maintained lane populations.
+# `Fun4All_PhotonJetTree.C` is the native steering entry point.
+# `eventTree_v1.yaml` is the saved-tree schema contract.
+# `PhotonID/models/nominal.json` is supplied to structural validation so saved
+# photon-ID inputs/receipts can be checked against the frozen nominal package.
+#
+# `PIECE_EVENTS` limits one native reconstruction invocation. A logical source
+# may therefore be processed in several independently validated pieces and then
+# consolidated without changing its source identity.
+#
+# The SOURCE_* and *_STREAMS tuples are strict catalogue interfaces: their
+# ordering and names define how source metadata and aligned DST stream lists are
+# interpreted.
 TREE_DIR = Path(__file__).resolve().parents[1]
 BINDINGS = TREE_DIR / "config" / "production_populations.yaml"
 MACRO = TREE_DIR / "macros" / "Fun4All_PhotonJetTree.C"
@@ -40,6 +117,14 @@ EMBEDDED_STREAMS = ('DST_CALO.list', 'DST_TRUTH_G4HIT.list', 'DST_TRUTH_JET.list
 DI_STREAMS = ('G4Hits.list', 'DST_TRUTH_JET.list')
 
 
+# =============================================================================
+# Native ROOT-only eventTree interface
+# =============================================================================
+#
+# This loader intentionally binds only `libEventTree`, not the detector
+# producer. The resulting `ROOT.eventtree` namespace is used after production
+# to validate, consolidate, resolve, and publish saved products independently
+# of Fun4All detector reconstruction.
 def load_eventtree(library_dir):
     """Bind the installed ROOT-only eventTree library; no detector library is loaded."""
     import ROOT
@@ -55,6 +140,13 @@ def load_eventtree(library_dir):
     return ROOT.eventtree
 
 
+# =============================================================================
+# Frontend validation primitives
+# =============================================================================
+#
+# All orchestration-level contract failures are normalized to FrontendError.
+# The helper functions below enforce strict types, ranges, duplicate-key
+# rejection, and digest binding before a source can reach native execution.
 class FrontendError(Exception):
     pass
 
@@ -84,6 +176,13 @@ def unique_object(pairs):
     return result
 
 
+# =============================================================================
+# Structured-file readers
+# =============================================================================
+#
+# JSON/YAML/TSV inputs are treated as production contracts rather than informal
+# configuration. Duplicate JSON/YAML keys, unexpected TSV columns, malformed
+# rows, or unsupported structures are rejected instead of silently normalized.
 def read_json(path):
     raw = gzip.decompress(path.read_bytes()).decode('utf-8') if path.suffix == '.gz' else path.read_text()
     result = json.loads(raw, object_pairs_hook=unique_object)
@@ -107,6 +206,13 @@ def tsv_rows(path, columns):
     return rows
 
 
+# =============================================================================
+# Population input-layout vocabulary
+# =============================================================================
+#
+# A lane determines which physical DST list names must be aligned for each
+# logical source. The mapping here describes orchestration layout only; the C++
+# production plan still owns the reconstruction meaning of those streams.
 def stream_lists(lane):
     """Declared DST stream names in the order used to align source rows."""
     if lane.endswith('_data'):
@@ -116,6 +222,17 @@ def stream_lists(lane):
     return EMBEDDED_STREAMS if lane.endswith('_embedded') else SIM_STREAMS
 
 
+# =============================================================================
+# Maintained population materialization
+# =============================================================================
+#
+# Conventional TSV catalogues store source metadata separately from aligned DST
+# stream-list files. This function joins them into one in-memory population
+# document while preserving the exact row alignment and pinned identities.
+#
+# Schema-v2 populations embed the exact source-list text in the returned object,
+# allowing the driver to materialize only the current source later without
+# loading the entire campaign into Fun4All at once.
 def read_population(path, lane, campaign):
     """Join aligned conventional DST lists with their pinned source metadata."""
     if path.suffix != '.tsv':
@@ -143,6 +260,13 @@ def read_population(path, lane, campaign):
     return dict(schema_version=2, lane=lane, campaign=campaign, sources=sources, input_lists=bundles)
 
 
+# =============================================================================
+# Explicit user run/sample selection
+# =============================================================================
+#
+# Selection-list files are intentionally simple: one exact identifier per line,
+# optional comments, no duplicates. They restrict an already maintained
+# catalogue; they do not create or infer new population members.
 def selection_list(path, numeric=False):
     """A conventional run/sample list: one identifier per line, optional # comments."""
     values = []
@@ -162,6 +286,15 @@ def selection_list(path, numeric=False):
     return set(values)
 
 
+# =============================================================================
+# Generic integrity helpers
+# =============================================================================
+#
+# `known_keys` prevents unnoticed schema drift.
+# `sha256` hashes the actual bytes consumed.
+# `pinned_file` resolves a path and proves those bytes against an expected hash.
+# `source_group` defines the publication grouping boundary: DATA by run, SIM by
+# exact sample.
 def known_keys(value, allowed, context):
     unknown = set(value) - set(allowed.split())
     require(not unknown, f"unsupported {context} fields: {', '.join(sorted(unknown))}")
@@ -191,10 +324,28 @@ def source_group(lane, source):
     return group
 
 
+# =============================================================================
+# One population group -> executable source jobs
+# =============================================================================
+#
+# `plan_population` is the central Python-side planning routine. It binds a
+# reviewed population manifest to one reconstruction profile and turns each
+# selected source row into a concrete job dictionary.
+#
+# Important boundary: this function resolves metadata and identities only.
+# It deliberately does not interpret detector columns or physics policy from
+# the production YAML. Those decisions remain native-owned.
 def plan_population(lane, binding, settings, args):
     """Resolve job metadata only; never interpret DST columns or YAML policy."""
 
 
+    # -------------------------------------------------------------------------
+    # Bind and validate the population manifest
+    # -------------------------------------------------------------------------
+    #
+    # The manifest itself is digest-pinned before any source metadata is used.
+    # Its declared lane/campaign must match the caller's binding, and schema-v2
+    # embedded input lists must have exactly the same roster as the sources.
     manifest = pinned_file(BINDINGS.parent, binding.get("manifest"),
                            binding.get("manifest_sha256"), f"{lane} manifest")
     population = read_population(manifest, lane, settings['campaign'])
@@ -212,11 +363,26 @@ def plan_population(lane, binding, settings, args):
                 'embedded input-list roster differs from source roster')
 
 
+    # -------------------------------------------------------------------------
+    # Bind the reconstruction profile and production configuration
+    # -------------------------------------------------------------------------
+    #
+    # The profile name is a symbolic selector passed to native planning. The
+    # configuration file is resolved here only so its exact bytes can be hashed
+    # and carried through provenance.
     profile = text(binding.get("profile"), f"lanes.{lane}.profile")
     config = (BINDINGS.parent / text(settings.get("production_config"), "production_config")).resolve()
     require(config.is_file(), f"production configuration is missing: {config}")
 
 
+    # -------------------------------------------------------------------------
+    # Convert source records into immutable job descriptions
+    # -------------------------------------------------------------------------
+    #
+    # Every source job carries enough identity to prove later that a saved ROOT
+    # file came from the requested source interval, manifest, configuration, and
+    # steering macro. Optional archived-DI RNG replay and Au+Au CEMC recovery
+    # payload bindings are serialized without reinterpreting their physics.
     jobs, ordinals, bundles, rosters = [], set(), set(), {}
     config_hash, macro_hash = sha256(config), sha256(MACRO)
     for source in sources:
@@ -299,6 +465,14 @@ def plan_population(lane, binding, settings, args):
             f"{lane}: --source {args.source} exists in several groups; add --run or --sample")
 
 
+    # -------------------------------------------------------------------------
+    # Resolve the output namespace
+    # -------------------------------------------------------------------------
+    #
+    # Development selections are isolated from declared production output.
+    # Normal products are grouped by lane and then by run/sample. Existing
+    # output is refused unless explicit resume semantics or aggregate admission
+    # has already established that reuse is allowed.
     selected_output = getattr(args, 'output', None)
     output = (selected_output.resolve() if selected_output else
               (BINDINGS.parent / text(settings.get("output_root"), "output_root")).resolve())
@@ -318,6 +492,13 @@ def plan_population(lane, binding, settings, args):
     require(not output.exists() or getattr(args, "resume", False) or getattr(args, 'output_admitted', False),
             f"output already exists; use --resume for exact verified work: {output}")
 
+    # -------------------------------------------------------------------------
+    # Assign final per-source product paths and return the population plan
+    # -------------------------------------------------------------------------
+    #
+    # Source ordinals become stable `part-XXXXXXXX.root` filenames inside the
+    # run/sample group. The returned roster is later used to prove that group
+    # publication contains every declared logical source and no substitutes.
     for job in jobs:
         job['output_file'] = str(output / source_group(lane, job) / f"part-{job['source_file_ordinal']:08d}.root")
 
@@ -328,6 +509,16 @@ def plan_population(lane, binding, settings, args):
                 rosters={group: sorted(ids) for group, ids in rosters.items()})
 
 
+# =============================================================================
+# Campaign-scale plan iterator
+# =============================================================================
+#
+# Large campaigns may be indexed by run/sample. Rather than materializing every
+# source in memory at once, this generator resolves one group at a time while
+# still validating each group against the campaign index totals and roster.
+#
+# User run/sample list selectors are applied only to indexed populations so the
+# selected identifiers can be checked against the complete maintained index.
 def population_plans(settings, args):
     """Read one run/sample at a time, keeping full-campaign memory bounded."""
     routes = []
@@ -382,6 +573,17 @@ def population_plans(settings, args):
         require(selected or selected_groups is not None, lane + ': requested run/sample does not exist')
 
 
+# =============================================================================
+# Exact per-source input-list materialization
+# =============================================================================
+#
+# Schema-v2 catalogues can embed input-list bytes inside the manifest. Fun4All
+# still expects a filesystem list, so this context manager writes only the
+# current source to a temporary file, verifies its digest, and substitutes that
+# temporary locator into the job for the duration of execution.
+#
+# The scientific identity remains the catalogue label plus its pinned digest;
+# the temporary pathname is never allowed to become the resume identity.
 @contextmanager
 def input_bundle(job):
     """Materialize only the current source's exact DST list for Fun4All."""
@@ -395,6 +597,14 @@ def input_bundle(job):
         yield dict(job, input_list=str(path))
 
 
+# =============================================================================
+# Optional source-specific provenance encodings
+# =============================================================================
+#
+# Archived p+p double-interaction production needs exact historical RNG replay.
+# Au+Au DATA may carry a run-bound CEMC recovery map. These helpers validate and
+# serialize those optional records into the compact forms expected by the
+# native steering interface.
 def historical_rng(record):
     """An archived double-interaction source's replayed seeds as the producer reads
     them, "s1,s2,s3,s4,s5:pedestal"; empty for every other source."""
@@ -421,6 +631,16 @@ def cemc_recovery_map(record):
     return dict(cemc_recovery_map=path, cemc_recovery_map_sha256=digest)
 
 
+# =============================================================================
+# Python -> ROOT macro call serialization
+# =============================================================================
+#
+# The steering macro has a fixed positional interface. This function is the
+# single Python serialization point for that interface.
+#
+# Values are JSON-quoted because JSON string quoting is valid for the C++ string
+# literals passed to ROOT, and `subprocess.run` receives an argv vector directly:
+# there is no shell expansion, `eval`, or command interpolation in this path.
 def macro_argument(job, check_only=False):
     """Serialize one job in the steering macro's declared argument order."""
     # JSON string quoting is also valid for these C++ UTF-8 string literals.
@@ -438,6 +658,17 @@ def macro_argument(job, check_only=False):
     return str(MACRO) + "(" + ",".join(json.dumps(v, ensure_ascii=False) for v in values) + suffix + ")"
 
 
+# =============================================================================
+# Configuration transport across the Python/C++ boundary
+# =============================================================================
+#
+# YAML is parsed exactly once in Python so ROOT receives JSON-compatible data.
+# Duplicate mapping keys and non-JSON/non-finite values are rejected.
+#
+# Crucially, parsing here does not make Python authoritative for physics. The
+# exact original configuration bytes are hashed, and the parsed document is
+# wrapped with that source digest so Production.cc can verify the transport
+# envelope against the file that was actually requested.
 def configuration_document(raw):
     """Parse configuration syntax once; all physics decisions remain native."""
     import yaml
@@ -465,6 +696,16 @@ def configuration_document(raw):
     return document
 
 
+# =============================================================================
+# Temporary, digest-bound native configuration envelope
+# =============================================================================
+#
+# The context manager proves the source configuration before parsing, writes a
+# canonical JSON envelope for native consumption, and then re-checks both the
+# envelope contents and original configuration after native execution.
+#
+# This closes a time-of-check/time-of-use gap: a configuration cannot silently
+# change between Python preflight and C++ plan construction.
 @contextmanager
 def resolved_configuration(job, directory=None):
     """Supply parsed configuration to the native plan; physics values remain native-owned."""
@@ -485,6 +726,17 @@ def resolved_configuration(job, directory=None):
                 'configuration changed during native execution')
 
 
+# =============================================================================
+# Native saved-product validation and consolidation
+# =============================================================================
+#
+# `check_completion` uses libEventTree to prove both producer completion
+# metadata and structural schema validity.
+#
+# `consolidate_source` asks the same native ROOT-only library to combine already
+# validated pieces into one logical-source product while binding piece hashes,
+# event intervals, expected event count, schema, PhotonID package, and progress
+# record.
 def key_values(obj):
     pairs = [line.split("=", 1) for line in str(obj).splitlines() if "=" in line]
     return unique_object(pairs)
@@ -511,6 +763,14 @@ def consolidate_source(native, chunks, candidate, job, progress_path):
 
 
 
+# =============================================================================
+# Read-only native mapping preflight
+# =============================================================================
+#
+# Before any output directory is created or event loop starts, the driver asks
+# the actually loaded producer library to resolve the requested plan in
+# check-only mode. Production proceeds only if the native implementation says
+# every schema branch has a mapping and reports the expected schema digest.
 def check_mapping(job, root, environment):
     """Query the actual loaded producer through the macro's read-only plan mode."""
     with resolved_configuration(job) as parsed_job:
@@ -526,6 +786,18 @@ def check_mapping(job, root, environment):
     return report
 
 
+# =============================================================================
+# Execute and certify one bounded reconstruction piece
+# =============================================================================
+#
+# A piece is the smallest native reconstruction unit launched by this driver.
+# The directory is reserved exclusively, all mutable inputs are re-hashed before
+# execution, ROOT/Fun4All is invoked without a shell, and successful process
+# exit is not enough: the produced eventTree must also pass native completion
+# and structural checks.
+#
+# Only after those checks pass is the exact native ROOT file hard-linked to its
+# final piece pathname and accompanied by a finalization receipt.
 def execute_piece(job, root, environment, native, library_hash):
     """Run one bounded reconstruction piece and check its native completion record."""
 
@@ -536,10 +808,19 @@ def execute_piece(job, root, environment, native, library_hash):
     log = directory / "production.log"
 
 
+    # -------------------------------------------------------------------------
+    # Re-prove execution inputs immediately before launching ROOT
+    # -------------------------------------------------------------------------
     require(sha256(Path(job["input_list"])) == job["input_list_sha256"], "input list changed after preflight")
     require(sha256(Path(job["config"])) == job["configuration_sha256"], "configuration changed after preflight")
     require(sha256(MACRO) == job["macro_sha256"], "macro changed after preflight")
 
+    # -------------------------------------------------------------------------
+    # Launch the native producer
+    # -------------------------------------------------------------------------
+    #
+    # The resolved configuration is placed inside the piece work directory so
+    # the invocation record captures the exact native arguments used.
     with resolved_configuration(job, work) as parsed_job:
         capture_job = dict(parsed_job, output_file=str(work / 'eventTree.root'))
         argv = [root, "-l", "-b", "-q", macro_argument(capture_job)]
@@ -550,6 +831,12 @@ def execute_piece(job, root, environment, native, library_hash):
                                     timeout=job.get("timeout", 43200))
 
 
+    # -------------------------------------------------------------------------
+    # Process-level failure handling
+    # -------------------------------------------------------------------------
+    #
+    # A nonzero ROOT/Fun4All exit is reported with the tail of the production
+    # log and the piece is never certified.
     if result.returncode:
         print(f"ERROR: producer failed ({result.returncode}); see {log}", file=sys.stderr)
         with log.open(errors="replace") as stream:
@@ -557,6 +844,9 @@ def execute_piece(job, root, environment, native, library_hash):
                 print("  " + line.rstrip(), file=sys.stderr)
         return result.returncode if result.returncode > 0 else 128 - result.returncode
 
+    # -------------------------------------------------------------------------
+    # Detect mutable-input changes during execution
+    # -------------------------------------------------------------------------
     require(sha256(Path(job["input_list"])) == job["input_list_sha256"], "input list changed during execution")
     require(sha256(Path(job["config"])) == job["configuration_sha256"], "configuration changed during execution")
     require(sha256(MACRO) == job["macro_sha256"], "macro changed during execution")
@@ -564,6 +854,9 @@ def execute_piece(job, root, environment, native, library_hash):
         require(sha256(Path(job["producer_library"])) == library_hash,
                 "installed producer library changed during execution")
 
+    # -------------------------------------------------------------------------
+    # Native completion + structural certification
+    # -------------------------------------------------------------------------
     try:
         checks = check_completion(capture_job, native, library_hash)
     except Exception as error:
@@ -578,18 +871,44 @@ def execute_piece(job, root, environment, native, library_hash):
     return 0
 
 
+# =============================================================================
+# Execute one complete logical source
+# =============================================================================
+#
+# A logical source may exceed the safe event budget for one native process.
+# `execute_source` therefore:
+#
+#   1. takes a nonblocking source lock,
+#   2. constructs a resume identity from the job + exact runtime scripts/library,
+#   3. splits the requested source interval into bounded pieces,
+#   4. produces or strictly revalidates every piece,
+#   5. consolidates complete-source pieces through libEventTree,
+#   6. publishes the proven source file collision-safely,
+#   7. writes a receipt binding identity, output hash, manifest, and proof.
+#
+# Resume is conservative: previously created work is reused only when its saved
+# identity and hashes exactly match the current invocation.
 def execute_source(job, root, environment, native, library_hash):
     """Process bounded pieces and prove one assembled logical-source file."""
     output = Path(job['output_file'])
     output.parent.mkdir(parents=True, exist_ok=True)
     work = output.parent / '.work' / output.stem
     work.mkdir(parents=True, exist_ok=job.get('resume', False))
+    # -------------------------------------------------------------------------
+    # Exclusive source ownership
+    # ---------------------------------------------------------------------
     with (work / 'source.lock').open('a') as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             lock.close()
             raise FrontendError('source is already owned by another invocation: ' + str(output))
+        # ---------------------------------------------------------------------
+        # Build the exact resume/runtime identity
+        # ---------------------------------------------------------------------
+        #
+        # Runtime Python scripts are included in the identity so a changed
+        # orchestration implementation cannot silently inherit old work.
         identity = {k:v for k,v in job.items() if k not in ('resume', 'input_list_content')}
         if 'input_list_identity' in job:
             # Temporary filenames are locators; the pinned catalogue and exact
@@ -605,6 +924,9 @@ def execute_source(job, root, environment, native, library_hash):
         else:
             with identity_file.open('x') as f:
                 json.dump(dict(sha256=identity_pin, job=identity), f, indent=2)
+        # ---------------------------------------------------------------------
+        # Fast path for an already certified source
+        # ---------------------------------------------------------------------
         receipt_path = work / 'source_receipt.json'
         if receipt_path.exists():
             receipt = read_json(receipt_path)
@@ -612,11 +934,20 @@ def execute_source(job, root, environment, native, library_hash):
             require(output.is_file() and sha256(output) == receipt['output_sha256'], 'published source changed')
             lock.close()
             return 0
+        # ---------------------------------------------------------------------
+        # Partition the logical source into bounded native pieces
+        # ---------------------------------------------------------------------
         limit = PIECE_EVENTS.get(job['profile'], PIECE_EVENTS['default'])
         chunks = []
         total = job['events']
         ranges = [(i, min(i + limit, total)) for i in range(0, total, limit)] or [(0, 0)]
         started = time.monotonic()
+        # ---------------------------------------------------------------------
+        # Atomic progress reporting
+        # ---------------------------------------------------------------------
+        #
+        # Progress is written to a pending file and atomically replaced so
+        # observers never read a partially serialized status document.
         def progress(phase, processed, **extra):
             record = dict(phase=phase, logical_source_id=job['logical_source_id'],
                           processed=processed, total=total, remaining=total-processed,
@@ -627,6 +958,9 @@ def execute_source(job, root, environment, native, library_hash):
             os.replace(pending, work / 'progress.json')
         progress('preparing', 0)
         try:
+            # -----------------------------------------------------------------
+            # Produce or revalidate every bounded piece
+            # -----------------------------------------------------------------
             for index, (begin, end) in enumerate(ranges):
                 piece = dict(job, output_file=str(work / f'piece-{index:06d}' / 'trees.root'),
                              first_entry=job['first_entry']+begin, events=end-begin)
@@ -650,6 +984,13 @@ def execute_source(job, root, environment, native, library_hash):
                                    piece_id=str(index), original_unit_id=job['logical_source_id'],
                                    event_begin=piece['first_entry'], event_end=piece['first_entry']+piece['events']))
                 progress('pieces_complete', end, piece=index, pieces=len(ranges))
+            # -----------------------------------------------------------------
+            # Prove the logical-source candidate
+            # -----------------------------------------------------------------
+            #
+            # Full sources are consolidated natively. A deliberately selected
+            # nonzero-first-entry development interval can never masquerade as
+            # a full-source claim.
             candidate = work / 'source.root'
             proof_path = work / 'source_validation.json'
             if proof_path.exists():
@@ -668,6 +1009,9 @@ def execute_source(job, root, environment, native, library_hash):
             if not proof_path.exists():
                 with proof_path.open('x') as f:
                     json.dump(dict(identity_sha256=identity_pin, sha256=sha256(candidate), proof=proof), f, indent=2)
+            # -----------------------------------------------------------------
+            # Collision-safe source publication and receipt
+            # -----------------------------------------------------------------
             if output.exists():
                 require(job.get('resume', False) and sha256(output) == sha256(candidate),
                         'source publication collision')
@@ -683,12 +1027,26 @@ def execute_source(job, root, environment, native, library_hash):
             progress('complete', total)
             lock.close()
             return 0
+        # ---------------------------------------------------------------------
+        # Preserve failed work for diagnosis and record the terminal phase
+        # ---------------------------------------------------------------------
         except Exception as error:
             progress('failed', sum(c['event_end']-c['event_begin'] for c in chunks), error=str(error))
             lock.close()
             raise
 
 
+# =============================================================================
+# Publish complete run/sample groups
+# =============================================================================
+#
+# TreeProduction publication is group-level, not merely file-level. A run or
+# sample is eligible only when every declared logical source has a final file
+# and a source receipt that still binds that file's SHA-256.
+#
+# The group receipt stores each source's consolidation proof. Publication then
+# delegates to libEventTree, which creates an immutable version and controls the
+# `CURRENT` pointer. Development selections are intentionally excluded.
 def publish_groups(native, plan, recipe):
     """Publish each complete run or sample group of a declared population (stage 2).
 
@@ -742,6 +1100,23 @@ def publish_groups(native, plan, recipe):
     return versions
 
 
+# =============================================================================
+# Top-level production lifecycle
+# =============================================================================
+#
+# `main` executes the campaign in distinct gates:
+#
+#   A. Parse/validate the user request.
+#   B. Bind the maintained catalogue and summarize the selected population.
+#   C. For non-dry-run production, bind the installed native libraries.
+#   D. Run native mapping preflight for every selected source before admitting
+#      the aggregate output.
+#   E. Materialize provenance copies of the population manifests.
+#   F. Execute and certify every logical source.
+#   G. Publish complete run/sample groups.
+#
+# This ordering is deliberate: expensive reconstruction begins only after the
+# complete selected aggregate has passed frontend and native readiness checks.
 def main():
     """Validate the request, coordinate source jobs, then publish complete groups."""
     global BINDINGS
@@ -759,6 +1134,9 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("lanes", nargs="+")
     args = parser.parse_args()
+    # -------------------------------------------------------------------------
+    # Validate mutually exclusive selectors and selector/lane compatibility
+    # -------------------------------------------------------------------------
     require(sum(value is not None for value in (args.run, args.sample, args.run_list, args.sample_list)) <= 1,
             'choose one of --run, --run-list, --sample or --sample-list')
     args.selected_groups = None
@@ -785,6 +1163,9 @@ def main():
         require(len(args.lanes) == 1, "--source requires a primitive command")
 
 
+    # -------------------------------------------------------------------------
+    # Load the population-binding catalogue and validate lane bindings
+    # -------------------------------------------------------------------------
     settings = read_configuration(BINDINGS)
     known_keys(settings, "schema_version campaign output_root production_config producer_library lanes", "binding")
     require(settings.get("schema_version") == 1, "unsupported population bindings schema")
@@ -807,6 +1188,12 @@ def main():
     require(MACRO.is_file(), f"production macro is missing: {MACRO}")
 
 
+    # -------------------------------------------------------------------------
+    # Resolve the selected population once for a human-readable summary
+    # -------------------------------------------------------------------------
+    #
+    # No output is created here. population_plans() is intentionally pure with
+    # respect to production products.
     totals = {}
     for plan in population_plans(settings, args):
         row = totals.setdefault(plan['lane'], [0, 0, 0, plan['output']])
@@ -818,11 +1205,24 @@ def main():
         print(f"  Output: {output}/<run-or-sample>/part-<ordinal>.root")
 
 
+    # -------------------------------------------------------------------------
+    # Dry-run boundary
+    # -------------------------------------------------------------------------
+    #
+    # Dry-run proves only catalogue/binding resolution. It intentionally stops
+    # before requiring ROOT or claiming native configuration/conditions/science
+    # readiness.
     if args.dry_run:
         print("DRY RUN: bindings checked; no outputs created and no ROOT invoked.\n"
               "C++ configuration, conditions, environment and science readiness were not validated.")
         return 0
 
+    # -------------------------------------------------------------------------
+    # Bind ROOT and the exact installed producer/eventTree libraries
+    # -------------------------------------------------------------------------
+    #
+    # Library hashes are captured once and then rechecked during production so
+    # the implementation cannot change underneath a running campaign.
     root = shutil.which("root")
     require(root, "ROOT is not on PATH; enter the configured sPHENIX environment")
 
@@ -855,6 +1255,13 @@ def main():
     native = load_eventtree(library.parent)
 
 
+    # -------------------------------------------------------------------------
+    # Native mapping preflight for the entire selected aggregate
+    # -------------------------------------------------------------------------
+    #
+    # Every selected source is checked before any aggregate output directory is
+    # admitted. This prevents a late mapping failure from appearing only after
+    # earlier sources have already begun production.
     # The installed native implementation declares mapping readiness. Check
     # each resolved plan before creating an output directory or processing DSTs.
     for plan in population_plans(settings, args):
@@ -863,6 +1270,13 @@ def main():
             with input_bundle(job) as resolved:
                 check_mapping(dict(resolved, events=min(job['events'], limit)), root, environment)
 
+    # -------------------------------------------------------------------------
+    # Admit output directories and preserve the exact population manifests
+    # -------------------------------------------------------------------------
+    #
+    # Once the aggregate passes native preflight, the driver creates output
+    # namespaces and writes immutable copies of the population definitions used
+    # for this invocation.
     # Admit the whole aggregate before starting its first event loop.
     args.output_admitted = True
     created_directories = set()
@@ -884,6 +1298,12 @@ def main():
                 f.write(Path(plan['manifest']).read_bytes())
 
 
+    # -------------------------------------------------------------------------
+    # Execute all selected sources and publish complete groups
+    # -------------------------------------------------------------------------
+    #
+    # Before each source, the manifest and installed libraries are re-hashed.
+    # A source must finish with a checked product before the loop advances.
     for plan in population_plans(settings, args):
         require(sha256(Path(plan["manifest"])) == plan["manifest_sha256"], "population changed after preflight")
         for job in plan["jobs"]:
@@ -908,6 +1328,13 @@ def main():
     return 0
 
 
+# =============================================================================
+# Process entry point and terminal error policy
+# =============================================================================
+#
+# Expected frontend/IO/parse/subprocess failures produce a concise ERROR line
+# and exit 1. Keyboard interruption is distinct (130), and any partial output is
+# explicitly left unaccepted for later inspection/resume rather than deleted.
 if __name__ == "__main__":
     try:
         sys.exit(main())
