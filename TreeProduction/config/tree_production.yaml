@@ -1,9 +1,9 @@
 # Reconstruction presets and capture policy for PhotonJetTree.
-# The public command selects a profile and an exact maintained source catalogue.
-# Setup.cc binds conditions, reconstruction and synchronized input streams.
-# Photon-ID and isolation labels are applied by the shared final-format layer;
-# reconstruction never removes candidates based on those labels.
-# Missing required calibration or source bindings fail before event processing.
+# The public command selects a profile and a source catalogue; Production.cc
+# resolves this file into a validated plan and Setup.cc binds conditions,
+# reconstruction and the synchronized input streams. Every candidate carries
+# the frozen nominal photon-ID and isolation labels; no candidate is removed by
+# them. Missing required calibration or source bindings fail before any event.
 
 schema_version: 1
 
@@ -42,27 +42,69 @@ runtime:
 
 
 # PPG12 relative event weights. Absolute normalization by generated exposure
-# remains in the histogram/analysis package. Each period binds its own fit.
+# remains in the histogram/analysis package. Each period binds its own fit,
+# its DATA run range [first, last) and its closure vertex window.
+#
+# Each family lists its generator slices: the cross section, the sample code
+# the bookkeeping records, and the event-ownership window [low, high] in GeV
+# (null: open above) of the maximum stored truth photon pT (photon+jet) or the
+# maximum truth anti-kT R=0.4 jet pT (inclusive jet). An inclusive-jet slice
+# also bounds the photon candidate ET its bookkeeping counts (cluster_et_max_gev).
+# It maps the maintained simulation sample identities (single and double
+# interaction) to their slice.
 ppg12_weights:
   total_luminosity_pb_inv: 64.3718
   photon_jet:
     reference_cross_section_pb: 130.4461
-    cross_sections_pb: {photon5: 146359.3, photon10: 6944.675, photon20: 130.4461}
+    slices:
+      photon5:  {cross_section_pb: 146359.3, code: 1, window_gev: [0.0, 14.0]}
+      photon10: {cross_section_pb: 6944.675, code: 2, window_gev: [14.0, 22.0]}
+      photon20: {cross_section_pb: 130.4461, code: 3, window_gev: [22.0, null]}
+    samples:
+      run28_photonjet5: photon5
+      run28_photonjet10: photon10
+      run28_photonjet20: photon20
+      run28_photonjet5_double: photon5
+      run28_photonjet10_double: photon10
+      run28_photonjet20_double: photon20
   inclusive_jet:
     reference_cross_section_pb: 7.3113
-    cross_sections_pb: {jet5: 138780000.0, jet8: 11500000.0, jet12: 1490300.0, jet20: 62623.0, jet30: 2529.8, jet40: 135.53}
+    slices:
+      jet5:  {cross_section_pb: 138780000.0, code: 1, window_gev: [7.0, 9.0], cluster_et_max_gev: 10.0}
+      jet8:  {cross_section_pb: 11500000.0, code: 2, window_gev: [9.0, 14.0], cluster_et_max_gev: 15.0}
+      jet12: {cross_section_pb: 1490300.0, code: 3, window_gev: [14.0, 21.0], cluster_et_max_gev: 23.0}
+      jet20: {cross_section_pb: 62623.0, code: 4, window_gev: [21.0, 32.0], cluster_et_max_gev: 35.0}
+      jet30: {cross_section_pb: 2529.8, code: 5, window_gev: [32.0, 42.0], cluster_et_max_gev: 45.0}
+      jet40: {cross_section_pb: 135.53, code: 6, window_gev: [42.0, 100.0], cluster_et_max_gev: 100.0}
+    samples:
+      run28_jet5: jet5
+      run28_jet8: jet8
+      run28_jet12: jet12
+      run28_jet20: jet20
+      run28_jet30: jet30
+      run28_jet40: jet40
+      run28_jet5_double: jet5
+      run28_jet8_double: jet8
+      run28_jet12_double: jet12
+      run28_jet20_double: jet20
+      run28_jet30_double: jet30
+      run28_jet40_double: jet40
   periods:
     0mrad:
+      runs: [47289, 51274]
       luminosity_pb_inv: 47.2076
       double_fraction: 0.224
+      closure_z_cut_cm: 144.0
       vertex_reweighting:
         enabled: true
         file: /sphenix/user/shuhangli/ppg12/efficiencytool/truth_vertex_reweight/output/0mrad/reweight.root
         sha256: 4c2a50fa2dd4fe6e3f8b823454f19753367876edabc9fe48164447a0d07be6b9
         histogram: h_w_iterative
     1p5mrad:
+      runs: [51274, 54000]
       luminosity_pb_inv: 17.1642
       double_fraction: 0.079
+      closure_z_cut_cm: 83.0
       vertex_reweighting:
         enabled: true
         file: /sphenix/user/shuhangli/ppg12/efficiencytool/truth_vertex_reweight/output/1p5mrad/reweight.root
@@ -92,9 +134,8 @@ capture:
 # -----------------------------------------------------------------------------
 # Input node vocabulary
 #
-# These are the canonical node names PhotonJetTree reads. Production*.cc is
-# responsible for creating or exposing the required nodes for the selected
-# profile before the producer executes.
+# These are the canonical node names PhotonJetTree reads. Setup.cc creates or
+# exposes the required nodes for the selected profile before the producer runs.
 # -----------------------------------------------------------------------------
 
 nodes:
@@ -183,8 +224,8 @@ photons:
   builder:
 
     # Threshold of the upstream photon builder. Kept equal to the storage
-    # domain so that no candidate the tree could store is dropped upstream.
-    # min_et_gev comes from capture_domain; do not duplicate it here.
+    # domain so that no candidate the tree could store is dropped upstream:
+    # capture_domain.min_et_gev, or the profile's photon_min_et_gev.
 
     # Native reconstruction and storage use the same broad reconstructed-vertex
     # domain. This is not the narrower downstream analysis vertex selection.
@@ -208,11 +249,14 @@ photons:
       unevaluated_score: -1.0
       configured_cut: 0.5
 
-  # The active photon preselection recorded as pho_presel_active: PPG12's
-  # newPPG12 definition, the NPB score above its cut plus the common shower
-  # cuts (open intervals, no weta cut). Nothing is removed in production.
+  # The active photon preselection recorded as pho_presel_active, under each
+  # profile's established variant (profiles: photon_preselection):
+  #   reference  e11/e33 < 0.98, 0.6 < et1 < 1, 0.8 < e32/e35 < 1, weta < 0.6
+  #              (always recorded as pho_presel_reference)
+  #   newPPG12   PPG12's definition: the NPB score above its cut plus the
+  #              common shower cuts below (open intervals, no weta cut)
+  # Nothing is removed in production.
   preselection:
-    variant: newPPG12
     npb_score: npb_score
     et1: [0.6, 1.0]
     e11_over_e33_max: 0.98
@@ -232,8 +276,9 @@ photons:
 
   isolation:
 
-    # Both commonly used cone radii are retained as measured observables.
-    # Isolated/non-isolated working points are applied later by PhotonID.
+    # Both commonly used cone radii are retained as measured observables. The
+    # nominal isolation class (pho_iso_class) labels every candidate; nothing
+    # is removed.
     radii: [0.30, 0.40]
 
     truth:
@@ -253,6 +298,40 @@ pp:
 
   shower_shape_tower_min_energy_gev: 0.070
 
+  # The established producer's event classification, recorded as
+  # evt_terminal_status with the PPG12 vertex/period audit rows (pdiag_*).
+  # Nothing is removed: every event keeps its row and objects.
+  #   DATA: the named GL1 triggers (scaled decision) and the scaled-bit audit
+  #         stream select the active streams, then the period run filter and
+  #         the |vz| cut classify the event.
+  #   SIM:  one stream "SIM" and the |vz| cut.
+  event_classification:
+    triggers:
+      - {gl1_name: "Photon 4 GeV + MBD NS >= 1", stream: Photon_4_GeV_plus_MBD_NS_geq_1}
+    scaled_bit_audit: {stream: PPG12_scaledtrigger30, bit: 30}
+    vertex_cut_cm: 60.0
+    filter_data_by_period: true
+    use_luminosity_weight: true
+
+  # The established producer's PPG12 bookkeeping of classified events.
+  # Photons in these ET bins (GeV, [low, high)) entered its per-photon audit
+  # rows (pdiag_*): isolation path, common and tight selection, ABCD region and
+  # isolation stack. In simulation it also counted its histogram fills
+  # (ppg12_wfill*, ppg12_rfill*), whose recoil jets and unfolding axes are:
+  ppg12_bookkeeping:
+    photon_et_bins_gev: [15, 20, 25, 35]
+    recoil_jet_pt_min_gev: 5.0
+    recoil_delta_phi_min_pi: 0.875
+    jet_match_max_delta_r: 0.3
+    unfold_reco_photon_et_bins_gev: [10, 15, 20, 25, 35, 40]
+    unfold_truth_photon_et_bins_gev: [5, 10, 15, 20, 25, 35, 40]
+    unfold_xj_bins: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+                     1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 3.0]
+    # The conditions timestamp of the established single-interaction
+    # simulation production, which seeded its response-ET draws (archived
+    # double-interaction samples used their profile cdb_timestamp).
+    established_simulation_timestamp: 47289
+
   isolation:
 
     # Topological-cluster cone ET minus candidate ET once; the raw tower
@@ -265,6 +344,15 @@ pp:
     witness:
       r03: {intercept_gev: 0.490, slope: 0.037, sideband_gap_gev: 0.8}
       r04: {intercept_gev: 0.490, slope: 0.037, sideband_gap_gev: 0.8}
+
+  # PPG12 photon-yield source arbitration (ppg12_arb_state, ppg12_lead_*,
+  # pho_ppg12_*): a cluster is masked when this PPG12 tower mask is positive
+  # at its tower centroid; the leading source is the highest-ET unmasked
+  # cluster of at least 5 GeV.
+  ppg12_tower_mask:
+    file: /sphenix/user/shuhangli/ppg12/efficiencytool/tower_masks_bdt_nom.root
+    sha256: 86a48919e6e0bc00fe9aa7f055a98fb202f51cdd6f8f7cc5e6d2677c922915cd
+    histogram: mask_phisymm_tight
 
   photon_id:
 
@@ -309,9 +397,28 @@ pp:
 
 auau:
 
-  # Same H70 reconstruction as pp. H0 is the additional configured view above.
-  # This shower floor never imposes an AuAu isolation constituent energy cut.
-  shower_shape_tower_min_energy_gev: 0.070
+  # The photon's own shower shapes use every good tower (no energy floor), as
+  # the established Au+Au productions did; the H70 view keeps its 70 MeV floor.
+  # This shower floor never imposes an Au+Au isolation constituent energy cut.
+  shower_shape_tower_min_energy_gev: 0.0
+
+  photon_id:
+
+    # The established production's tight model, recorded with every candidate
+    # (pho_prodbdt_*) but not evaluated by the producer: its identity, the H0
+    # view of its inputs, its validated domain (this ET range and the isolation
+    # witness centrality range) and three working-point lines in the
+    # centrality percent, recorded inside that domain. The same model decides
+    # the truth-photon misses below.
+    production_score:
+      score_name: auau_tight_bdt_score
+      model_sha256: 656a6468df6e87bfeb7e33b24d2ecf1079c3ac01f9684eb500176406368171db
+      shower_definition: H0
+      validated_et: [15.0, 35.0]
+      working_points:
+        wp70: {intercept: 0.6529177794, slope: 0.0013378442}
+        wp80: {intercept: 0.5544148693, slope: 0.0015499421}
+        wp90: {intercept: 0.4046618113, slope: 0.0014896756}
 
   isolation:
 
@@ -322,66 +429,92 @@ auau:
     # Historical working point recorded with each SUB1 cone (isow_*): a line
     # in the truncated integer centrality inside centrality_range, the
     # photon-ET fallback line otherwise. The nominal Au+Au isolation class
-    # uses the pinned TreeToHists freeze, not these thresholds.
+    # uses the pinned freeze below, not these thresholds.
     witness:
       centrality_range: [0, 80]
       r03: {intercept_gev: 5.97, slope: -0.0507, sideband_gap_gev: 0.0}
       r04: {intercept_gev: 7.57, slope: -0.0658, sideband_gap_gev: 0.0}
       fallback: {intercept_gev: 0.081, slope: 0.019, sideband_gap_gev: 0.8}
 
-  # Centrality is reconstructed for Au+Au DATA from explicitly bound run-level
-  # payloads. The native centile remains stored; these coarse edges provide the
-  # production-level analysis-bin vocabulary.
+    # Nominal isolation class: the frozen R = 0.3 SUB1 80% line in centrality
+    # with its sideband gap, applied to every candidate before writing.
+    nominal:
+      freeze: ../../TreeToHists/config/auau_isolation_wp80.json
+      freeze_sha256: bce274e6a5a777a6cacbc1e9cb1d975384cb32c9b1c3e5f5ef20d8903385353f
+
+  # Centrality is reconstructed for Au+Au DATA from the run's own payloads in
+  # the frozen calibration set. The native centile remains stored; these coarse
+  # edges provide the production-level analysis-bin vocabulary.
   centrality:
     analysis_bin_edges_percent: [0, 20, 50, 80]
 
     data:
       reconstruct: true
 
-      # local: run-bound frozen payloads pinned below or in `runs`.
+      # local: the run's divisions, run scale and vertex scale from the frozen
+      #        set below, each verified against the set's MANIFEST.json, which
+      #        is itself pinned here.
       # cdb:   the conditions database resolves them.
       source: local
 
       calibration_set: sam_fit_20260913_v1
+      calibration_root: /sphenix/tg/tg01/bulk/jbennett/thesisAna/recoiljets/calibrations_frozen/sam_fit_20260913_v1
       calibration_manifest_sha256: 4a11e0e10ae9b82062325c3275679935da2259f4c91f796950a6b5ddd2e1501c
-      require_own_run_payload: true
 
-      # Resolved per run by the job; the entries below are the defaults the
-      # per-run table in `runs` overrides.
-      payload_run: null
-      divisions: {path: null, sha256: null}
-      run_scale: {path: null, sha256: null}
-      vertex_scale: {path: null, sha256: null}
-
-      # Only the qualified run-68144 fallback is admitted, with pinned
-      # qualification evidence.
+      # A run without its own payloads may use only the qualified run-68144
+      # triplet, and only with this pinned qualification evidence.
       fallback_evidence_sha256: null
 
-    # Per-run payload table, filled by the job packet:
-    # runs:
-    #   "65360":
-    #     payload_run: 65360
-    #     divisions:    {path: ..., sha256: ...}
-    #     run_scale:    {path: ..., sha256: ...}
-    #     vertex_scale: {path: ..., sha256: ...}
-    runs: {}
+  # The established Au+Au producer's event classification, recorded as
+  # evt_terminal_status (0 none, 1 trigger, 2 vz, 3 minimum bias, 4 stitch,
+  # 5 centrality) and never applied. DATA: one of these GL1 scaled bits, the
+  # minimum-bias classifier and |vz|. Embedded simulation: |vz|, then the
+  # generator slice owns the event (photon samples by their generator-filter
+  # photon, jet samples by the maximum R = 0.4 truth-jet pT in these windows,
+  # [low, high) GeV, null open above). Both: the truncated centrality in
+  # centrality_range_percent.
+  event_classification:
+    scaled_triggers:
+      - {bit: 14, stream: MBD_NS_geq_2_vtx_lt_150}
+      - {bit: 22, stream: photon_10_plus_MBD_NS_geq_2_vtx_lt_150}
+      - {bit: 23, stream: photon_12_plus_MBD_NS_geq_2_vtx_lt_150}
+    require_minimum_bias: true
+    vertex_cut_cm: 60.0
+    centrality_range_percent: [0, 80]
+    embedded_jet_windows_gev: {"12": [12.0, 20.0], "20": [20.0, null], "30": [30.0, null], "40": [40.0, null]}
+
+  # The established producer's embedded truth-photon misses (truthmiss_*): an
+  # accepted embedded event whose leading truth signal photon has no isolated
+  # tight reconstructed photon (|eta| < 0.7, 15 <= ET < 35 GeV, the active
+  # preselection and a passing R = 0.4 isolation witness), or whose leading such
+  # photon is another truth particle. Tight is the production's cut-based
+  # identification on the photon's own shower shapes: weta and wphi in
+  # (width_min, intercept + slope x ET), the other three inside open windows.
+  truth_photon_misses:
+    et_range_gev: [15.0, 35.0]
+    abs_eta_max: 0.7
+    isolation_radius: 0.4
+    tight_id:
+      width_min: 0.0
+      width_max: {intercept: 0.15, slope_per_gev: 0.006}
+      e11_over_e33: [0.40, 0.98]
+      et1: [0.90, 1.00]
+      e32_over_e35: [0.92, 1.00]
 
   # CEMC status must remain tied to the calibration state of the original paired
   # calorimeter input. Missing historical status may be restored only through an
   # explicitly authorized and hash-bound recovery payload.
   cemc_status:
 
-    # Validate the paired input's tower status against the bad-tower map the
-    # original calorimeter file was reconstructed with.
+    # Validate the paired input's tower status against the bad-tower map its
+    # calorimeter file (the job's DST_JETCALO) was reconstructed with.
     validate_paired_input_status: true
 
-    # Exact original calorimeter file of this job, supplied by the job packet.
-    original_calorimeter_input: null
-
-    # A missing saved map may be recovered only from a pinned run-specific
-    # payload that the job packet supplies.
-    allow_missing_status_recovery: false
-    recovery_payload: {path: null, sha256: null}
+    # A tower the run's map rejects but whose saved status lacks the HOT flag
+    # is restored from the run's own map, which the catalogue binds per source
+    # (cemc_recovery_map: path and SHA256). Without a bound map such an input
+    # is refused.
+    allow_missing_status_recovery: true
 
   # Two-pass heavy-ion underlying-event reconstruction. The resulting SUB1/SUB2
   # state is used by the Au+Au isolation and jet paths and retained sufficiently
@@ -393,7 +526,7 @@ auau:
     iteration_2: {output_background_node: TowerInfoBackground_Sub2, seed_type: subtracted, seed_pt_min_gev: 7.0}
 
     # 0 no flow, 1 psi2 from the calorimeter, 2 from HIJING, 3 from the sEPD.
-    # The observed reference-production data packet ran with 0.
+    # The established production ran with 0.
     flow_modulation: 0
 
   jets:
@@ -453,6 +586,7 @@ jets:
 #   input_mode         reconstructed DST or archived Geant4-only input
 #   cdb context        conditions environment required by that mode
 #   truth_jets_mode    read, build, automatically resolve, or none
+#   photon_preselection  the established producer's active preselection variant
 #
 # Profile-specific reconstruction requirements are declared only where needed.
 # -----------------------------------------------------------------------------
@@ -468,6 +602,7 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: none
+    photon_preselection: newPPG12
 
 
   # p+p photon+jet simulation
@@ -479,6 +614,7 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: auto
+    photon_preselection: reference
 
   # p+p inclusive-jet simulation
   pp_inclusive_sim:
@@ -489,12 +625,14 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: auto
+    photon_preselection: reference
 
   # Archived p+p photon+jet double-interaction simulation
   #
   # These Geant4-only inputs depend on the original random-number consumption
-  # sequence. The archived donor is reproduced by replaying the exact FIFO seed
-  # contract rather than choosing a new production seed.
+  # sequence. Each source is reproduced by replaying, first in first out, the
+  # five seeds its production consumed (its catalogue entry's historical_rng)
+  # rather than choosing a new production seed.
   pp_photon_di:
     system: pp
     data_kind: simulation
@@ -504,11 +642,10 @@ profiles:
     cdb_global_tag: MDC2
     cdb_timestamp: 28
     truth_jets_mode: dst
+    photon_preselection: reference
 
     historical_rng_contract:
       algorithm: phrandomseed_fifo_replay_v2
-      seed_sequence: [2991264730, 4256268992, 2394322166, 874466025, 2240380304]
-      expected_pedestal_sequence: 534
       forbid_reco_consts_random_seed: true
 
 
@@ -522,11 +659,10 @@ profiles:
     cdb_global_tag: MDC2
     cdb_timestamp: 28
     truth_jets_mode: dst
+    photon_preselection: reference
 
     historical_rng_contract:
       algorithm: phrandomseed_fifo_replay_v2
-      seed_sequence: [2991264730, 4256268992, 2394322166, 874466025, 2240380304]
-      expected_pedestal_sequence: 534
       forbid_reco_consts_random_seed: true
 
 
@@ -539,8 +675,13 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: none
+    photon_preselection: reference
     reconstruct_centrality: true
     require_minimum_bias_classifier: true
+
+    # Photons are built and captured from 12 GeV, the Au+Au DATA production's
+    # threshold; every other lane starts at the capture domain's 5 GeV.
+    photon_min_et_gev: 12.0
 
 
   # Embedded Au+Au photon+jet simulation
@@ -552,8 +693,7 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: auto
-
-    require_embedded_minimum_bias: false  # record observation; no producer selection
+    photon_preselection: reference
 
 
   # Embedded Au+Au inclusive-jet simulation
@@ -565,29 +705,21 @@ profiles:
     input_mode: reconstructed_dst
     cdb_global_tag: newcdbtag  # historical producer tag (ana.568 macro default, no saved override)
     truth_jets_mode: dst
-
-    require_embedded_minimum_bias: false  # record observation; no producer selection
+    photon_preselection: reference
 
 
 # -----------------------------------------------------------------------------
-# Optional high-volume witness tables
+# Large witness tables
 #
-# Mandatory canonical tables are always written. These switches control large
-# reconstruction-level witness tables whose permanent disposition remains an
-# open field-mapping decision of the final layout.
+# Three tables hold most of a file's volume. They are part of eventTree v1 and
+# enabled in every maintained production; switching one off leaves its
+# branches empty:
 #
-# They remain enabled until equivalence work demonstrates that dropping them
-# would not remove information needed to reconstruct downstream quantities:
-#
-#   PhotonCells
-#     cell-level calorimeter evidence for reconstructed photon showers
-#
-#   IsolationConstituents
-#     individual objects contributing to reconstructed isolation cones
-#
-#   PhotonJetPairs
-#     explicit photon-jet pair witnesses; potentially derivable later from the
-#     retained photon and jet collections once exact equivalence is established
+#   write_photon_cell_table              the calorimeter cells of each photon
+#                                        shower (cell_*)
+#   write_isolation_constituent_table    the objects in each isolation cone
+#                                        (isoc_*)
+#   write_photon_jet_pair_table          every photon-jet combination (pair_*)
 # -----------------------------------------------------------------------------
 
 output:

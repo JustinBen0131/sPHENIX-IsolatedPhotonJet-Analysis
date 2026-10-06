@@ -1,0 +1,5 @@
+# Development evidence and generated products are outside the public package.
+build/
+tests/
+reports/
+QUALIFICATION.md

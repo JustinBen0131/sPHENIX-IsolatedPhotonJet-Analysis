@@ -9,8 +9,10 @@ that branch or changes the nominal isolation definition.
 ## Commands
 
 Use an already configured environment with Python, NumPy, SciPy, PyYAML,
-uproot, awkward and ROOT. BDT fitting additionally requires XGBoost. This
-package does not install dependencies or activate a different environment.
+uproot, awkward and ROOT, plus TreeProduction's installed eventTree library:
+set `MYINSTALL` to its installation prefix (a `--disable-producer` build
+needs only ROOT). BDT fitting additionally requires XGBoost. This package does
+not install dependencies or activate a different environment.
 `PHOTONID_PYTHON` may select the Python executable in your chosen environment.
 
 ```bash
@@ -135,12 +137,14 @@ threshold. Efficiency, line residuals and cut ordering are checked. There is
 no separate untouched evaluation partition after full-signal WP calibration.
 
 Input ROOT reads and writes are bounded. The population matrix is disk-backed;
-SQLite checks source/event/photon identities. Saved score candidates are
-reopened and compared to all original payload branches and carried objects.
-Publication reuses TreeProduction's eventTree module's complete-group roster validation and atomic
-compare-and-swap pointer. A partial augmentation leaves the published group
-unchanged, with the same folder/file count. Failed candidates are retained for
-inspection. Never delete or overwrite them to force progress.
+SQLite checks source/event/photon identities. The eventTree library writes
+each score candidate, then reopens it and compares every original payload
+branch and carried object; every score is recomputed independently.
+Publication uses the same library's complete-group roster validation, DATA
+event uniqueness and atomic compare-and-swap pointer, after rehashing every
+file against its proof receipt. A partial augmentation leaves the published
+group unchanged, with the same folder/file count. Failed candidates are
+retained for inspection. Never delete or overwrite them to force progress.
 
 ## Files and generated releases
 

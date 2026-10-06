@@ -26,14 +26,17 @@ class PHCompositeNode;
 
 class TFile;
 class TH1;
+class TH2;
 class TTree;
 
 class RawCluster;
 class Jet;
 class TowerInfoContainer;
 namespace photonjet { class PhotonClusterBuilder; class DirectEventWriter; }
+namespace photonjet::production { class PinnedModel; }
 
 class PHG4Particle;
+class CaloRawClusterEval;
 
 class PhotonJetTree : public SubsysReco
 {
@@ -85,6 +88,8 @@ class PhotonJetTree : public SubsysReco
   using IsolationConstituentRecord = photonjet::IsolationConstituentRecord;
   using DominantTruthRecord = photonjet::DominantTruthRecord;
   using PhotonRecord = photonjet::PhotonRecord;
+  using NominalPhotonRecord = photonjet::NominalPhotonRecord;
+  using NominalReceiptRecord = photonjet::NominalReceiptRecord;
 
   using JetRecord = photonjet::JetRecord;
   using PhotonJetPairRecord = photonjet::PhotonJetPairRecord;
@@ -92,6 +97,8 @@ class PhotonJetTree : public SubsysReco
   using TruthVertexRecord = photonjet::TruthVertexRecord;
   using TruthPhotonRecord = photonjet::TruthPhotonRecord;
   using TruthJetRecord = photonjet::TruthJetRecord;
+  using PPG12ClusterRecord = photonjet::PPG12ClusterRecord;
+  using EmbeddedDiagnosticRecord = photonjet::EmbeddedDiagnosticRecord;
 
   using PhotonTruthLinkRecord = photonjet::PhotonTruthLinkRecord;
   using JetTruthLinkRecord = photonjet::JetTruthLinkRecord;
@@ -152,7 +159,7 @@ class PhotonJetTree : public SubsysReco
    * pending, the previous event never reached process_event() and is recorded
    * as upstream rejected. Implemented in internal/Event.cc.
    */
-  void observeUpstreamEvent(int run, std::int64_t physicalEventSequence);
+  void observeUpstreamEvent(std::int64_t physicalEventSequence);
 
   /**
    * Mark the current product incomplete after an external event-loop failure.
@@ -200,6 +207,13 @@ class PhotonJetTree : public SubsysReco
   bool isPhotonJetSimulation() const;
   bool isInclusiveJetSimulation() const;
 
+  // pp simulation with PPG12 weights keeps the inputs of its PPG12 histogram
+  // bookkeeping (PPG12Simulation.cc).
+  bool recordsPPG12Simulation() const
+  {
+    return isSimulation() && isPP() && m_config.weights.ppg12Nominal;
+  }
+
   // ==========================================================================
   // Job and run initialization
   // ==========================================================================
@@ -230,6 +244,9 @@ class PhotonJetTree : public SubsysReco
   /// Load configured producer-owned weighting inputs. Implemented in Event.cc.
   void loadWeightInputs();
 
+  /// Load the pinned PPG12 tower mask (pp). Implemented in Objects.cc.
+  void loadPPG12TowerMask();
+
   /**
    * Resolve a final pending upstream observation at end of input.
    *
@@ -258,12 +275,37 @@ class PhotonJetTree : public SubsysReco
   /// Capture the run-level DATA trigger configuration once per run.
   void captureTriggerRunInformation(PHCompositeNode* topNode);
 
+  /**
+   * Record the historical event classification (terminal status, pp
+   * simulation sample ownership and the PPG12 audit occurrences; Au+Au
+   * embedded stitching, truth-isolation audit and truth-photon misses) after
+   * the event context, photons and truth are known. Diagnostic only; no event
+   * or object is removed.
+   */
+  void classifyEvent();
+  void classifyAuAuEvent();
+  bool embeddedSampleOwnsEvent();
+  void recordEmbeddedTruthIsolationAudit();
+  void recordEmbeddedTruthMisses();
+  bool scaledTriggerFired(const std::string& name) const;
+
+  /*
+   * The established producer's PPG12 bookkeeping: the vertex/period audit of
+   * a classified event, pp simulation sample ownership and the DATA
+   * per-photon yield audit (PPG12.cc); in pp simulation, the histogram fills
+   * and occurrences after the weight configuration (PPG12Simulation.cc).
+   */
+  void recordPPG12VertexAudit(bool preVertexCut);
+  bool recordPPG12SampleOwnership(bool beforeEventCuts);
+  void recordPPG12PhotonYield();
+  void recordPPG12Simulation();
+
   // ==========================================================================
   // Reconstructed photons
   //
-  // Implemented in internal/Objects.cc. This stage stores reconstruction facts
-  // and isolation observables; it does not apply photon-ID or isolation working
-  // points.
+  // Implemented in internal/Objects.cc. This stage stores reconstruction facts,
+  // isolation observables and the frozen nominal labels; no photon-ID or
+  // isolation working point selects candidates.
   // ==========================================================================
 
   void capturePhotons(PHCompositeNode* topNode);
@@ -286,12 +328,20 @@ class PhotonJetTree : public SubsysReco
                                  TowerInfoContainer* cemcTowers,
                                  PhotonRecord& photon);
 
-  void capturePhotonIsolation(const RawCluster* cluster,
-                              PhotonRecord& photon);
+  // The isolation cones the builder attached to one candidate.
+  std::vector<IsolationRecord> photonIsolation(const RawCluster* cluster,
+                                               const PhotonRecord& photon) const;
 
   void capturePhotonIsolationConstituents(PHCompositeNode* topNode,
                                           const RawCluster* cluster,
                                           const PhotonRecord& photon);
+
+  /**
+   * Label every captured candidate with the frozen nominal photon ID and
+   * isolation class (implemented in internal/Objects.cc). Labels are stored
+   * with the candidate; they never change which candidates are retained.
+   */
+  void labelNominalPhotons();
 
   // ==========================================================================
   // Reconstructed jets
@@ -321,6 +371,7 @@ class PhotonJetTree : public SubsysReco
   void captureTruthVertices(PHCompositeNode* topNode);
   void captureTruthPhotons(PHCompositeNode* topNode);
   void captureTruthJets(PHCompositeNode* topNode);
+  void capturePPG12OwnershipInputs(PHCompositeNode* topNode);
 
   /**
    * Compute the retained truth-isolation sums and census completeness.
@@ -336,6 +387,7 @@ class PhotonJetTree : public SubsysReco
                                      bool& complete) const;
 
   void buildPhotonTruthAssociations(PHCompositeNode* topNode);
+  void capturePPG12Clusters(PHCompositeNode* topNode, CaloRawClusterEval& evaluator);
   void buildJetTruthAssociations();
 
   // ==========================================================================
@@ -361,6 +413,9 @@ class PhotonJetTree : public SubsysReco
 
   Config m_config;
   const photonjet::PhotonClusterBuilder* m_photonBuilder = nullptr;  // owned by Fun4AllServer
+
+  // The frozen nominal photon-ID model, loaded once per job.
+  std::shared_ptr<const photonjet::production::PinnedModel> m_nominalModel;
   std::map<std::string, JetFractionReader> m_jetFractionReaders;
 
   // ==========================================================================
@@ -391,8 +446,14 @@ class PhotonJetTree : public SubsysReco
   std::vector<TriggerScalerSnapshotRecord> m_triggerScalerSnapshots;
   std::vector<TriggerRunInfoRecord> m_triggerRunInfo;
 
+  // Source totals of the nominal labels, written with the file's receipts.
+  NominalReceiptRecord m_nominalReceipt;
+
   // Producer-owned simulated-vertex reweighting histogram.
   TH1* m_vertexReweight = nullptr;
+
+  // PPG12 tower mask for the photon-yield source arbitration (pp only).
+  TH2* m_ppg12TowerMask = nullptr;
 
   // ==========================================================================
   // Current-event state
@@ -415,10 +476,23 @@ class PhotonJetTree : public SubsysReco
   std::vector<TruthPhotonRecord> m_truthPhotons;
   std::vector<TruthJetRecord> m_truthJets;
 
+  // The identity association, and the established producer's distance links.
   std::vector<PhotonTruthLinkRecord> m_photonTruthLinks;
+  std::vector<PhotonTruthLinkRecord> m_photonDistanceLinks;
   std::vector<JetTruthLinkRecord> m_jetTruthLinks;
 
   std::vector<WeightComponentRecord> m_weightComponents;
+
+  // Inputs of the PPG12 simulation bookkeeping, not stored: every photon
+  // candidate in container order, the builder's input clusters, the unsplit
+  // response clusters when that node exists, the radius codes of the truth
+  // jet containers read, and whether the cluster truth evaluator had its nodes.
+  std::vector<PhotonRecord> m_ppg12Photons;
+  std::vector<PPG12ClusterRecord> m_ppg12Clusters;
+  std::vector<PPG12ClusterRecord> m_ppg12ResponseClusters;
+  bool m_ppg12ResponseClustersPresent = false;
+  std::vector<int> m_ppg12TruthJetRadiiFound;
+  bool m_ppg12EvaluatorReady = false;
 
   // ==========================================================================
   // Lifecycle guards

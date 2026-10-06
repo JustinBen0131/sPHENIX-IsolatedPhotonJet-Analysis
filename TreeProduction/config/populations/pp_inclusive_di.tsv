@@ -1,0 +1,6 @@
+group	manifest	manifest_sha256	sources	events
+run28_jet12_double	../../lists/simulation/run28_jet12_double/sources.tsv	e14d50a718f516f03d05eb11fcbd43614bd7dffa965ade32bc4207984c510510	9996	9996000
+run28_jet20_double	../../lists/simulation/run28_jet20_double/sources.tsv	ed8ee082ce6ea570e686538bf2114d3f93fe089dc51817199f800400d19972b4	10000	10000000
+run28_jet30_double	../../lists/simulation/run28_jet30_double/sources.tsv	8818307b734c6e52ea7eb26d8599389537699d151b28ea46864d0948ca78600c	10000	10000000
+run28_jet40_double	../../lists/simulation/run28_jet40_double/sources.tsv	74989956ce3d893520dc946fd6ef3517c9e65dc535263e5a5200106433a2a9c3	10000	10000000
+run28_jet8_double	../../lists/simulation/run28_jet8_double/sources.tsv	4f1bfde7e2df6efbad89ac0d4feee0ed13ac57ef6e5254ef0913afec1b3f7cc9	10000	10000000

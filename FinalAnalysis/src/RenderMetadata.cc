@@ -1,0 +1,67 @@
+/* Plot semantics are compiled from the settings and source packages used by the measurement. */
+#include "FinalAnalysis.h"
+#include "RenderMetadata.h"
+#include <set>
+#include <memory>
+#include <filesystem>
+#include "TFile.h"
+#include "TObjString.h"
+
+namespace fa {
+std::string renderMetadata(const Settings &s) {
+  using namespace photonjet_render;
+  Json body = {{"schema", "PhotonJetRenderMetadataV1"}, {"packages", Json::object()}, {"results", Json::object()},
+               {"analysis_program", Json::object()}};
+  for (const auto &file : std::filesystem::directory_iterator(std::filesystem::path(__FILE__).parent_path()))
+    if (file.is_regular_file() && (file.path().extension()==".cc" || file.path().extension()==".h"))
+      body["analysis_program"][file.path().filename().string()] = sha256(file.path().string(), true);
+  std::set<std::string> seen;
+  for (const auto &sys : s.systems) {
+    Json classes = Json::array();
+    for (const auto &other : s.systems) if (other.package == sys.package) {
+      Json range = other.slices.empty() || other.slices.front()<0 ? Json() : Json{5*other.slices.front(), 5*(other.slices.back()+1)};
+      classes.push_back({{"id", other.centrality}, {"centrality_percent", range}});
+    }
+    const Json centrality = sys.slices.empty() || sys.slices.front()<0 ? Json() : Json{5*sys.slices.front(), 5*(sys.slices.back()+1)};
+    body["results"][sys.name] = {{"package", sys.package}, {"centrality", sys.centrality}, {"centrality_percent", centrality}, {"photon_edges_gev", sys.photonEdges},
+      {"recoil_min_gev", s.jetThreshold}, {"reported_xj", {sys.reportedLow, s.reportedHigh}}, {"data_toy_model", s.dataToyModel},
+      {"data_seed", s.seed}, {"response_seed", s.responseSeed}, {"closure_seed", s.closureSeed}, {"prior", s.priorForm},
+      {"prior_power", s.priorPower}, {"combinatoric_method", s.combinatoricMethod},
+      {"closure_scope", "prior_fit_and_unfolding_after_corrections"},
+      {"full_correction_chain_closure", "REQUIRES_INDEPENDENT_PHYSICS_QUALIFICATION"}};
+    if (!seen.insert(sys.package).second) continue;
+    Json samples = Json::object();
+    std::set<std::string> names{"data"};
+    for (const auto &other : s.systems) if (other.package == sys.package) names.insert(other.simulation.begin(), other.simulation.end());
+    const auto inclusive = s.inclusive.find(sys.package);
+    if (inclusive != s.inclusive.end()) names.insert(inclusive->second.begin(), inclusive->second.end());
+    for (const auto &name : names) {
+      const auto path = s.inputDirectory+"/"+sys.package+"/"+name+".root";
+      std::unique_ptr<TFile> file(TFile::Open(path.c_str()));
+      auto *saved = file && !file->IsZombie() ? dynamic_cast<TObjString *>(file->Get("meta/package")) : nullptr;
+      if (!saved) throw std::runtime_error("render metadata needs sample metadata: " + path);
+      const Json meta = Json::parse(saved->GetString().Data());
+      samples[name] = {{"path", path}, {"sha256", sha256(path, true)}, {"family", meta.at("family")},
+                       {"normalization", meta.value("normalization", Json())}, {"availability", meta.value("availability", Json())}};
+      if (name == "data") {
+        body["packages"][sys.package] = {{"classes", classes}, {"selection", meta.value("render_selection", Json())},
+          {"annotation_status", meta.contains("render_selection") ? "COMPILED_SELECTION" : "LEGACY_UNVERIFIED_ANNOTATION"}};
+      }
+      if (meta.contains("render_selection") && meta.at("render_selection").at("selection_sha256") != meta.at("selection").at("selection_sha256"))
+        throw std::runtime_error("render selection does not bind the filled selection: " + path);
+    }
+    body["packages"][sys.package]["samples"] = samples;
+  }
+  return seal(body).dump();
+}
+
+void renderProductReceipt(const std::string &path, const std::string &metadata) {
+  using namespace photonjet_render;
+  const auto body = verify(Json::parse(metadata));
+  for (const auto &package : body.at("packages")) for (const auto &sample : package.at("samples"))
+    if (sha256(sample.at("path").get<std::string>(), true) != sample.at("sha256").get<std::string>())
+      throw std::runtime_error("sample changed while producing analysis output");
+  write(path+".render.json", {{"schema", "PhotonJetRenderProductV1"}, {"product_sha256", sha256(path, true)},
+                            {"metadata_sha256", Json::parse(metadata).at("sha256")}});
+}
+}  /* namespace fa */

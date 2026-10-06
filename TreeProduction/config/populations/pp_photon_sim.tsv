@@ -1,0 +1,4 @@
+group	manifest	manifest_sha256	sources	events
+run28_photonjet10	../../lists/simulation/run28_photonjet10/sources.tsv	44ec7df2d189ea317304ef96578ef21b41a557d35eda50694a282fd847d9021d	10000	10000000
+run28_photonjet20	../../lists/simulation/run28_photonjet20/sources.tsv	a60ce91c7826bbb81c48c8f1cd63dde8bab73de668161aeef7da62156a0f1a6d	10000	10000000
+run28_photonjet5	../../lists/simulation/run28_photonjet5/sources.tsv	ef89a21cf7eb3a615f78673b187a898f4780ef1870fd4dbb3c2f73656a2baae7	10000	10000000

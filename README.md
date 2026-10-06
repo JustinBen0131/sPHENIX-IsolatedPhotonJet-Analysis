@@ -34,8 +34,10 @@ python TreeProduction/scripts/check_environment.py
 
 DST reconstruction uses the sPHENIX software environment. Follow the
 [TreeProduction build instructions](TreeProduction/README.md) to compile its
-C++ library using the Autotools files in `TreeProduction/src/`. Model-training
-dependencies are described in the [PhotonID guide](PhotonID/README.md).
+C++ libraries using the Autotools files in `TreeProduction/src/`; a ROOT-only
+build (`--disable-producer`) provides the eventTree library that PhotonID
+uses to read and extend saved trees. Model-training dependencies are
+described in the [PhotonID guide](PhotonID/README.md).
 
 ## Commands
 
@@ -45,16 +47,18 @@ and options:
 ```bash
 ./TreeProduction/produce_trees.sh --help
 ./PhotonID/photon_id.sh --help
-./TreeToHists/make_hists.sh --help
-./FinalAnalysis/final_analysis.sh --help
+./TreeToHists/tree_to_hists.sh
+./FinalAnalysis/final_analysis.sh
 ```
 
-For example, analyze a tree collection and render its results:
+For example, fill the histogram packages of a tree catalogue, measure, and draw the IAN's figures and tables:
 
 ```bash
-./TreeToHists/make_hists.sh runAll --inputs collection.json --out histograms
-./FinalAnalysis/final_analysis.sh runAll --manifest histograms/manifest.json --out results
-./FinalAnalysis/final_analysis.sh render --results results --out figures
+./TreeToHists/tree_to_hists.sh local --settings TreeToHists/config/treetohists.cfg --inputs catalogue.json --work work --out histograms
+./FinalAnalysis/final_analysis.sh run --config FinalAnalysis/config/analysis.cfg
+./FinalAnalysis/final_analysis.sh qa  --config FinalAnalysis/config/analysis.cfg
+./FinalAnalysis/final_analysis.sh draw --results results.root --qa qa.root --fig FinalAnalysis/fig
+./FinalAnalysis/final_analysis.sh tables --results results.root --out FinalAnalysis/tables
 ```
 
 ## Data products
@@ -66,9 +70,9 @@ For example, analyze a tree collection and render its results:
 - **Additional scores:** named photon-aligned branches added by PhotonID,
   preserving the nominal definitions and dataset layout.
 - **Histograms:** one ROOT package per DATA collection or SIM sample, with a
-  collection manifest and event/source records for uncertainty calculations.
-- **Results:** saved measurements, uncertainties, figures and tables.
-  Rendering uses the saved calculation results.
+  JSON sidecar and event/source records for uncertainty calculations.
+- **Results:** `results.root` (the measurement), `qa.root` (photon and event
+  QA) and `systematics.root`; figures and tables are drawn from them.
 
 Configuration lives inside its owning package. Standard production commands
 select maintained input collections and reconstruction presets; custom inputs,

@@ -1,8 +1,10 @@
 /**
  * @file Event.cc
- * Capture event identity, exposure, triggers, vertex and calorimeter context.
- * Producer-owned weights and upstream rejection accounting remain explicit.
- * Event measurements retain their declared units and missing-value states.
+ * Capture event identity, exposure, triggers, vertex, centrality and
+ * calorimeter context; record the established producer's event classification
+ * (evt_terminal_status, recorded and never applied) and the producer-owned
+ * event weights. Upstream rejection accounting remains explicit, and event
+ * measurements keep their declared units and missing-value states.
  */
 
 #include "../PhotonJetTree.h"
@@ -42,6 +44,8 @@
 #include <TFile.h>
 #include <TH1.h>
 
+#include <algorithm>
+#include <cctype>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -55,10 +59,7 @@ namespace
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr int kTriggerBits = 64;
 
-bool finiteValue(const double value)
-{
-  return std::isfinite(value);
-}
+bool finiteValue(const double value) { return std::isfinite(value); }
 
 
 // ============================================================================
@@ -108,8 +109,7 @@ ScalerArray readScalers(Gl1Packet* packet, const int version, const int type)
   for (int bit = 0; bit < kTriggerBits; ++bit)
   {
     result[static_cast<std::size_t>(bit)] =
-        version == 1 ? static_cast<std::uint64_t>(packet->lValue(bit, type))
-                     : packet->getScaler(bit, type);
+        version == 1 ? static_cast<std::uint64_t>(packet->lValue(bit, type)) : packet->getScaler(bit, type);
   }
 
   return result;
@@ -180,7 +180,7 @@ CaloSum sumCalorimeter(PHCompositeNode* topNode, const std::string& node, const 
   // TowerInfoContainer::size() scans the whole TClonesArray; count once.
   const auto towerCount = towers->size();
   result.towerCount = towerCount;
-  result.valid = towerCount>0;
+  result.valid = towerCount > 0;
 
   for (unsigned int channel = 0; channel < towerCount; ++channel)
   {
@@ -214,7 +214,7 @@ CaloSum sumCalorimeter(PHCompositeNode* topNode, const std::string& node, const 
   // The retained census treats a present nonempty all-masked container as a
   // valid measured zero. Only null/nonfinite inputs or binary32 overflow lose
   // validity; the native branch widens the finished binary32 result.
-  result.valid=result.valid&&std::isfinite(static_cast<float>(result.energy));
+  result.valid = result.valid && std::isfinite(static_cast<float>(result.energy));
 
   return result;
 }
@@ -226,15 +226,16 @@ CaloSum sumCalorimeter(PHCompositeNode* topNode, const std::string& node, const 
 // Capture the calibrated centrality inputs independently of the collaborator
 // charge fallback. Preserve the reconstruction's float accumulation and its
 // inclusive 0.5 charge / 25 ns selection boundaries.
-template<class Pmts, class Out, class MinimumBias>
+template <class Pmts, class Out, class MinimumBias>
 void captureCentralityInputs(photonjet::EventRecord& row, Pmts* pmts, Out* out, MinimumBias* minimumBias)
 {
   using photonjet::TriState;
   row.centralityReplayVersion = 1;
   row.centralityPmtAvailable = pmts ? TriState::True : TriState::False;
-  row.minimumBiasDecision = minimumBias
-      ? (minimumBias->isAuAuMinimumBias() ? TriState::True : TriState::False) : TriState::Unknown;
-  if (out) {
+  row.minimumBiasDecision =
+      minimumBias ? (minimumBias->isAuAuMinimumBias() ? TriState::True : TriState::False) : TriState::Unknown;
+  if (out)
+  {
     row.centralityMbdZ = out->get_zvtx();
     row.centralityMbdZValid = std::isfinite(row.centralityMbdZ);
     row.centralityMbdEvent = out->get_evt();
@@ -242,13 +243,15 @@ void captureCentralityInputs(photonjet::EventRecord& row, Pmts* pmts, Out* out, 
     row.centralityMbdFemclock = out->get_femclock();
   }
   if (!pmts) return;
-  if (pmts->get_npmt() != 128) {
+  if (pmts->get_npmt() != 128)
+  {
     row.centralityPmtAvailable = TriState::Unknown;
     return;
   }
   bool valid = true;
   float selectedCharge = 0.f;
-  for (int channel = 0; channel < 128; ++channel) {
+  for (int channel = 0; channel < 128; ++channel)
+  {
     const auto* hit = pmts->get_pmt(channel);
     const float charge = hit ? hit->get_q() : std::numeric_limits<float>::quiet_NaN();
     const float time = hit ? hit->get_time() : std::numeric_limits<float>::quiet_NaN();
@@ -320,9 +323,17 @@ void PhotonJetTree::resetEventState()
   m_truthJets.clear();
 
   m_photonTruthLinks.clear();
+  m_photonDistanceLinks.clear();
   m_jetTruthLinks.clear();
 
   m_weightComponents.clear();
+
+  m_ppg12Photons.clear();
+  m_ppg12Clusters.clear();
+  m_ppg12ResponseClusters.clear();
+  m_ppg12ResponseClustersPresent = false;
+  m_ppg12TruthJetRadiiFound.clear();
+  m_ppg12EvaluatorReady = false;
 }
 
 
@@ -338,27 +349,22 @@ void PhotonJetTree::resetEventState()
 // upstream and is recorded separately.
 // ============================================================================
 
-void PhotonJetTree::observeUpstreamEvent(const int run, const std::int64_t physicalEventSequence)
+void PhotonJetTree::observeUpstreamEvent(const std::int64_t physicalEventSequence)
 {
-  if(run>0&&m_config.source.run>0&&run!=m_config.source.run)
-    throw std::runtime_error("upstream event run disagrees with the bound source");
   if (m_upstreamPending)
   {
     const std::int64_t sourceEntry =
         m_config.source.firstEntry + static_cast<std::int64_t>(m_upstreamObservedEvents) - 1;
 
-    recordUpstreamRejectedEvent(
-        m_upstreamPendingRun,
-        m_upstreamPendingSequence,
-        sourceEntry);
+    recordUpstreamRejectedEvent(m_upstreamPendingRun, m_upstreamPendingSequence, sourceEntry);
   }
 
   m_upstreamPending = true;
   m_upstreamPendingRun = m_config.source.run;
   m_upstreamPendingSequence = physicalEventSequence;
   ++m_upstreamObservedEvents;
-  photonjet::production::WriteProgress(m_config,"event_loop",
-      static_cast<std::int64_t>(m_upstreamObservedEvents),m_config.source.firstEntry);
+  photonjet::production::WriteProgress(m_config, "event_loop", static_cast<std::int64_t>(m_upstreamObservedEvents),
+                                       m_config.source.firstEntry);
 }
 
 /**
@@ -374,10 +380,7 @@ void PhotonJetTree::finishUpstreamAccounting()
     const std::int64_t sourceEntry =
         m_config.source.firstEntry + static_cast<std::int64_t>(m_upstreamObservedEvents) - 1;
 
-    recordUpstreamRejectedEvent(
-        m_upstreamPendingRun,
-        m_upstreamPendingSequence,
-        sourceEntry);
+    recordUpstreamRejectedEvent(m_upstreamPendingRun, m_upstreamPendingSequence, sourceEntry);
 
     m_upstreamPending = false;
   }
@@ -392,8 +395,9 @@ void PhotonJetTree::finishUpstreamAccounting()
  * Bind the current event to its physical source coordinates.
  *
  * The configured source/run/segment are the production-level authority. The
- * EventHeader contributes the physical event sequence when available and must
- * agree with the configured run.
+ * EventHeader contributes the physical event sequence when available; its run
+ * was already matched to the conditions run by the exposure observer (for
+ * embedded simulation, the data run the simulation is embedded in).
  *
  * sourceEntry is the original source cursor used to build the stable event
  * identity. A configured resolver handles layouts where producer encounter
@@ -410,25 +414,12 @@ void PhotonJetTree::captureEventIdentity(PHCompositeNode* topNode)
   // Physical EventHeader
   // --------------------------------------------------------------------------
 
-  EventHeader* header =
-      findNode::getClass<EventHeader>(topNode, m_config.nodes.eventHeader);
+  EventHeader* header = findNode::getClass<EventHeader>(topNode, m_config.nodes.eventHeader);
 
   if (header && header->isValid())
   {
     m_event.physicalEventSequence = header->get_EvtSequence();
-    m_event.physicalEventSequenceValid = m_event.physicalEventSequence>=0;
-
-    /*
-     * The configured run is the production binding. When EventHeader also
-     * carries a physical run number, disagreement is a source-contract error.
-     */
-    const int headerRun = header->get_RunNumber();
-    if (headerRun > 0 && m_event.run > 0 && headerRun != m_event.run)
-    {
-      throw std::runtime_error(
-          "event header run " + std::to_string(headerRun) +
-          " disagrees with the configured run " + std::to_string(m_event.run));
-    }
+    m_event.physicalEventSequenceValid = m_event.physicalEventSequence >= 0;
   }
 
   // --------------------------------------------------------------------------
@@ -441,27 +432,23 @@ void PhotonJetTree::captureEventIdentity(PHCompositeNode* topNode)
 
   if (m_config.source.sourceEntryResolver)
   {
-    m_event.sourceEntry = m_config.source.sourceEntryResolver(
-        m_event.run,
-        m_event.physicalEventSequence,
-        m_event.physicalEventSequenceValid);
+    m_event.sourceEntry = m_config.source.sourceEntryResolver(m_event.run, m_event.physicalEventSequence,
+                                                              m_event.physicalEventSequenceValid);
   }
   else
   {
-    m_event.sourceEntry =
-        m_config.source.firstEntry + static_cast<std::int64_t>(
-            m_upstreamObservedEvents > 0
-                ? m_upstreamObservedEvents - 1
-                : m_event.producerEventOrdinal);
+    m_event.sourceEntry = m_config.source.firstEntry + static_cast<std::int64_t>(m_upstreamObservedEvents > 0
+                                                                                     ? m_upstreamObservedEvents - 1
+                                                                                     : m_event.producerEventOrdinal);
   }
 
-  m_event.sourceGlobalEntry = m_event.sourceEntry;
+  // Position in the maintained global source order, when the catalogue binds
+  // one; the PPG12 half-sample convention keys on it.
+  m_event.sourceGlobalEntry =
+      m_config.source.sourceGlobalEntryBegin >= 0 ? m_config.source.sourceGlobalEntryBegin + m_event.sourceEntry : -1;
 
-  m_event.eventId = photonjet::makeEventIdentity(
-      m_event.sourceId,
-      m_event.sourceEntry,
-      m_event.physicalEventSequence,
-      m_event.physicalEventSequenceValid);
+  m_event.eventId = photonjet::makeEventIdentity(m_event.sourceId, m_event.sourceEntry, m_event.physicalEventSequence,
+                                                 m_event.physicalEventSequenceValid);
 }
 
 
@@ -480,16 +467,15 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
   m_event.triggerPacketValid = false;
   m_event.triggerDecisionsAvailable = 0;
   m_event.triggerScalerSnapshotId = -1;
-  m_event.triggerScalerDiscontinuityFlags=8U|(!m_event.physicalEventSequenceValid?16U:0U);
+  m_event.triggerScalerDiscontinuityFlags = 8U | (!m_event.physicalEventSequenceValid ? 16U : 0U);
 
   if (isSimulation())
   {
-    m_event.triggerDecisionState=5;
+    m_event.triggerDecisionState = 5;
     return;
   }
 
-  Gl1Packet* packet =
-      findNode::getClass<Gl1Packet>(topNode, m_config.nodes.gl1Packet);
+  Gl1Packet* packet = findNode::getClass<Gl1Packet>(topNode, m_config.nodes.gl1Packet);
 
   if (!packet)
   {
@@ -507,15 +493,17 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
 
   if (version == 0)
   {
-    m_event.triggerDecisionState=2;
+    m_event.triggerDecisionState = 2;
     return;
   }
 
   m_event.triggerPacketValid = true;
   m_event.triggerPacketStatus = packet->getStatus();
-  m_event.triggerDecisionState=m_event.triggerPacketStatus?4:version>=2?0:2;
+  m_event.triggerDecisionState = m_event.triggerPacketStatus ? 4 : version >= 2 ? 0 : 2;
   m_event.triggerPacketNumber = packet->getPacketNumber();
-  m_event.triggerBunchNumber = packet->getBunchNumber();
+  // The stored gl1_bco and snapshot endpoints are the full beam clock.
+  // getBunchNumber() is the cycling bunch slot, not the monotonic GL1 BCO.
+  m_event.triggerBunchNumber = packet->getBCO();
 
   /*
    * getTriggerVector() is the legacy accessor. Its availability is recorded
@@ -528,8 +516,7 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
   {
     m_event.triggerLiveBits = packet->getLiveVector();
     m_event.triggerScaledBits = packet->getScaledVector();
-    m_event.triggerDecisionsAvailable |=
-        kLiveWordAvailable | kScaledWordAvailable;
+    m_event.triggerDecisionsAvailable |= kLiveWordAvailable | kScaledWordAvailable;
   }
 
   // --------------------------------------------------------------------------
@@ -540,36 +527,32 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
   const ScalerArray live = readScalers(packet, version, 1);
   const ScalerArray scaled = readScalers(packet, version, 2);
 
-  const std::uint64_t bunch = packet->getBunchNumber();
-  const auto unknownBunch=std::numeric_limits<std::uint64_t>::max();
-  m_event.triggerScalerDiscontinuityFlags=(bunch==unknownBunch?8U:0U)|
-      (!m_event.physicalEventSequenceValid?16U:0U);
-  if(!m_triggerScalerSnapshots.empty()) {
-    const auto& previous=m_triggerScalerSnapshots.back();
-    if(previous.bunchEnd!=unknownBunch&&bunch!=unknownBunch&&bunch<previous.bunchEnd)
-      m_event.triggerScalerDiscontinuityFlags|=2U;
-    if(previous.physicalEventEnd>=0&&m_event.physicalEventSequenceValid&&
-        m_event.physicalEventSequence<=previous.physicalEventEnd)
-      m_event.triggerScalerDiscontinuityFlags|=4U;
-    if(previous.valid&&m_event.triggerPacketStatus==0&&
-        (anyCounterDecreased(previous.raw,raw)||anyCounterDecreased(previous.live,live)||
-         anyCounterDecreased(previous.scaled,scaled)))m_event.triggerScalerDiscontinuityFlags|=1U;
+  const std::uint64_t bunch = packet->getBCO();
+  const auto unknownBunch = std::numeric_limits<std::uint64_t>::max();
+  m_event.triggerScalerDiscontinuityFlags =
+      (bunch == unknownBunch ? 8U : 0U) | (!m_event.physicalEventSequenceValid ? 16U : 0U);
+  if (!m_triggerScalerSnapshots.empty())
+  {
+    const auto& previous = m_triggerScalerSnapshots.back();
+    if (previous.bunchEnd != unknownBunch && bunch != unknownBunch && bunch < previous.bunchEnd)
+      m_event.triggerScalerDiscontinuityFlags |= 2U;
+    if (previous.physicalEventEnd >= 0 && m_event.physicalEventSequenceValid &&
+        m_event.physicalEventSequence <= previous.physicalEventEnd)
+      m_event.triggerScalerDiscontinuityFlags |= 4U;
+    if (previous.valid && m_event.triggerPacketStatus == 0 &&
+        (anyCounterDecreased(previous.raw, raw) || anyCounterDecreased(previous.live, live) ||
+         anyCounterDecreased(previous.scaled, scaled)))
+      m_event.triggerScalerDiscontinuityFlags |= 1U;
   }
 
   bool newSnapshot = m_triggerScalerSnapshots.empty();
 
   if (!newSnapshot)
   {
-    const TriggerScalerSnapshotRecord& previous =
-        m_triggerScalerSnapshots.back();
+    const TriggerScalerSnapshotRecord& previous = m_triggerScalerSnapshots.back();
 
-    newSnapshot =
-        previous.raw != raw ||
-        previous.live != live ||
-        previous.scaled != scaled ||
-        !previous.valid ||
-        packet->getStatus() != 0 ||
-        bunch < previous.bunchEnd;
+    newSnapshot = previous.raw != raw || previous.live != live || previous.scaled != scaled || !previous.valid ||
+                  packet->getStatus() != 0 || bunch < previous.bunchEnd;
   }
 
   if (newSnapshot)
@@ -577,8 +560,7 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
     TriggerScalerSnapshotRecord snapshot;
 
     snapshot.sourceId = m_source.sourceId;
-    snapshot.snapshotId =
-        static_cast<std::int64_t>(m_triggerScalerSnapshots.size());
+    snapshot.snapshotId = static_cast<std::int64_t>(m_triggerScalerSnapshots.size());
 
     snapshot.bunchStart = bunch;
     snapshot.bunchEnd = bunch;
@@ -586,7 +568,7 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
     snapshot.sourceEntryStart = m_event.sourceEntry;
     snapshot.sourceEntryEnd = m_event.sourceEntry;
     snapshot.observedEvents = 1;
-    snapshot.physicalEventEnd=m_event.physicalEventSequenceValid?m_event.physicalEventSequence:-1;
+    snapshot.physicalEventEnd = m_event.physicalEventSequenceValid ? m_event.physicalEventSequence : -1;
 
     snapshot.raw = raw;
     snapshot.live = live;
@@ -596,31 +578,25 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
 
     if (!m_triggerScalerSnapshots.empty())
     {
-      const TriggerScalerSnapshotRecord& previous =
-          m_triggerScalerSnapshots.back();
+      const TriggerScalerSnapshotRecord& previous = m_triggerScalerSnapshots.back();
 
-      snapshot.discontinuity =
-          anyCounterDecreased(previous.raw, raw) ||
-          anyCounterDecreased(previous.live, live) ||
-          anyCounterDecreased(previous.scaled, scaled) ||
-          bunch < previous.bunchEnd;
+      snapshot.discontinuity = anyCounterDecreased(previous.raw, raw) || anyCounterDecreased(previous.live, live) ||
+                               anyCounterDecreased(previous.scaled, scaled) || bunch < previous.bunchEnd;
     }
 
     m_triggerScalerSnapshots.push_back(snapshot);
   }
   else
   {
-    TriggerScalerSnapshotRecord& snapshot =
-        m_triggerScalerSnapshots.back();
+    TriggerScalerSnapshotRecord& snapshot = m_triggerScalerSnapshots.back();
 
     snapshot.bunchEnd = bunch;
     snapshot.sourceEntryEnd = m_event.sourceEntry;
-    snapshot.physicalEventEnd=m_event.physicalEventSequenceValid?m_event.physicalEventSequence:-1;
+    snapshot.physicalEventEnd = m_event.physicalEventSequenceValid ? m_event.physicalEventSequence : -1;
     ++snapshot.observedEvents;
   }
 
-  m_event.triggerScalerSnapshotId =
-      m_triggerScalerSnapshots.back().snapshotId;
+  m_event.triggerScalerSnapshotId = m_triggerScalerSnapshots.back().snapshotId;
 }
 
 
@@ -638,11 +614,9 @@ void PhotonJetTree::captureTriggerInformation(PHCompositeNode* topNode)
  */
 void PhotonJetTree::captureTriggerRunInformation(PHCompositeNode* topNode)
 {
-  auto* info =
-      findNode::getClass<TriggerRunInfo>(topNode, "TriggerRunInfo");
+  auto* info = findNode::getClass<TriggerRunInfo>(topNode, "TriggerRunInfo");
 
-  const bool supported =
-      info && std::string(info->ClassName()) == "TriggerRunInfov1";
+  const bool supported = info && std::string(info->ClassName()) == "TriggerRunInfov1";
 
   for (int bit = 0; bit < kTriggerBits; ++bit)
   {
@@ -676,63 +650,50 @@ void PhotonJetTree::captureTriggerRunInformation(PHCompositeNode* topNode)
 // ============================================================================
 
 /**
- * Capture the reconstructed event vertex used by downstream reconstruction.
+ * Capture the reconstructed event vertex z of the established productions.
  *
- * The MBD vertex is preferred. GlobalVertexMap provides the fallback. Truth
- * information is deliberately never substituted for a missing reconstructed
- * vertex.
+ *   pp DATA  the first MbdVertexMap vertex (the PPG12 data convention)
+ *   pp SIM   the last finite MBD vertex of the first GlobalVertex (PPG12 SIM)
+ *   Au+Au    the first MbdVertexMap vertex, else the first GlobalVertex
+ *
+ * A missing source leaves the vertex invalid (NaN); truth is never
+ * substituted. The value is the stored binary32 coordinate.
  */
 void PhotonJetTree::captureVertexInformation(PHCompositeNode* topNode)
 {
   m_event.recoVertexValid = false;
   m_event.recoVertexSource = 0;
 
-  if (auto* mbdVertices =
-          findNode::getClass<MbdVertexMap>(
-              topNode,
-              m_config.nodes.mbdVertexMap);
-      mbdVertices && !mbdVertices->empty())
-  {
-    if (const MbdVertex* vertex = mbdVertices->begin()->second;
-        vertex && finiteValue(vertex->get_z()))
-    {
-      m_event.recoVertexX = 0.0;
-      m_event.recoVertexY = 0.0;
-      m_event.recoVertexZ = vertex->get_z();
-      m_event.recoVertexValid = true;
-      m_event.recoVertexSource = 1;
+  auto* mbdVertices = findNode::getClass<MbdVertexMap>(topNode, m_config.nodes.mbdVertexMap);
+  auto* globalVertices = findNode::getClass<GlobalVertexMap>(topNode, m_config.nodes.globalVertexMap);
+  const GlobalVertex* global = globalVertices && !globalVertices->empty() ? globalVertices->begin()->second : nullptr;
 
-      return;
-    }
+  auto accept = [&](const double z, const std::int32_t source)
+  {
+    if (!finiteValue(z)) return false;
+    m_event.recoVertexX = global ? global->get_x() : kNaN;
+    m_event.recoVertexY = global ? global->get_y() : kNaN;
+    m_event.recoVertexZ = static_cast<float>(z);
+    m_event.recoVertexValid = true;
+    m_event.recoVertexSource = source;
+    return true;
+  };
+
+  if (isPP() && isSimulation())
+  {
+    double z = kNaN;
+    if (global)
+      for (auto it = global->find_vertexes(GlobalVertex::MBD); it != global->end_vertexes(); ++it)
+        if (it->first == GlobalVertex::MBD)
+          for (const auto* vertex : it->second)
+            if (vertex && finiteValue(vertex->get_z())) z = vertex->get_z();
+    accept(z, 2);
+    return;
   }
 
-  if (auto* vertices =
-          findNode::getClass<GlobalVertexMap>(
-              topNode,
-              m_config.nodes.globalVertexMap);
-      vertices && !vertices->empty())
-  {
-    for (auto it = vertices->begin(); it != vertices->end(); ++it)
-    {
-      const GlobalVertex* vertex = it->second;
-
-      if (!vertex ||
-          !finiteValue(vertex->get_x()) ||
-          !finiteValue(vertex->get_y()) ||
-          !finiteValue(vertex->get_z()))
-      {
-        continue;
-      }
-
-      m_event.recoVertexX = vertex->get_x();
-      m_event.recoVertexY = vertex->get_y();
-      m_event.recoVertexZ = vertex->get_z();
-      m_event.recoVertexValid = true;
-      m_event.recoVertexSource = 2;
-
-      return;
-    }
-  }
+  const MbdVertex* mbd = mbdVertices && !mbdVertices->empty() ? mbdVertices->begin()->second : nullptr;
+  if (mbd && accept(mbd->get_z(), 1)) return;
+  if (isAuAu() && global) accept(global->get_z(), 2);
 }
 
 
@@ -749,11 +710,7 @@ void PhotonJetTree::captureMbdInformation(PHCompositeNode* topNode)
   m_event.mbdValid = false;
   m_event.mbdPmtAvailable = TriState::Unknown;
 
-  if (MbdOut* out =
-          findNode::getClass<MbdOut>(
-              topNode,
-              m_config.nodes.mbdOut);
-      out)
+  if (MbdOut* out = findNode::getClass<MbdOut>(topNode, m_config.nodes.mbdOut); out)
   {
     m_event.mbdAvailable = true;
     m_event.mbdNativeValid = out->isValid();
@@ -766,25 +723,12 @@ void PhotonJetTree::captureMbdInformation(PHCompositeNode* topNode)
     m_event.mbdSouthCharge = out->get_q(0);
     m_event.mbdNorthCharge = out->get_q(1);
 
-    if (finiteValue(m_event.mbdSouthCharge) &&
-        finiteValue(m_event.mbdNorthCharge))
-    {
-      m_event.mbdTotalCharge =
-          m_event.mbdSouthCharge + m_event.mbdNorthCharge;
-    }
-
-    m_event.mbdValid =
-        finiteValue(m_event.mbdT0Ns) &&
-        finiteValue(m_event.mbdSouthTimeNs) &&
-        finiteValue(m_event.mbdNorthTimeNs) &&
-        finiteValue(m_event.mbdSouthCharge) &&
-        finiteValue(m_event.mbdNorthCharge);
+    m_event.mbdValid = finiteValue(m_event.mbdT0Ns) && finiteValue(m_event.mbdSouthTimeNs) &&
+                       finiteValue(m_event.mbdNorthTimeNs) && finiteValue(m_event.mbdSouthCharge) &&
+                       finiteValue(m_event.mbdNorthCharge);
   }
 
-  MbdPmtContainer* pmts =
-      findNode::getClass<MbdPmtContainer>(
-          topNode,
-          m_config.nodes.mbdPmts);
+  MbdPmtContainer* pmts = findNode::getClass<MbdPmtContainer>(topNode, m_config.nodes.mbdPmts);
 
   if (!pmts && isAuAu() && !m_config.nodes.mbdPmtsFallback.empty())
     pmts = findNode::getClass<MbdPmtContainer>(topNode, m_config.nodes.mbdPmtsFallback);
@@ -806,16 +750,19 @@ void PhotonJetTree::captureMbdInformation(PHCompositeNode* topNode)
 
   m_event.mbdPmtAvailable = TriState::True;
 
-  MbdGeom* geometry =
-      findNode::getClass<MbdGeom>(
-          topNode,
-          m_config.nodes.mbdGeometry);
+  MbdGeom* geometry = findNode::getClass<MbdGeom>(topNode, m_config.nodes.mbdGeometry);
 
   m_event.mbdPmtId.reserve(count);
   m_event.mbdPmtArm.reserve(count);
   m_event.mbdPmtCharge.reserve(count);
   m_event.mbdPmtTimeNs.reserve(count);
   m_event.mbdPmtValid.reserve(count);
+
+  // The established event charge: the sequential binary64 sum of the finite
+  // positive calibrated PMT charges, in channel order, with no time or
+  // centrality threshold. A complete array has all 128 channels valid.
+  double positiveCharge = 0.0;
+  m_event.mbdPmtArrayComplete = count == 128;
 
   for (int channel = 0; channel < count; ++channel)
   {
@@ -834,13 +781,12 @@ void PhotonJetTree::captureMbdInformation(PHCompositeNode* topNode)
     m_event.mbdPmtCharge.push_back(charge);  // zero and negative kept
     m_event.mbdPmtTimeNs.push_back(time);
 
-    m_event.mbdPmtValid.push_back(
-        hit &&
-        hit->get_pmt() == channel &&
-        finiteValue(charge)
-            ? 1
-            : 0);
+    const bool valid = hit && hit->get_pmt() == channel && finiteValue(charge);
+    m_event.mbdPmtValid.push_back(valid ? 1 : 0);
+    m_event.mbdPmtArrayComplete = m_event.mbdPmtArrayComplete && valid;
+    if (finiteValue(charge) && charge > 0.0) positiveCharge += charge;
   }
+  m_event.mbdTotalCharge = positiveCharge;
 }
 
 
@@ -859,8 +805,8 @@ void PhotonJetTree::captureMbdInformation(PHCompositeNode* topNode)
 void PhotonJetTree::captureCentrality(PHCompositeNode* topNode)
 {
   m_event.centralityApplicable = isAuAu();
-  captureCentralityInputs(m_event,
-      findNode::getClass<MbdPmtContainer>(topNode, m_config.nodes.mbdPmts),
+  captureCentralityInputs(
+      m_event, findNode::getClass<MbdPmtContainer>(topNode, m_config.nodes.mbdPmts),
       findNode::getClass<MbdOut>(topNode, m_config.nodes.mbdOut),
       isAuAu() ? findNode::getClass<MinimumBiasInfo>(topNode, m_config.nodes.minimumBiasInfo) : nullptr);
 
@@ -869,31 +815,24 @@ void PhotonJetTree::captureCentrality(PHCompositeNode* topNode)
     return;
   }
 
-  if (isEmbeddedSimulation())
-  {
-    m_event.embeddedMinimumBias = m_event.minimumBiasDecision;
-  }
+  auto* centrality = findNode::getClass<CentralityInfo>(topNode, m_config.nodes.centralityInfo);
 
-  auto* centrality =
-      findNode::getClass<CentralityInfo>(
-          topNode,
-          m_config.nodes.centralityInfo);
-
-  if (centrality)
-  {
-    const double bin = centrality->get_centrality_bin(CentralityInfo::PROP::mbd_NS);
-    if (finiteValue(bin) && bin >= 0.0 && bin <= std::numeric_limits<std::int32_t>::max())
-      m_event.analysisCentrality = static_cast<std::int32_t>(bin);
-  }
-
+  // CentralityReco fills CentralityInfo only for minimum-bias events and
+  // CentralityInfov2 never resets it: in DATA the node describes this event
+  // only when the minimum-bias classifier passed. Embedded simulation carries
+  // its input sample's per-event centrality.
   constexpr auto property = CentralityInfo::PROP::mbd_NS;
-  const bool writtenForThisEvent =
-      isEmbeddedSimulation() ||
-      m_event.minimumBiasDecision == TriState::True;
-  // CentralityInfov2 does not reset its payload on every event. A rejected
-  // DATA event must not inherit a previous event's native centrality witness.
+  const bool writtenForThisEvent = isEmbeddedSimulation() || m_event.minimumBiasDecision == TriState::True;
+
+  if (centrality && writtenForThisEvent)
+  {
+    const double bin = centrality->get_centrality_bin(property);
+    if (finiteValue(bin) && bin >= 0.0 && bin <= 100.0) m_event.analysisCentrality = static_cast<std::int32_t>(bin);
+  }
+
   if (!writtenForThisEvent || !centrality || !centrality->has_centile(property) ||
-      !centrality->has_centrality_bin(property)) return;
+      !centrality->has_centrality_bin(property))
+    return;
   const double centile = centrality->get_centile(property);
   const auto bin = centrality->get_centrality_bin(property);
   m_event.centralityNativeCentile = centile;
@@ -918,34 +857,26 @@ void PhotonJetTree::captureCentrality(PHCompositeNode* topNode)
 
 void PhotonJetTree::captureCalorimeterInformation(PHCompositeNode* topNode)
 {
-  auto* rawClusters=findNode::getClass<RawClusterContainer>(topNode,m_config.photon.rawClusterNode);
-  if(!rawClusters)rawClusters=findNode::getClass<RawClusterContainer>(topNode,m_config.photon.photonNode);
-  if(rawClusters) {
-    m_event.maximumRawClusterEnergy=0.;
-    for(const auto& item:rawClusters->getClustersMap())if(item.second) {
-      const double energy=item.second->get_energy();
-      if(std::isfinite(energy)&&energy>=1.)
-        m_event.maximumRawClusterEnergy=std::max(m_event.maximumRawClusterEnergy,energy);
-    }
+  auto* rawClusters = findNode::getClass<RawClusterContainer>(topNode, m_config.photon.rawClusterNode);
+  if (!rawClusters) rawClusters = findNode::getClass<RawClusterContainer>(topNode, m_config.photon.photonNode);
+  if (rawClusters)
+  {
+    m_event.maximumRawClusterEnergy = 0.;
+    for (const auto& item : rawClusters->getClustersMap())
+      if (item.second)
+      {
+        const double energy = item.second->get_energy();
+        if (std::isfinite(energy) && energy >= 1.)
+          m_event.maximumRawClusterEnergy = std::max(m_event.maximumRawClusterEnergy, energy);
+      }
   }
-  const bool requireGood =
-      m_config.calorimeter.requireGoodTowers;
+  const bool requireGood = m_config.calorimeter.requireGoodTowers;
 
-  const std::array<CaloSum, 3> sums = {
-      sumCalorimeter(
-          topNode,
-          m_config.nodes.cemcTowers,
-          requireGood),
+  const std::array<CaloSum, 3> sums = {sumCalorimeter(topNode, m_config.nodes.cemcTowers, requireGood),
 
-      sumCalorimeter(
-          topNode,
-          m_config.nodes.ihcalTowers,
-          requireGood),
+                                       sumCalorimeter(topNode, m_config.nodes.ihcalTowers, requireGood),
 
-      sumCalorimeter(
-          topNode,
-          m_config.nodes.ohcalTowers,
-          requireGood)};
+                                       sumCalorimeter(topNode, m_config.nodes.ohcalTowers, requireGood)};
 
   m_event.caloRequiredGoodTowers = requireGood;
 
@@ -970,7 +901,8 @@ void PhotonJetTree::captureCalorimeterInformation(PHCompositeNode* topNode)
       m_event.caloAvailableMask |= 1U << layer;
       total += sum.energy;
     }
-    else allPresent=false;
+    else
+      allPresent = false;
 
     if (sum.valid)
     {
@@ -978,17 +910,13 @@ void PhotonJetTree::captureCalorimeterInformation(PHCompositeNode* topNode)
     }
   }
 
-  m_event.cemcEnergy =
-      sums[0].present ? static_cast<float>(sums[0].energy) : kNaN;
+  m_event.cemcEnergy = sums[0].present ? static_cast<float>(sums[0].energy) : kNaN;
 
-  m_event.ihcalEnergy =
-      sums[1].present ? static_cast<float>(sums[1].energy) : kNaN;
+  m_event.ihcalEnergy = sums[1].present ? static_cast<float>(sums[1].energy) : kNaN;
 
-  m_event.ohcalEnergy =
-      sums[2].present ? static_cast<float>(sums[2].energy) : kNaN;
+  m_event.ohcalEnergy = sums[2].present ? static_cast<float>(sums[2].energy) : kNaN;
 
-  m_event.totalCaloEnergy =
-      allPresent ? static_cast<float>(total) : kNaN;
+  m_event.totalCaloEnergy = allPresent ? static_cast<float>(total) : kNaN;
 
   if (isAuAu())
   {
@@ -1000,20 +928,15 @@ void PhotonJetTree::captureCalorimeterInformation(PHCompositeNode* topNode)
      * Historical source anchor:
      *   RecoilJets_AuAu.cc:7712-7735
      */
-    auto* background =
-        findNode::getClass<TowerBackground>(
-            topNode,
-            "TowerInfoBackground_Sub2");
+    auto* background = findNode::getClass<TowerBackground>(topNode, "TowerInfoBackground_Sub2");
 
     if (!background)
     {
-      throw std::runtime_error(
-          "required AuAu TowerInfoBackground_Sub2 is missing");
+      throw std::runtime_error("required AuAu TowerInfoBackground_Sub2 is missing");
     }
 
     m_event.jetBackgroundState = CaptureState::Complete;
-    m_event.jetBackgroundFlowMode =
-        m_config.calorimeter.backgroundFlowMode;
+    m_event.jetBackgroundFlowMode = m_config.calorimeter.backgroundFlowMode;
 
     m_event.jetBackgroundV2 = background->get_v2();
     m_event.jetBackgroundPsi2 = background->get_Psi2();
@@ -1022,17 +945,230 @@ void PhotonJetTree::captureCalorimeterInformation(PHCompositeNode* topNode)
     m_event.jetBackgroundUEIhcal = background->get_UE(1);
     m_event.jetBackgroundUEOhcal = background->get_UE(2);
 
-    m_event.jetBackgroundNStrips =
-        background->get_nStripsUsedForFlow();
+    m_event.jetBackgroundNStrips = background->get_nStripsUsedForFlow();
 
-    m_event.jetBackgroundNTowers =
-        background->get_nTowersUsedForBkg();
+    m_event.jetBackgroundNTowers = background->get_nTowersUsedForBkg();
 
-    m_event.jetBackgroundFlowFailure =
-        background->get_flow_failure_flag()
-            ? TriState::True
-            : TriState::False;
+    m_event.jetBackgroundFlowFailure = background->get_flow_failure_flag() ? TriState::True : TriState::False;
   }
+}
+
+
+// ============================================================================
+// Historical event classification (pp)
+//
+// The established producer classified every event before its analysis fills:
+// a mandatory reconstructed vertex, the active trigger streams, the PPG12
+// period run filter and the |vz| cut. The tree records the outcome as
+// evt_terminal_status; the PPG12 vertex/period audit occurrences it logged
+// come from PPG12.cc, in their original order. It removes nothing.
+// ============================================================================
+
+/**
+ * True when exactly one GL1 bit carries the named trigger in the run table
+ * and that bit's scaled decision fired in a valid packet.
+ */
+bool PhotonJetTree::scaledTriggerFired(const std::string& name) const
+{
+  if (name.empty() || name == "unknown" || m_event.triggerDecisionState != 0) return false;
+  int bit = -1;
+  for (const auto& row : m_triggerRunInfo)
+  {
+    if (row.state != 0 && row.state != 3) return false;  // no supported run table
+    if (row.name != name) continue;
+    if (bit >= 0) return false;  // an ambiguous name is never a decision
+    bit = row.bit;
+  }
+  return bit >= 0 && ((m_event.triggerScaledBits >> bit) & 1U);
+}
+
+void PhotonJetTree::classifyEvent()
+{
+  const photonjet::EventClassificationConfig& c = m_config.classification;
+  m_event.terminalStatus = 0;
+  m_event.activeTriggers.clear();
+  m_event.nodesReady = m_event.recoVertexValid;
+  if (!c.enabled || !m_event.nodesReady) return;
+  if (isAuAu())
+  {
+    classifyAuAuEvent();
+    return;
+  }
+
+  const bool outsideVertexCut = c.useVertexCut && std::fabs(m_event.recoVertexZ) >= c.vertexCutCm;
+
+  if (isSimulation())
+  {
+    if (!recordPPG12SampleOwnership(true))
+    {
+      m_event.terminalStatus = 4;
+      return;
+    }
+    m_event.activeTriggers.push_back("SIM");
+    recordPPG12VertexAudit(true);
+    if (outsideVertexCut)
+    {
+      m_event.terminalStatus = 2;
+      return;
+    }
+    recordPPG12VertexAudit(false);
+    recordPPG12SampleOwnership(false);
+    return;
+  }
+
+  for (const auto& [name, stream] : c.triggers)
+    if (scaledTriggerFired(name)) m_event.activeTriggers.push_back(stream);
+  // The PPG12 scaled-bit audit stream reads the packet's scaled word as is.
+  if (!c.scaledBitStream.empty() && m_event.triggerPacketVersion >= 2 &&
+      ((m_event.triggerScaledBits >> c.scaledBit) & 1U) &&
+      std::find(m_event.activeTriggers.begin(), m_event.activeTriggers.end(), c.scaledBitStream) ==
+          m_event.activeTriggers.end())
+    m_event.activeTriggers.push_back(c.scaledBitStream);
+  if (m_event.activeTriggers.empty())
+  {
+    m_event.terminalStatus = 1;
+    return;
+  }
+
+  recordPPG12VertexAudit(true);
+  if (c.filterDataByPeriod &&
+      !(!c.period.key.empty() && m_event.run >= c.period.runMin && m_event.run < c.period.runMaxExclusive))
+  {
+    m_event.terminalStatus = 3;
+    return;
+  }
+  if (outsideVertexCut)
+  {
+    m_event.terminalStatus = 2;
+    return;
+  }
+  recordPPG12VertexAudit(false);
+}
+
+
+// ============================================================================
+// Historical event classification (Au+Au)
+//
+// The established Au+Au producer's gates, in its order. DATA: a configured
+// scaled trigger, the minimum-bias classifier, |vz|. Embedded simulation:
+// |vz|, then generator-slice stitching (logged as the STITCH occurrence).
+// Both: the truncated centrality inside the analysis range. An accepted
+// embedded event then carries the truth-isolation audit and the truth-photon
+// misses (Truth.cc).
+// ============================================================================
+
+int photonjet::production::EmbeddedPhotonSampleCode(std::string sample)
+{
+  std::transform(sample.begin(), sample.end(), sample.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  for (const int code : {12, 20})
+    for (const std::string& prefix : {"photonjet", "embeddedphoton", "photon"})
+      if (sample.find(prefix + std::to_string(code)) != std::string::npos) return code;
+  return 0;
+}
+
+// Narrower than the photon names: "PhotonJet12" is not an inclusive jet sample.
+int photonjet::production::EmbeddedJetSampleCode(std::string sample)
+{
+  std::transform(sample.begin(), sample.end(), sample.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (sample.find("photon") != std::string::npos) return 0;
+  for (const int code : {12, 20, 30, 40})
+    if (sample.find("embeddedjet" + std::to_string(code)) != std::string::npos) return code;
+  return 0;
+}
+
+void PhotonJetTree::classifyAuAuEvent()
+{
+  const photonjet::EventClassificationConfig& c = m_config.classification;
+  const bool outsideVertexCut = c.useVertexCut && std::fabs(m_event.recoVertexZ) >= c.vertexCutCm;
+
+  if (isSimulation())
+  {
+    m_event.activeTriggers.push_back("SIM");
+    if (outsideVertexCut)
+    {
+      m_event.terminalStatus = 2;
+      return;
+    }
+    if (!embeddedSampleOwnsEvent())
+    {
+      m_event.terminalStatus = 4;
+      return;
+    }
+  }
+  else
+  {
+    for (const auto& [bit, stream] : c.scaledTriggers)
+      if ((m_event.triggerScaledBits >> bit) & 1U) m_event.activeTriggers.push_back(stream);
+    if (m_event.activeTriggers.empty())
+    {
+      m_event.terminalStatus = 1;
+      return;
+    }
+    if (c.requireMinimumBias && m_event.minimumBiasDecision != TriState::True)
+    {
+      m_event.terminalStatus = 3;
+      return;
+    }
+    if (outsideVertexCut)
+    {
+      m_event.terminalStatus = 2;
+      return;
+    }
+  }
+
+  if (m_event.analysisCentrality < c.centralityMinPercent || m_event.analysisCentrality >= c.centralityMaxPercent)
+  {
+    m_event.terminalStatus = 5;
+    return;
+  }
+  if (isSimulation())
+  {
+    recordEmbeddedTruthIsolationAudit();
+    recordEmbeddedTruthMisses();
+  }
+}
+
+// The embedded generator slice owns the event. Photon samples: the
+// generator-filter photon in [12, 20) or above 20 GeV (logged as the STITCH
+// occurrence; an unknown sample stitches nothing). Jet samples: the maximum
+// R = 0.4 truth-jet pT inside the sample's configured window.
+bool PhotonJetTree::embeddedSampleOwnsEvent()
+{
+  if (isPhotonJetSimulation())
+  {
+    if (!m_event.embeddedFilterPhotonCaptured)
+      throw std::runtime_error("embedded generator-filter photon capture did not run");
+    EmbeddedDiagnosticRecord row;
+    row.kind = "STITCH";
+    row.sampleCode = photonjet::production::EmbeddedPhotonSampleCode(m_config.source.sample);
+    row.stitchPhotonPt = m_event.embeddedFilterPhotonPt;
+    const double pt = row.stitchPhotonPt;
+    bool owned = true;
+    row.stitchDecision = 4;
+    if (row.sampleCode == 12 || row.sampleCode == 20)
+    {
+      owned = std::isfinite(pt) && pt >= row.sampleCode && (row.sampleCode == 20 || pt < 20.0);
+      row.stitchDecision = owned ? 1 : 2;
+      if (!std::isfinite(pt) || pt <= 0.0)
+      {
+        owned = false;
+        row.stitchDecision = 3;
+      }
+    }
+    m_event.embeddedDiagnostics.push_back(row);
+    return owned;
+  }
+
+  const auto& windows = m_config.classification.embeddedJetWindows;
+  const auto window = windows.find(photonjet::production::EmbeddedJetSampleCode(m_config.source.sample));
+  if (window == windows.end()) return true;
+  double maxPt = -1.0;
+  for (const TruthJetRecord& jet : m_truthJets)
+    if (std::fabs(jet.radius - 0.4) < 1e-6 && std::isfinite(jet.pt) && jet.pt > 0.0 && jet.pt > maxPt) maxPt = jet.pt;
+  const auto [low, high] = window->second;
+  return maxPt > 0.0 && maxPt >= low && maxPt < high;
 }
 
 
@@ -1062,36 +1198,22 @@ void PhotonJetTree::loadWeightInputs()
 
   TDirectory::TContext context;
 
-  std::unique_ptr<TFile> file(
-      TFile::Open(
-          weights.vertexReweightFile.c_str(),
-          "READ"));
+  std::unique_ptr<TFile> file(TFile::Open(weights.vertexReweightFile.c_str(), "READ"));
 
   if (!file || file->IsZombie())
   {
-    throw std::runtime_error(
-        "cannot open the vertex-reweighting file " +
-        weights.vertexReweightFile);
+    throw std::runtime_error("cannot open the vertex-reweighting file " + weights.vertexReweightFile);
   }
 
-  auto* histogram =
-      dynamic_cast<TH1*>(
-          file->Get(
-              weights.vertexReweightHistogram.c_str()));
+  auto* histogram = dynamic_cast<TH1*>(file->Get(weights.vertexReweightHistogram.c_str()));
 
   if (!histogram)
   {
-    throw std::runtime_error(
-        "vertex-reweighting histogram '" +
-        weights.vertexReweightHistogram +
-        "' is absent from " +
-        weights.vertexReweightFile);
+    throw std::runtime_error("vertex-reweighting histogram '" + weights.vertexReweightHistogram + "' is absent from " +
+                             weights.vertexReweightFile);
   }
 
-  m_vertexReweight =
-      dynamic_cast<TH1*>(
-          histogram->Clone(
-              "photonjet_vertex_reweight"));
+  m_vertexReweight = dynamic_cast<TH1*>(histogram->Clone("photonjet_vertex_reweight"));
 
   m_vertexReweight->SetDirectory(nullptr);
 }
@@ -1111,13 +1233,11 @@ void PhotonJetTree::captureEventWeights(PHCompositeNode* /*topNode*/)
   final.eventId = m_event.eventId;
   final.componentType = "final";
   final.applicationCount = 1;
+  // Unit factors unless the pp simulation PPG12 weight below replaces them.
+  final.sliceWeight = final.crossSectionWeight = 1.0;
   final.vertexWeight = 1.0;
+  final.siDiWeight = final.periodWeight = 1.0;
   final.exposureWeight = 1.0;
-  if (m_config.system == CollisionSystem::PP)
-  {
-    final.sliceWeight = final.crossSectionWeight = 1.0;
-    final.siDiWeight = final.periodWeight = 1.0;
-  }
 
   if (isData())
   {
@@ -1130,6 +1250,25 @@ void PhotonJetTree::captureEventWeights(PHCompositeNode* /*topNode*/)
     m_event.eventWeightValid = true;
 
     return;
+  }
+
+  // pp simulation carries the PPG12 weight only for an event the established
+  // producer weighted: owned by its sample, accepted by the classification
+  // and with its truth vertices. Every other event keeps weight 1 with the
+  // PPG12 weight inactive.
+  if (m_config.weights.ppg12Nominal)
+  {
+    const auto present = [](const double z) { return finiteValue(z) && z > -9000.0; };
+    if (!m_event.ppg12Owned || m_event.terminalStatus != 0 || !present(m_event.truthHardVertexZ) ||
+        (m_config.weights.doubleInteraction && !present(m_event.truthMinimumBiasVertexZ)))
+    {
+      final.finalWeight = 1.0;
+      final.valid = true;
+      m_weightComponents.push_back(final);
+      m_event.eventWeight = 1.0;
+      m_event.eventWeightValid = true;
+      return;
+    }
   }
 
   double product = 1.0;
@@ -1147,11 +1286,11 @@ void PhotonJetTree::captureEventWeights(PHCompositeNode* /*topNode*/)
     {
       // PPG12 interpolates the truth-vertex histogram; a bin lookup changes
       // the reference weights. pp DI has independent hard and MB vertices.
-      // Embedded AuAu needs its own qualified one-collision truth-vertex fit.
-      auto lookup = [&](double z) {
+      // Au+Au is never reweighted here; its vertex weight is applied downstream.
+      auto lookup = [&](double z)
+      {
         if (!finiteValue(z) || z <= -9000.0) return kNaN;
-        if (z < m_vertexReweight->GetXaxis()->GetXmin() ||
-            z > m_vertexReweight->GetXaxis()->GetXmax()) return 0.0;
+        if (z < m_vertexReweight->GetXaxis()->GetXmin() || z > m_vertexReweight->GetXaxis()->GetXmax()) return 0.0;
         const double w = m_vertexReweight->Interpolate(z);
         return finiteValue(w) && w > 0.0 ? w : 0.0;
       };
@@ -1198,4 +1337,5 @@ void PhotonJetTree::captureEventWeights(PHCompositeNode* /*topNode*/)
 
   m_event.eventWeight = final.finalWeight;
   m_event.eventWeightValid = valid;
+  m_event.ppg12WeightActive = m_config.weights.ppg12Nominal && valid;
 }

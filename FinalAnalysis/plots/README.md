@@ -1,16 +1,15 @@
-# Analysis figures
+# Figures and tables
 
-Run `../final_analysis.sh render --results RESULTS --out FIGURES` from this directory, or use the repository-root command in the package README. Calculation commands save numerical inputs first; rendering consumes them. The measurement figure package must reproduce the recorded per-photon result exactly.
+ROOT macros, compiled by `final_analysis.sh` into `build/`; they draw saved quantities and compute nothing beyond
+projections, ratios and normalisations for display.
 
-| File | Responsibility |
+| File | Draws |
 |---|---|
-| `figure_package.py` | Saved measurement intermediates and consistency checks |
-| `native_response.py` | Source-weighted finest-grid response and exact restriction checks |
-| `render.py` | Measurement, response, closure and ATLAS-comparison drawings |
-| `render_qa.py` | Manifest/inventory routing, saved QA arrays and numerical preparation, then saved-input drawing |
-| `tables.py` | LaTeX and CSV tables from saved results |
-| `purity_closure.py`, `purity_nonclosure.py` | Purity numerical studies using measurement kernels |
+| `IANFigures.C` | The entry point of `draw`, the shared figure helpers, and the measurement figures of `results.root` (purity and combinatoric corrections, responses, iteration stability, closures, prior, results, centrality overlay with systematic boxes, ATLAS overlays) |
+| `QAFigures.C` | The photon and event QA figures of `qa.root` (included by `IANFigures.C`) |
+| `IANTables.C` | The IAN result tables of `tables` (LaTeX and CSV) |
+| `sPhenixStyle.C`, `sPhenixStyle.h` | The sPHENIX plot style |
+| `inputs/atlas_reference.json` | The ATLAS p+p and 0-10% Pb+Pb xJγ of PLB 789 (2019) 167 (HEPData ins1694678 Table 1) for the overlays |
 
-QA preparation saves histogram values, explicit variances and edges, source-bound trigger spectra/run tables, the named-trigger centrality target, and purity, signal-efficiency quantile and descriptive-fit results as ordinary NPZ/JSON. Rendering verifies this package and never resolves models or accesses source ROOT files. Projection, visual normalization and evaluation of a recorded fit describe the saved inputs; they do not choose or alter measurement settings.
-
-`config/figures.yaml` inventories every requested file. Missing populations, normalization bindings or training records are reported in the availability manifest and QA notes. Empty histograms are absent support. Trigger turn-ons retain the numerator/denominator semantics of scaled reference events and photon live bits, with each source's enabled-trigger table.
+A figure whose inputs are absent or empty is not drawn and is listed in `FIGURES.txt` with the reason; nothing is
+invented. The classes, samples and triggers are the ones in the files, so a new class or binning needs no change here.

@@ -814,8 +814,12 @@ bool PhotonClusterBuilder::calculate_shower_shapes(RawCluster* rc, RawCluster* p
   float wphi_cogx = 0;
   float weta33_cogx = 0;
   float wphi33_cogx = 0;
+  float weta35_cogx = 0;
+  float wphi53_cogx = 0;
   float Eetaphi = 0;
   float Eetaphi33 = 0;
+  float Eetaphi35 = 0;
+  float Eetaphi53 = 0;
   float shift_eta = avg_eta - std::floor(avg_eta) - 0.5;
   float shift_phi = avg_phi - std::floor(avg_phi) - 0.5;
   float cog_eta = 3 + shift_eta;
@@ -871,6 +875,24 @@ bool PhotonClusterBuilder::calculate_shower_shapes(RawCluster* rc, RawCluster* p
         {
           weta_cogx += E77[i][j] * di_float * di_float;
           wphi_cogx += E77[i][j] * dj_float * dj_float;
+        }
+        // 3x5 (eta width) and 5x3 (phi width) windows: same centre of
+        // gravity, centre tower excluded from the numerator only.
+        if (di <= 1 && dj <= 2)
+        {
+          Eetaphi35 += E77[i][j];
+          if (i != 3 || j != 3)
+          {
+            weta35_cogx += E77[i][j] * di_float * di_float;
+          }
+        }
+        if (di <= 2 && dj <= 1)
+        {
+          Eetaphi53 += E77[i][j];
+          if (i != 3 || j != 3)
+          {
+            wphi53_cogx += E77[i][j] * dj_float * dj_float;
+          }
         }
         if (di <= 1 && dj <= 1)
         {
@@ -990,6 +1012,14 @@ bool PhotonClusterBuilder::calculate_shower_shapes(RawCluster* rc, RawCluster* p
     wphi33_cogx /= Eetaphi33;
   }
   else if (witnesses) weta33_cogx = wphi33_cogx = std::numeric_limits<float>::quiet_NaN();
+  if (Eetaphi35 > 0)
+  {
+    weta35_cogx /= Eetaphi35;
+  }
+  if (Eetaphi53 > 0)
+  {
+    wphi53_cogx /= Eetaphi53;
+  }
   if (e32 > 0)
   {
     w32 /= e32;
@@ -1030,11 +1060,22 @@ bool PhotonClusterBuilder::calculate_shower_shapes(RawCluster* rc, RawCluster* p
   set_shape("wphi_cog", wphi_cog);
   set_shape("weta_cogx", weta_cogx);
   set_shape("wphi_cogx", wphi_cogx);
+  set_shape("weta35_cogx", weta35_cogx);
+  set_shape("wphi53_cogx", wphi53_cogx);
+  // The 3x3 core moments always feed the shower-view witnesses. The photon
+  // carries them as named parameters only when enabled; the established
+  // productions did not enable them.
   if (m_enable_3x3_moments)
   {
     set_shape("weta33_cogx", weta33_cogx);
     set_shape("wphi33_cogx", wphi33_cogx);
     set_shape("moment33_valid", Eetaphi33 > 0.0F && std::isfinite(Eetaphi33) ? 1.0F : 0.0F);
+  }
+  else if (witnesses)
+  {
+    (*witnesses)["weta33_cogx"] = weta33_cogx;
+    (*witnesses)["wphi33_cogx"] = wphi33_cogx;
+    (*witnesses)["moment33_valid"] = Eetaphi33 > 0.0F && std::isfinite(Eetaphi33) ? 1.0F : 0.0F;
   }
   set_shape("detamax", detamax);
   set_shape("dphimax", dphimax);

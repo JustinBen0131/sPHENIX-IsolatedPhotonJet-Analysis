@@ -1,89 +1,18 @@
-// Fill the photon-selection and event-property histograms of the analysis note (the figures that are not the
-// photon + recoil-jet measurement) from eventTree v1 files, data or simulation, in one pass.
-//
-//   root -l -q 'TreeToHists/src/FillPhotonQA.C("a.eventtree.root b.eventtree.root", "out.root", "nominal", "<weights>")'
-//
-// Every input shares one kind: DATA, photon-family simulation (isSim, isSimEmbedded) or inclusive-family simulation
-// (isSimInclusive, isSimEmbeddedInclusive), written as "family" (data, phosim, jetsim). Photon candidates are labelled
-// by that kind and their final reco-truth match (plink_class 0, the match FillPhotonJetResponse.C uses):
-//   data        every candidate of a DATA file
-//   sig         photon-family simulation, matched to an analysis-signal truth photon (source role 1: Geant4-valid,
-//               prompt, |eta| < 0.7, truth isolation R = 0.3 below 4 GeV; PhotonJetTruth.h), the signal the
-//               measurement unfolds and the ABCD leakage is normalised to
-//   phoother    photon-family simulation, any other candidate
-//   bkg         inclusive-family simulation, not matched to an analysis-signal truth photon
-//   jetprompt   inclusive-family simulation, matched to an analysis-signal truth photon (kept apart)
-// Selection stages of a candidate (PhotonJetSelection.h profile; analysis events, |vz| inside the profile window,
-// finite kinematics, |eta| < 0.7):
-//   0 every candidate   1 active preselection   2 and tight photon ID   3 and isolated (Region A)
-// Tight, non-tight and isolated are the profile's: Au+Au from the augmented classes, pp from the score surfaces and
-// the isolation witness, exactly as regionLeaders decides them. The isolation value is the profile's witness (Au+Au
-// R = 0.3 SUB1, pp R = 0.4 topocluster). "No UE subtraction" (Au+Au) is that witness plus the energy the SUB1
-// subtraction removed from its cone constituents, sum over isoc_ of (calibrated - sub1) / cosh(eta_photon + deta).
-//
-// Histograms (TH*F; Sumw2 in simulation). <c>: centrality class (Au+Au cent0_20, cent20_50, cent50_80; pp all);
-// <f>: candidate label; <F>: file family; slices: the 16 5% slices of 0-80% (one slice in pp); ET axis 10-40 GeV in
-// 1 GeV bins unless stated:
-//   ss_<var>_<f>_<c>        var x ET x stage      shower shapes and the photon-ID score: e11_over_e33, e32_over_e35,
-//                                                 bdt, weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx, et1..et4
-//                                                 (et1..et4: the NPB-input values)
-//   ncb_<f>_<c>             NPB score x ET        stage 0 (the NPB score enters the preselection)
-//   iso_<f>_<c>             iso x ET x ID         stage 1; ID 0 tight, 1 non-tight, 2 neither
-//   isonoue_<f>_<c>         the same without UE subtraction (Au+Au)
-//   abcd_<f>_<c>            region x ET           the event-leading photon of each region (regionLeaders, as in
-//                                                 FillPhotonJet.C) by its label; ET 15-35 GeV in 1 GeV bins
-//   recoil_<f>_<c>          region (A,C) x ET x xJ  every recoil jet (5 GeV) of the A and C leaders by the leader's
-//                                                 label, on FillPhotonJet.C's axes: summed over labels it is
-//                                                 FillPhotonJet's recoil_<c>_jet5 (the xJ-level purity closure)
-//   abcdown_<f>_<c>         region x ET x class   simulation: abcd by the event's ownership class, the family's
-//   recoilown_<f>_<c>       (region x class) x ET x xJ   generator variable (leading prompt truth photon pT for the
-//                                                 photon family, leading truth jet pT for the inclusive family) on
-//                                                 edges holding every sample window, so a stitched mixture keeps
-//                                                 each sample to its owned window (region-major flattened axis)
-//   scoreiso_<f>_<c>        score x iso x ET      stage 1 with a score and a witness: 20 score bins, iso 1 GeV bins
-//                                                 over -10..40, ET 15-35 in 2 GeV (factorisation tests in sub-bands)
-//   clu_et_<f>_<c>          ET (0-50 GeV) x stage   (every stage axis is cumulative: a candidate fills each stage
-//   clu_etaphi_<f>_<c>      eta x phi x stage       it reached); ET >= 10 GeV for eta x phi
-//   bdt_<f>                 score x ET x slice    stage 1, no isolation requirement
-//   isoslice_<f>            iso x ET x slice      stage 1, any ID
-//   isonoueslice_<f>        the same without UE subtraction (Au+Au)
-//   width_<var>_<f>         var x ET x slice      stage 1; weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx in 0.01 bins
-//                                                 over 0-1 (the shape histograms keep the full range)
-//   e11e33_dt_data_<c>      e11/e33 x ET x dt     DATA, stage 0; dt = cluster time - MBD t0 [ns]
-//   etatime_data_<c>        eta x dt              DATA, stage 0, ET >= 10 GeV
-//   evt_vz_<F>_<c>          vertex z              events before the vertex window
-//   jet_pt_<F>_<c>          jet pT x selection    analysis-view R = 0.4 jets; selection 0 every analysis event,
-//   jet_etaphi_<F>_<c>      eta x phi x selection 1 events with a Region-A leader (15 <= ET < 35 GeV); pT >= 5 GeV
-//   evt_cent_<F>            centrality x weight   Au+Au, inside the vertex window; weight 0 w_event, 1 the full weight
-//   cent_bits_data          centrality x scaled bit   Au+Au DATA inside the vertex window, minimum-bias classified
-//                                                 (cent_mb_decision == 1): one entry per fired scaled bit. The data target
-//                                                 of the simulation centrality weights for a trigger chosen by name from
-//                                                 the run's own table (centrality.py; the schema-10 package used Photon 10)
-//   evt_calo_<F>            total calo E x centrality x MB state   state = (cent_mb_decision == 1) +
-//                                                 2 (evt_embedded_mb_decision == 1); every analysis event
-//   trig_<F>                max cluster E x scaled bit x live bit  DATA, every recorded event: for each scaled bit s,
-//                                                 once at live bit 64 (the reference count) and once per live bit set
-//   truth_iso_<c>           truth iso x truth pT x prompt class    photon-family simulation: Geant4-valid truth photons
-//                                                 with |eta| < 0.7 and a valid truth isolation (R = 0.3)
-//   eff_<c>                 truth pT x stage x reco ET   photon-family simulation, analysis-signal truth photons (source
-//                                                 role 1): stage 0 every one (reco ET bin [-2.5, 0)), 1 matched to a
-//                                                 candidate, 2 and preselected,
-//                                                 3 and isolated, 4 and tight, 5 and tight and isolated
-//   gen_<F>                 pT x kind             simulation, every recorded event: kind 0 the leading prompt truth
-//                                                 photon, 1 the leading truth jet (R = 0.4)
-// Analysis events: evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0 (recorded
-// events: the first two and the last). Weights are w_event (1 when not finite) times, in Au+Au simulation, the
-// centrality weight of the event's 5% slice (an input, as in FillPhotonJetResponse.C; 1 when the product is not
-// finite). Written with "profile", "family", "centrality_weights", "sources" and "qa_contract" (version and axes), and for
-// DATA "trigger_run_info" (the inputs' meta/trigger_run_info: bit names, prescales, run totals) with
-// "trigger_run_info_consistent" (1 when every input carried the same table: one run per output).
-#include "SelectionInput.h"
-#include "PhotonJetTruth.h"
+/* Photon and event QA reduction from eventTree v1.
+
+   Uses the measurement's selection, matches and weights for selected QA.
+   Retains broad generator diagnostics separately to expose sample overlap.
+   The shared profile supplies ID/isolation decisions and source admission;
+   labels, stages and saved axes are specified beside the QA implementation.
+   FillExtensions adds declared shower, matching, jet and fraction diagnostics.
+   Execute through tree_to_hists.sh; unavailable fractions stay explicit. */
+#include "PhotonJet.h"
 
 #ifdef __CLING__
 R__LOAD_LIBRARY(libTreePlayer)
 #endif
 
+#include <THnSparse.h>
 #include <TFile.h>
 #include <TH1F.h>
 #include <TH2F.h>
@@ -105,11 +34,93 @@ R__LOAD_LIBRARY(libTreePlayer)
 #include <string>
 #include <vector>
 
+/* Fill the photon-selection and event-property histograms of the analysis note (the figures that are not the
+   photon + recoil-jet measurement) from eventTree v1 files, data or simulation, in one pass. */
+
+/* root -l -q 'TreeToHists/src/FillPhotonQA.C("a.eventtree.root b.eventtree.root", "out.root", "nominal", "<weights>")' */
+
+/* Every input shares one kind: DATA, photon-family simulation (isSim, isSimEmbedded) or inclusive-family simulation
+   (isSimInclusive, isSimEmbeddedInclusive), written as "family" (data, phosim, jetsim). Photon candidates are labelled
+   by that kind and their final reco-truth match (plink_class 0, the match FillPhotonJetResponse.C uses):
+   data        every candidate of a DATA file
+   sig         photon-family simulation, matched to an analysis-signal truth photon (source role 1: Geant4-valid,
+   prompt, |eta| < 0.7, truth isolation R = 0.3 below 4 GeV; PhotonJet.h), the signal the
+   measurement unfolds and the ABCD leakage is normalised to
+   phoother    photon-family simulation, any other candidate
+   bkg         inclusive-family simulation, not matched to an analysis-signal truth photon
+   jetprompt   inclusive-family simulation, matched to an analysis-signal truth photon (kept apart)
+   Selection stages of a candidate (PhotonJet.h profile; analysis events, |vz| inside the profile window,
+   finite kinematics, |eta| < 0.7):
+   0 every candidate   1 active preselection   2 and tight photon ID   3 and isolated (Region A)
+   Tight, non-tight and isolated are the profile's: Au+Au from the augmented classes, pp from the score surfaces and
+   the isolation witness, exactly as regionLeaders decides them. The isolation value is the profile's witness (Au+Au
+   R = 0.3 SUB1, pp R = 0.4 topocluster). "No UE subtraction" (Au+Au) is that witness plus the energy the SUB1
+   subtraction removed from its cone constituents, sum over isoc_ of (calibrated - sub1) / cosh(eta_photon + deta). */
+
+/* Histograms (TH*F; Sumw2 in simulation). <c>: centrality class (Au+Au cent0_20, cent20_50, cent50_80; pp all);
+   <f>: candidate label; <F>: file family; slices: the 16 5% slices of 0-80% (one slice in pp); ET axis 10-40 GeV in
+   1 GeV bins unless stated:
+   ss_<var>_<f>_<c>        var x ET x stage      shower shapes and the photon-ID score: e11_over_e33, e32_over_e35,
+   bdt, weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx, et1..et4
+   (et1..et4: the NPB-input values)
+   ncb_<f>_<c>             NPB score x ET        stage 0 (the NPB score enters the preselection)
+   iso_<f>_<c>             iso x ET x ID         stage 1; ID 0 tight, 1 non-tight, 2 neither
+   isonoue_<f>_<c>         the same without UE subtraction (Au+Au)
+   abcd_<f>_<c>            region x ET           the event-leading photon of each region (regionLeaders, as in
+   FillPhotonJet.C) by its label; ET 15-35 GeV in 1 GeV bins
+   recoil_<f>_<c>          region (A,C) x ET x xJ  every recoil jet (5 GeV) of the A and C leaders by the leader's
+   label, on FillPhotonJet.C's axes: summed over labels it is
+   FillPhotonJet's recoil_<c>_jet5 (the xJ-level purity closure)
+   abcdown_<f>_<c>         region x ET x class   simulation: abcd by the event's ownership class, the family's
+   recoilown_<f>_<c>       (region x class) x ET x xJ   generator variable (leading prompt truth photon pT for the
+   photon family, leading truth jet pT for the inclusive family) on
+   edges holding every sample window, so a stitched mixture keeps
+   each sample to its owned window (region-major flattened axis)
+   scoreiso_<f>_<c>        score x iso x ET      stage 1 with a score and a witness: 20 score bins, iso 1 GeV bins
+   over -10..40, ET 15-35 in 2 GeV (factorisation tests in sub-bands)
+   clu_et_<f>_<c>          ET (0-50 GeV) x stage   (every stage axis is cumulative: a candidate fills each stage
+   clu_etaphi_<f>_<c>      eta x phi x stage       it reached); ET >= 10 GeV for eta x phi
+   bdt_<f>                 score x ET x slice    stage 1, no isolation requirement
+   isoslice_<f>            iso x ET x slice      stage 1, any ID
+   isonoueslice_<f>        the same without UE subtraction (Au+Au)
+   width_<var>_<f>         var x ET x slice      stage 1; weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx in 0.01 bins
+   over 0-1 (the shape histograms keep the full range)
+   e11e33_dt_data_<c>      e11/e33 x ET x dt     DATA, stage 0; dt = cluster time - MBD t0 [ns]
+   etatime_data_<c>        eta x dt              DATA, stage 0, ET >= 10 GeV
+   evt_vz_<F>_<c>          vertex z              events before the vertex window
+   jet_pt_<F>_<c>          jet pT x selection    analysis-view R = 0.4 jets; selection 0 every analysis event,
+   jet_etaphi_<F>_<c>      eta x phi x selection 1 events with a Region-A leader (15 <= ET < 35 GeV); pT >= 5 GeV
+   evt_cent_<F>            centrality x weight   Au+Au, inside the vertex window; weight 0 w_event, 1 the full weight
+   cent_bits_data          centrality x scaled bit   Au+Au DATA inside the vertex window, minimum-bias classified
+   (cent_mb_decision == 1): one entry per fired scaled bit. The data target
+   of the simulation centrality weights for a trigger chosen by name from
+   the run's own table (centrality.py; the schema-10 package used Photon 10)
+   evt_calo_<F>            total calo E x centrality x MB state   state = (cent_mb_decision == 1) +
+   2 (evt_embedded_mb_decision == 1); every analysis event
+   trig_<F>                max cluster E x scaled bit x live bit  DATA, every recorded event: for each scaled bit s,
+   once at live bit 64 (the reference count) and once per live bit set
+   truth_iso_<c>           truth iso x truth pT x prompt class    photon-family simulation: Geant4-valid truth photons
+   with |eta| < 0.7 and a valid truth isolation (R = 0.3)
+   eff_<c>                 truth pT x stage x reco ET   photon-family simulation, analysis-signal truth photons (source
+   role 1): stage 0 every one (reco ET bin [-2.5, 0)), 1 matched to a
+   candidate, 2 and preselected,
+   3 and isolated, 4 and tight, 5 and tight and isolated
+   gen_<F>                 pT x kind             simulation, every recorded event (pp: every one the source stitching
+   admitted): kind 0 the leading prompt truth photon, 1 the leading truth
+   jet (R = 0.4)
+   Analysis events: evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0 (recorded
+   events: the first two and the last). Weights are w_event (1 when not finite) times, in Au+Au simulation, the
+   centrality weight of the event's 5% slice (an input, as in FillPhotonJetResponse.C; 1 when the product is not
+   finite). Written with "profile", "family", "centrality_weights", "sources" and "qa_contract" (version and axes), and for
+   DATA "trigger_run_info" (the inputs' meta/trigger_run_info: bit names, prescales, run totals) with
+   "trigger_run_info_consistent" (1 when every input carried the same table: one run per output). */
+
 namespace photonjet {
 namespace qa {
 
 constexpr int kQaVersion = 1;
 constexpr double kQaEtMin = 10.0, kQaEtMax = 40.0, kStoredAbsEtaMax = 0.7;
+constexpr double kQaJetMapPtMin = 5.0;
 const std::vector<std::string> kShapes = {"e11_over_e33", "e32_over_e35", "bdt", "weta_cogx", "wphi_cogx",
                                           "weta33_cogx", "wphi33_cogx", "et1", "et2", "et3", "et4"};
 const std::vector<std::string> kWidths = {"weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx"};
@@ -125,7 +136,7 @@ inline Range shapeRange(const std::string& var) {
   if (var == "et2" || var == "et3") return {80, -0.5, 1.1};
   if (var == "et4") return {100, 0.0, 0.5};
   if (var == "weta_cogx" || var == "wphi_cogx") return {100, 0.0, 2.5};
-  return {100, 0.0, 1.5};  // 3x3 widths
+  return {100, 0.0, 1.5};  /* 3x3 widths */
 }
 
 enum class Family { data, phosim, jetsim };
@@ -192,7 +203,7 @@ class Book {
 };
 
 const std::vector<double> kRecoilRegions = {0.0, 1.0, 2.0}, kRegions4 = {0.0, 1.0, 2.0, 3.0, 4.0};
-// ownership classes of the generator variable: every sample window of config/samples.yaml and PPG18's photon cuts
+/* ownership classes of the generator variable: every sample window of config/samples.yaml and PPG18's photon cuts */
 const std::vector<double> kOwnershipEdges = {-1.0, 0.0, 5.0, 8.0, 10.0, 12.0, 15.0, 20.0, 21.0, 24.0, 25.0, 30.0, 31.0, 35.0, 40.0,
                                              41.0, 50.0, 60.0, 1.0e4};
 inline std::vector<double> recoilOwnershipAxis() {
@@ -205,7 +216,7 @@ const Range kEt{30, kQaEtMin, kQaEtMax}, kStage{4, 0.0, 4.0}, kIso{500, -10.0, 4
     kEta{58, -kStoredAbsEtaMax, kStoredAbsEtaMax}, kPhi{256, -M_PI, M_PI}, kDt{160, -40.0, 40.0}, kDtCoarse{40, -20.0, 20.0}, kWidth{100, 0.0, 1.0},
     kJetEta{44, -1.1, 1.1}, kJetPhi{64, -M_PI, M_PI}, kSel{2, 0.0, 2.0};
 
-// Public packages always contain the same objects, including empty selections.
+/* Public packages always contain the same objects, including empty selections. */
 inline void prebook(Book& b, Family family, System system, const std::vector<CentralityClass>& classes) {
   const bool auau=system==System::auau, sim=family!=Family::data;
   const std::string F=familyName(family);
@@ -255,7 +266,7 @@ inline void prebook(Book& b, Family family, System system, const std::vector<Cen
   else b.h3("trig_data","",{100,0,40},{64,0,64},{65,0,65});
 }
 
-// The candidate's photon-ID and isolation decisions under the profile (the per-candidate form of regionLeaders).
+/* The candidate's photon-ID and isolation decisions under the profile (the per-candidate form of regionLeaders). */
 struct Decision {
   bool scored = false, tight = false, nonTight = false, isolated = false, nonIsolated = false, witness = false;
   double iso = std::numeric_limits<double>::quiet_NaN();
@@ -265,7 +276,7 @@ template <class Values, class Ints>
 Decision decide(const Profile& p, std::size_t i, double et, double centrality, const Values& score, const Ints& state,
                 const Values& cone, const Values& threshold, const Values& sideband, const Ints& method, const Ints& role,
                 const Ints& idClass, const Ints& isoClass) {
-  // the selection's own classes (PhotonJetSelection.h photonClass), plus the witness cone sum for the isolation plots
+  /* the selection's own classes (PhotonJet.h photonClass), plus the witness cone sum for the isolation plots */
   const PhotonClass c = photonClass(p, i, et, centrality, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
   Decision d;
   d.scored = c.scored;
@@ -295,6 +306,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
   const std::string F = familyName(family);
   TTreeReader reader("eventTree", file.get());
   const VertexEventWeight vertexWeight(*file,reader);
+  const PpSimulationGate ppSelection(*file,reader);
   TTreeReaderValue<int> record(reader, "evt_record"), ready(reader, "evt_nodes_ready"), vtxValid(reader, "vtx_valid"),
       terminal(reader, "evt_terminal_status"), centMb(reader, "cent_mb_decision"), embMb(reader, "evt_embedded_mb_decision"), run(reader,"evt_run");
   TTreeReaderValue<double> vz(reader, "vtx_z"), centrality(reader, "cent_value"), weightValue(reader, "w_event"),
@@ -318,7 +330,8 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
   TTreeReaderArray<double> isocDr(reader, "isoc_delta_r"), isocDeta(reader, "isoc_delta_eta"), isocCal(reader, "isoc_calibrated_energy"),
       isocSub(reader, "isoc_sub1_energy");
   TTreeReaderArray<double> jetPt(reader, "jet04_pt"), jetEta(reader, "jet04_eta"), jetPhi(reader, "jet04_phi");
-  // simulation only
+  const OwnershipGate owner(reader);  /* a stitched sample's events outside its window belong to another sample */
+  /* simulation only */
   std::unique_ptr<TTreeReaderArray<double>> truthPt, truthEta, truthIso, truthJetPt;
   std::unique_ptr<TTreeReaderArray<int>> truthRole, truthValid, truthPrompt, truthIsoValid, linkReco, linkTruth, linkClass;
   if (sim) {
@@ -342,6 +355,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
     reportProgress(reader.GetCurrentEntry()+1);
     validateSelectionEvent(profile, *centrality, et, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
     if (*record != 0 || *ready != 1 || *terminal != 0) continue;
+    const bool ppOwned = ppSelection.accepts();
     if (strictReduction && !std::isfinite(*weightValue)) throw std::runtime_error("nonfinite QA event weight");
     const double wEvent = (std::isfinite(*weightValue) ? *weightValue : 1.0) * vertexWeight();
     double w = wEvent;
@@ -350,8 +364,11 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
       if (strictReduction && !std::isfinite(w)) throw std::runtime_error("nonfinite QA centrality weight");
       if (!std::isfinite(w)) w = 1.0;
     }
-    // every recorded event: trigger characterisation (DATA) and generator-level spectra (simulation)
-    double ownership = -1.0;  // simulation: the family's generator variable (leading prompt truth photon or truth jet pT)
+    /* every recorded event: trigger characterisation (DATA) and generator-level spectra (simulation). A pp simulation
+       event rejected by the producer's source stitching carries unity, not its canonical weight, and belongs to
+       another sample, so pp generator spectra hold only admitted events; a stitched Au+Au sample keeps its whole
+       range and FinalAnalysis takes its window for the stitched sum. */
+    double ownership = -1.0;  /* simulation: the family's generator variable (leading prompt truth photon or truth jet pT) */
     if (!sim) {
       TH3F& trig = b.h3("trig_" + F, "recorded events;max cluster E [GeV];scaled bit;live bit (64: any)", {100, 0.0, 40.0},
                         {64, 0.0, 64.0}, {65, 0.0, 65.0});
@@ -362,7 +379,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         for (int l = 0; l < 64; ++l)
           if ((*live >> l) & 1ULL) trig.Fill(e, s + 0.5, l + 0.5);
       }
-    } else {
+    } else if (ppOwned) {
       TH2F& gen = b.h2("gen_" + F, "recorded events;p_{T} [GeV];0 leading prompt truth photon, 1 leading truth jet",
                        {160, 0.0, 80.0}, {2, 0.0, 2.0});
       double photon = -1.0, jet = -1.0;
@@ -371,12 +388,17 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
           photon = std::max(photon, (*truthPt)[t]);
       for (std::size_t j = 0; j < truthJetPt->GetSize(); ++j)
         if (std::isfinite((*truthJetPt)[j])) jet = std::max(jet, (*truthJetPt)[j]);
+      /* a sample stitched on its generator-filter photon (Au+Au embedded photon+jet) shows that photon */
+      if (configuredOwnership.owner == Ownership::Owner::filterPhoton) photon = std::isfinite(owner.value()) ? owner.value() : -1.0;
       if (photon >= 0) gen.Fill(photon, 0.5, wEvent);
       if (jet >= 0) gen.Fill(jet, 1.5, wEvent);
       ownership = family == Family::phosim ? photon : jet;
     }
+    /* the generator spectra above keep a stitched sample's whole range (its boundary overlaps); everything below only
+       the events it owns */
+    if (!ppOwned || !owner.owned()) continue;
     if (*vtxValid != 1) continue;
-    // the event's class and 5% slice
+    /* the event's class and 5% slice */
     int k = 0;
     if (auau) {
       while (k < static_cast<int>(classes.size()) && !(classes[k].low <= *centrality && *centrality < classes[k].high)) ++k;
@@ -408,7 +430,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
     if (cone.GetSize() != 2 * n) throw std::runtime_error("isolation witnesses are not 2 per photon in " + path);
     if (profile.augmentedClasses && (idClass.GetSize() != n || isoClass.GetSize() != n))
       throw std::runtime_error("the augmented classes pho_id_class, pho_iso_class are not filled in " + path);
-    // the UE energy SUB1 removed from each candidate's cone (Au+Au)
+    /* the UE energy SUB1 removed from each candidate's cone (Au+Au) */
     std::vector<double> ue(n, 0.0);
     if (auau)
       for (std::size_t q = 0; q < isocPho.GetSize(); ++q) {
@@ -417,7 +439,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         const double ch = std::cosh(eta[i] + isocDeta[q]);
         if (std::isfinite(isocCal[q]) && std::isfinite(isocSub[q]) && ch > 0) ue[i] += (isocCal[q] - isocSub[q]) / ch;
       }
-    // the prompt truth photon matched to each candidate (simulation)
+    /* the prompt truth photon matched to each candidate (simulation) */
     std::vector<long> truthOf(n, -1);
     if (sim)
       for (std::size_t l = 0; l < linkReco->GetSize(); ++l) {
@@ -426,7 +448,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         if (r >= n || t >= truthPt->GetSize()) throw std::runtime_error("photon link outside its collections in " + path);
         truthOf[r] = static_cast<long>(t);
       }
-    // the candidate's label: the analysis truth signal (source role 1) decides sig / jetprompt
+    /* the candidate's label: the analysis truth signal (source role 1) decides sig / jetprompt */
     auto labelOf = [&](std::size_t i) -> std::string {
       if (!sim) return "data";
       const long t = truthOf[i];
@@ -453,7 +475,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         leaderA = static_cast<long>(i);
       const std::string f = labelOf(i);
       const std::string tag = f + "_" + c;
-      // stage axes are cumulative: a candidate fills every stage it reached
+      /* stage axes are cumulative: a candidate fills every stage it reached */
       TH2F& cluEt = b.h2("clu_et_" + tag, "candidates;E_{T} [GeV];stage (reached)", {100, 0.0, 50.0}, kStage);
       for (int s = 0; s <= stage; ++s) cluEt.Fill(et[i], s + 0.5, w);
       if (et[i] >= 10.0) {
@@ -507,7 +529,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
               .Fill(x, et[i], slice + 0.5, w);
       }
     }
-    // the event-leading photon of each region, as FillPhotonJet.C selects it, by its label
+    /* the event-leading photon of each region, as FillPhotonJet.C selects it, by its label */
     const std::array<long, 4> leader = regionLeaders(profile, *vz, *centrality, n, et, eta, phi, score, presel, state, cone, threshold,
                                                      sideband, method, role, idClass, isoClass);
     for (int r = 0; r < 4; ++r) {
@@ -515,11 +537,11 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
       const long i = leader[r];
       const std::string f = labelOf(i);
       b.h2("abcd_" + f + "_" + c, "event-leading photons;region (A,B,C,D);E_{T} [GeV]", {4, 0.0, 4.0}, {20, 15.0, 35.0}).Fill(r + 0.5, et[i], w);
-      if (sim)  // the same by the ownership class of the event (a sample's owned window of its generator variable)
+      if (sim)  /* the same by the ownership class of the event (a sample's owned window of its generator variable) */
         b.h3v("abcdown_" + f + "_" + c, "event-leading photons;region (A,B,C,D);E_{T} [GeV];generator p_{T} class", kRegions4,
               photonEtEdges(), kOwnershipEdges).Fill(r + 0.5, et[i], std::min(ownership, kOwnershipEdges.back() - 1.0), w);
       if (r != kA && r != kC) continue;
-      // its recoil jets at the nominal threshold, exactly as FillPhotonJet.C fills recoil_<c>_jet5
+      /* its recoil jets at the nominal threshold, exactly as FillPhotonJet.C fills recoil_<c>_jet5 */
       TH3F& recoil = b.h3v("recoil_" + f + "_" + c, "recoil jets (5 GeV);region (A,C);photon E_{T} [GeV];x_{J#gamma}", kRecoilRegions,
                           photonEtEdges(), xjEdges());
       Profile p = profile;
@@ -529,7 +551,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         if (!(xj >= 0.0 && xj < 3.0)) continue;
         if (!recoilJet(p, eta[i], phi[i], jetPt[j], jetEta[j], jetPhi[j])) continue;
         recoil.Fill(r == kA ? 0.5 : 1.5, et[i], xj, w);
-        if (sim) {  // region (A, C) x ownership class flattened: bin (region) * n_class + class
+        if (sim) {  /* region (A, C) x ownership class flattened: bin (region) * n_class + class */
           const int cls = static_cast<int>(std::upper_bound(kOwnershipEdges.begin(), kOwnershipEdges.end(),
                                                             std::min(ownership, kOwnershipEdges.back() - 1.0)) - kOwnershipEdges.begin()) - 1;
           const int nCls = static_cast<int>(kOwnershipEdges.size()) - 1;
@@ -538,19 +560,19 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         }
       }
     }
-    // jets of every analysis event, and of events with a Region-A leader
+    /* jets of every analysis event, and of events with a Region-A leader */
     for (std::size_t j = 0; j < jetPt.GetSize(); ++j) {
       if (!(std::isfinite(jetPt[j]) && std::isfinite(jetEta[j]) && std::isfinite(jetPhi[j]))) continue;
       for (int s = 0; s < (leaderA >= 0 ? 2 : 1); ++s) {
         b.h2("jet_pt_" + F + "_" + c, "R = 0.4 jets;p_{T} [GeV];0 every event, 1 with a Region-A leader", {120, 0.0, 60.0}, kSel)
             .Fill(jetPt[j], s + 0.5, w);
-        if (jetPt[j] >= 5.0)
+        if (jetPt[j] >= kQaJetMapPtMin)
           b.h3("jet_etaphi_" + F + "_" + c, "R = 0.4 jets p_{T} >= 5 GeV;#eta;#phi;0 every event, 1 with a Region-A leader", kJetEta,
                kJetPhi, kSel).Fill(jetEta[j], jetPhi[j], s + 0.5, w);
       }
     }
     if (!sim) continue;
-    // truth photons: isolation and prompt class (photon family), and the selection efficiency of the analysis signal
+    /* truth photons: isolation and prompt class (photon family), and the selection efficiency of the analysis signal */
     for (std::size_t t = 0; t < truthPt->GetSize(); ++t) {
       if (!(std::isfinite((*truthPt)[t]) && std::isfinite((*truthEta)[t]))) continue;
       if (family == Family::phosim && (*truthValid)[t] == 1 && std::fabs((*truthEta)[t]) < kStoredAbsEtaMax &&
@@ -558,7 +580,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         b.h3("truth_iso_" + c, "truth photons |#eta| < 0.7;E_{T}^{iso,truth} (R = 0.3) [GeV];p_{T}^{truth} [GeV];prompt class",
              {300, 0.0, 30.0}, {35, 5.0, 40.0}, {4, 0.0, 4.0}).Fill((*truthIso)[t], (*truthPt)[t], (*truthPrompt)[t] + 0.5, w);
       if (family != Family::phosim || (*truthRole)[t] != kSignalSourceRole) continue;
-      // reco E_T axis: first bin [-2.5, 0) holds the truth photons of stage 0 (no reco candidate)
+      /* reco E_T axis: first bin [-2.5, 0) holds the truth photons of stage 0 (no reco candidate) */
       TH3F& eff = b.h3("eff_" + c, "analysis-signal truth photons;p_{T}^{truth} [GeV];stage;matched reco E_{T} [GeV]", {35, 5.0, 40.0},
                        {6, 0.0, 6.0}, {21, -2.5, 50.0});
       eff.Fill((*truthPt)[t], 0.5, -1.0, w);
@@ -573,16 +595,16 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         if (reached[s]) eff.Fill((*truthPt)[t], s + 1.5, et[r], w);
     }
   }
-  // a missing branch or a read error ends the loop like the end of the tree; only the end is accepted
+  /* a missing branch or a read error ends the loop like the end of the tree; only the end is accepted */
   if (reader.GetEntryStatus() != TTreeReader::kEntryBeyondEnd && reader.GetEntryStatus() != TTreeReader::kEntryNotFound)
     throw std::runtime_error("eventTree read stopped before the end of " + path);
 }
 
-}  // namespace qa
-}  // namespace photonjet
+}  /* namespace qa */
+}  /* namespace photonjet */
 
-// inputs: whitespace-separated eventTree paths of one family. profile: "nominal" or "historical". centralityWeights:
-// Au+Au simulation only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights).
+/* inputs: whitespace-separated eventTree paths of one family. profile: "nominal" or "historical". centralityWeights:
+   Au+Au simulation only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights). */
 int FillPhotonQA(const char* inputs, const char* output, const char* profileName = "nominal", const char* centralityWeightText = "", const char* selection = "") {
   using namespace photonjet;
   using namespace photonjet::qa;
@@ -602,7 +624,7 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
   if (strictReduction) prebook(b, family, system, classes);
   std::ostringstream sources;
   sources << "[";
-  std::string triggerInfo;  // DATA: the run's trigger table (bit names, prescales, run totals), identical in every input
+  std::string triggerInfo;  /* DATA: the run's trigger table (bit names, prescales, run totals), identical in every input */
   bool triggerConsistent = true;
   for (std::size_t f = 0; f < paths.size(); ++f) {
     fillFile(paths[f], profile, family, weights, classes, b);
@@ -625,7 +647,7 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
   TObjString(profile.name.c_str()).Write("profile");
   writeSelection(profile);
   TObjString(familyName(family)).Write("family");
-  std::ostringstream w;  // the record FillPhotonJetResponse.C writes: {"per_slice":[...]} at full precision
+  std::ostringstream w;  /* the record FillPhotonJetResponse.C writes: {"per_slice":[...]} at full precision */
   w.precision(17);
   w << "{\"per_slice\":[";
   for (std::size_t s = 0; s < weights.perSlice.size(); ++s) w << (s ? "," : "") << weights.perSlice[s];
@@ -638,5 +660,156 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
     TObjString(triggerConsistent ? "1" : "0").Write("trigger_run_info_consistent");
   }
   out->Close();
+  return 0;
+}
+
+/* === Extensions ======================================================================================================
+   Fill the additional event, jet-composition, matching and photon-ID-role QA of the package from one eventTree file,
+   data or simulation, with the selection of the other fillers:
+   qa/events/cutflow, weights, mbd_charge, <detector>_vs_mbd_charge, <detector>_vs_centrality
+   qa/jets/<c>/R<rr>/calo_fractions      only when the stage-3 fraction branches are filled (else "unavailable")
+   qa/matching/<c>/{photon,jet}           simulation: reco-truth match metrics
+   qa/photon_id/score_roles               simulation: score x ET x slice x truth role (THnSparse)
+   plus "availability" (JSON): which optional payloads exist, never an empty histogram claiming zero entries. */
+
+namespace photonjet {
+
+inline void fillExtensions(const char* inputPath, const char* outputPath, const char* selection, const char* centralityWeightText,
+                           bool requireStage3Fractions) {
+  std::unique_ptr<TFile> input(TFile::Open(inputPath));
+  if (!input || input->IsZombie()) throw std::runtime_error("extension input cannot open");
+  const auto profile=validateSelectionInput(*input,configuredProfile("nominal",fileSystem(*input),selection));
+  const bool auau=profile.system==System::auau, sim=isSimulation(*input);
+  const DataEventSelection dataSelection(*input,profile);
+  const auto classes=centralityClasses(profile.system);
+  const auto weights=sim&&auau?centralityWeights(centralityWeightText,profile.system):CentralityWeights{};
+  const auto schema=SelectionJson::parse(metaText(*input,"meta/schema"));
+  std::vector<std::string> filled=schema.value("filled_reserved",std::vector<std::string>{});
+  bool fractions=true;
+  for (const auto* rr:{"02","03","04"}) for (const auto* det:{"emcal","ihcal","ohcal"})
+    fractions=fractions&&std::find(filled.begin(),filled.end(),std::string("jet")+rr+"_"+det+"_frac")!=filled.end();
+  if (requireStage3Fractions && !fractions)
+    throw std::runtime_error("stage-3 fraction payload required but not filled");
+  qa::Book b(true);
+  auto key=[](std::string x) { size_t p=0; while((p=x.find('/',p))!=std::string::npos) {x.replace(p,1,"__");p+=2;} return x; };
+  const qa::Range cent=auau?qa::Range{100,0,100}:qa::Range{1,0,100};
+  const qa::Range energy=auau?qa::Range{150,0,3000}:qa::Range{100,0,200};
+  const qa::Range charge{150,0,3000}, mb{9,0,9}; /* invalid, fail, pass for each of the two MB decisions */
+  auto h3=[&](std::string path,qa::Range x,qa::Range y,qa::Range z)->TH3F& {return b.h3(key(path),path.c_str(),x,y,z);};
+  h3("qa/events/cutflow",{6,0,6},cent,{2,0,2});
+  b.h2(key("qa/events/weights"),";event weight;finite/nonfinite",{200,-10,10},{2,0,2});
+  b.h2(key("qa/events/mbd_charge"),";MBD charge;centrality",charge,cent);
+  for(const auto* d:{"emcal","ihcal","ohcal","total"}) {
+    h3(std::string("qa/events/")+d+"_vs_mbd_charge",energy,charge,mb);
+    if(std::string(d)!="total") h3(std::string("qa/events/")+d+"_vs_centrality",energy,cent,mb);
+  }
+  for(const auto& c:classes) {
+    if(fractions) for(const auto* rr:{"02","03","04"})
+      h3("qa/jets/"+c.name+"/R"+rr+"/calo_fractions",{240,-1,2},{120,0,60},{3,0,3});
+    if(sim) for(const auto* obj:{"photon","jet"})
+      h3("qa/matching/"+c.name+"/"+obj,{100,0,1},{120,0,60},{8,0,8});
+  }
+  std::unique_ptr<THnSparseD> scoreRoles;
+  if(sim) {
+    int bins[]={100,30,auau?16:1,3}; double low[]={0,10,0,0}, high[]={1,40,auau?16.:1.,3};
+    scoreRoles.reset(new THnSparseD(key("qa/photon_id/score_roles").c_str(),"score;ET;slice;unmatched,prompt,nonprompt",4,bins,low,high));
+    scoreRoles->Sumw2();
+  }
+  TTreeReader r("eventTree",input.get());
+  const VertexEventWeight vertexWeight(*input,r);
+  const PpSimulationGate ppSelection(*input,r);
+  TTreeReaderValue<int> run(r,"evt_run");
+  TTreeReaderValue<ULong64_t> scaled(r,"trig_scaled");
+  TTreeReaderValue<int> record(r,"evt_record"),ready(r,"evt_nodes_ready"),terminal(r,"evt_terminal_status"),valid(r,"vtx_valid"),cmb(r,"cent_mb_decision"),emb(r,"evt_embedded_mb_decision"),chargeState(r,"mbd_charge_sum_state");
+  TTreeReaderValue<double> vz(r,"vtx_z"),c(r,"cent_value"),w(r,"w_event"),q(r,"mbd_charge_sum");
+  std::vector<std::unique_ptr<TTreeReaderValue<double>>> calo;
+  std::vector<std::unique_ptr<TTreeReaderValue<int>>> caloState;
+  for(const auto* d:{"emcal","ihcal","ohcal","total"}) {
+    calo.emplace_back(new TTreeReaderValue<double>(r,(std::string("calo_")+d).c_str()));
+    caloState.emplace_back(new TTreeReaderValue<int>(r,(std::string("calo_")+d+"_state").c_str()));
+  }
+  std::vector<std::unique_ptr<TTreeReaderArray<double>>> pts,fracs;
+  for(const auto* rr:{"02","03","04"}) {
+    pts.emplace_back(new TTreeReaderArray<double>(r,(std::string("jet")+rr+"_pt").c_str()));
+    if(fractions) for(const auto* d:{"emcal","ihcal","ohcal"})
+      fracs.emplace_back(new TTreeReaderArray<double>(r,(std::string("jet")+rr+"_"+d+"_frac").c_str()));
+  }
+  TTreeReaderArray<double> et(r,"pho_et"),eta(r,"pho_eta"),phi(r,"pho_phi"),score(r,profile.scoreBranch.c_str());
+  TTreeReaderArray<int> pre(r,"pho_presel_active"),state(r,profile.stateBranch.c_str());
+  std::unique_ptr<TTreeReaderArray<int>> pr,pt,pc,jr,jc,tvalid,tclass;
+  std::unique_ptr<TTreeReaderArray<double>> pm,jm;
+  if(sim) {
+    pr.reset(new TTreeReaderArray<int>(r,"plink_reco")); pt.reset(new TTreeReaderArray<int>(r,"plink_truth")); pc.reset(new TTreeReaderArray<int>(r,"plink_class"));
+    jr.reset(new TTreeReaderArray<int>(r,"jlink_reco")); jc.reset(new TTreeReaderArray<int>(r,"jlink_class"));
+    pm.reset(new TTreeReaderArray<double>(r,"plink_metric")); jm.reset(new TTreeReaderArray<double>(r,"jlink_metric"));
+    tvalid.reset(new TTreeReaderArray<int>(r,"truthpho_g4_photon_valid"));tclass.reset(new TTreeReaderArray<int>(r,"truthpho_prompt_class"));
+  }
+  const OwnershipGate owner(r);  /* a stitched sample's events outside its window belong to another sample */
+  while(r.Next()) {
+    reportProgress(r.GetCurrentEntry()+1);
+    if(*record!=0) continue;
+    if(!ppSelection.accepts()) continue;
+    if(!owner.owned()) continue;
+    if(!std::isfinite(*w)) throw std::runtime_error("nonfinite event weight");
+    const double weight=*w*vertexWeight()*weights(*c), centValue=auau?*c:50.;
+    auto& cut=h3("qa/events/cutflow",{6,0,6},cent,{2,0,2});
+    const bool gates[]={true,*ready==1,*terminal==0,*valid==1,std::isfinite(*vz)&&std::abs(*vz)<profile.vertexAbsZMax,!auau||(*c>=0&&*c<80)};
+    for(int i=0;i<6;++i) {if(!gates[i]) break;cut.Fill(i+.5,centValue,.5);cut.Fill(i+.5,centValue,1.5,weight);}
+    b.h2(key("qa/events/weights"),"",{200,-10,10},{2,0,2}).Fill(*w,.5);
+    if(!gates[1]||!gates[2]||!gates[3]) continue;
+    const int mbState=(*cmb==1?2:*cmb==0?1:0)+3*(*emb==1?2:*emb==0?1:0);
+    if(*chargeState==1&&std::isfinite(*q)) b.h2(key("qa/events/mbd_charge"),"",charge,cent).Fill(*q,centValue,weight);
+    const char* names[]={"emcal","ihcal","ohcal","total"};
+    for(int d=0;d<4;++d) if(**caloState[d]==1&&std::isfinite(**calo[d])) {
+      if(*chargeState==1&&std::isfinite(*q)) h3(std::string("qa/events/")+names[d]+"_vs_mbd_charge",energy,charge,mb).Fill(**calo[d],*q,mbState+.5,weight);
+      if(d<3) h3(std::string("qa/events/")+names[d]+"_vs_centrality",energy,cent,mb).Fill(**calo[d],centValue,mbState+.5,weight);
+    }
+    if(!gates[4]||!gates[5]||!dataSelection.accepts(*run,*scaled,*cmb)) continue;
+    std::string cls="all";if(auau) for(const auto& cl:classes) if(*c>=cl.low&&*c<cl.high) cls=cl.name;
+    if(fractions) for(int radius=0;radius<3;++radius) {
+      const std::string rr=radius==0?"02":radius==1?"03":"04";
+      for(int component=0;component<3;++component) {
+        auto& a=*fracs[3*radius+component]; if(a.GetSize()!=pts[radius]->GetSize()) throw std::runtime_error("fraction alignment mismatch");
+        for(size_t j=0;j<a.GetSize();++j) if(std::isfinite(a[j])&&std::isfinite((*pts[radius])[j]))
+          h3("qa/jets/"+cls+"/R"+rr+"/calo_fractions",{240,-1,2},{120,0,60},{3,0,3}).Fill(a[j],(*pts[radius])[j],component+.5,weight);
+      }
+    }
+    if(!sim) continue;
+    std::vector<int> roles(et.GetSize(),0);
+    for(size_t i=0;i<pr->GetSize();++i) {
+      const int reco=(*pr)[i],truth=(*pt)[i]; if(reco<0) continue;
+      if(size_t(reco)>=et.GetSize()) throw std::runtime_error("photon link index out of range");
+      if(std::isfinite((*pm)[i])) h3("qa/matching/"+cls+"/photon",{100,0,1},{120,0,60},{8,0,8}).Fill((*pm)[i],et[reco],(*pc)[i]+.5,weight);
+      if((*pc)[i]==0&&truth>=0) {
+        if(size_t(truth)>=tclass->GetSize()) throw std::runtime_error("truth link out of range");
+        if((*tvalid)[truth]==1) roles[reco]=((*tclass)[truth]==1||(*tclass)[truth]==2)?1:2;
+      }
+    }
+    const int offset=pts[0]->GetSize()+pts[1]->GetSize();
+    for(size_t i=0;i<jr->GetSize();++i) {
+      const int j=(*jr)[i]-offset;
+      if(j>=0&&size_t(j)<pts[2]->GetSize()&&std::isfinite((*jm)[i]))
+        h3("qa/matching/"+cls+"/jet",{100,0,1},{120,0,60},{8,0,8}).Fill((*jm)[i],(*pts[2])[j],(*jc)[i]+.5,weight);
+    }
+    /* The optional model's applicability is finite/NaN, independent of nominal state. */
+    for(size_t i=0;i<et.GetSize();++i) if(pre[i]==1&&(profile.optionalID||state[i]==1)&&std::isfinite(score[i])&&photonKinematics(profile,*vz,et[i],eta[i],phi[i])) {
+      double x[]={score[i],et[i],auau?centralitySlice(*c)+.5:.5,roles[i]+.5}; scoreRoles->Fill(x,weight);
+    }
+  }
+  if(r.GetEntryStatus()!=TTreeReader::kEntryBeyondEnd&&r.GetEntryStatus()!=TTreeReader::kEntryNotFound) throw std::runtime_error("extension read stopped before EOF");
+  std::unique_ptr<TFile> out(TFile::Open(outputPath,"CREATE"));
+  if(!out||out->IsZombie()) throw std::runtime_error("cannot create extensions");
+  b.write(); if(scoreRoles) scoreRoles->Write();
+  TObjString(profile.name.c_str()).Write("profile");writeSelection(profile);
+  SelectionJson availability={{"fractions",fractions?"available":"stage3_not_filled"},
+    {"npb_timing","blocked_run_timing_calibration_and_tag_contract"},{"semantic_triggers","blocked_named_trigger_population_contract"}};
+  TObjString(availability.dump().c_str()).Write("availability");out->Close();
+}
+
+}  /* namespace photonjet */
+
+int FillExtensions(const char* input, const char* output, const char* selection, const char* centralityWeightText = "",
+                   bool requireStage3Fractions = false) {
+  photonjet::fillExtensions(input, output, selection, centralityWeightText, requireStage3Fractions);
   return 0;
 }

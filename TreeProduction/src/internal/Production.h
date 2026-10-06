@@ -13,11 +13,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 class Fun4AllServer;
 class PhotonJetTree;
+class TH2;
+namespace TMVA::Experimental
+{
+class RBDT;
+}
 
 namespace photonjet
 {
@@ -25,9 +31,70 @@ namespace production
 {
 
 // Read native rule coverage before constructing an output or running events.
-// The resolved schema is authoritative; only shared nominal augmentation may
-// remain missing when ready is true. This is implementation readiness only.
+// The resolved schema is authoritative: ready means every branch has a native
+// filling rule. This is implementation readiness only.
 std::string OutputMappingStatusJson(const Config& config);
+
+// A TMVA RBDT model loaded once per job from the file LoadPlan pinned; its
+// digest is rechecked on load. Used for the nominal photon-ID labels and for
+// the established producer's Au+Au truth-miss tight decision.
+class PinnedModel
+{
+ public:
+  PinnedModel(const std::string& file, const std::string& sha256);
+  ~PinnedModel();
+  float score(const std::vector<float>& features) const;
+
+ private:
+  std::unique_ptr<TMVA::Experimental::RBDT> m_model;
+};
+
+// Photon-ID model input `name` of one candidate at a shower view, or at the
+// builder's primary representation when view is null, rounded to the
+// evaluator's binary32 input. Objects.cc owns this mapping.
+double ModelFeature(const std::string& name, const PhotonRecord& photon,
+                    const EventRecord& event, const ShowerShapeRecord* view);
+
+// Every captured shape of a view is finite (the stored finite-feature state).
+bool ViewShapesFinite(const ShowerShapeRecord& view);
+
+// The configured active preselection of one candidate (Objects.cc): 1 pass,
+// 0 fail, -1 when no preselection is configured. newPPG12 is the NPB score
+// above its cut with the common shower windows (open intervals, no weta cut).
+bool ReferencePreselection(const PhotonRecord& photon);
+int ActivePreselection(const PhotonConfig& config, const PhotonRecord& photon);
+
+// The nominal labels of one candidate (Objects.cc). A pp label checks the
+// producer score against `model` and records the agreement in `receipt`.
+NominalPhotonRecord LabelNominalPhoton(const PhotonConfig& config, const PinnedModel& model,
+                                       const PhotonRecord& photon, const EventRecord& event,
+                                       NominalReceiptRecord& receipt);
+
+// The PPG12 weighting lane of a pp simulation sample (PPG12.cc): 1 photon+jet
+// single interaction, 2 photon+jet double interaction, 3 and 4 the
+// inclusive-jet equivalents; 0 without PPG12 weights.
+int PPG12WeightLaneCode(const WeightConfig& weights);
+
+// The jets in the output's canonical collection order (Objects.cc): the
+// subtracted (or p+p) view before the unsubtracted Au+Au view, R = 0.2, 0.3,
+// 0.4, each in capture order. Jet indices and photon-jet pairs follow it.
+std::vector<const JetRecord*> CanonicalJetOrder(const std::vector<JetRecord>& jets);
+
+// The generator slice of an Au+Au embedded sample name: photon 12 or 20, jet
+// 12, 20, 30 or 40; 0 when the name names none.
+int EmbeddedPhotonSampleCode(std::string sample);
+int EmbeddedJetSampleCode(std::string sample);
+
+// PPG12 photon-yield source arbitration (Objects.cc). A cluster is masked when
+// the PPG12 tower mask is positive at its tower centroid truncated to a tower
+// index; a nonfinite or out-of-range centroid counts as unmasked, as in PPG12.
+bool PPG12TowerMasked(const TH2& mask, double ietaCentroid, double iphiCentroid);
+
+// One cluster, in encounter order: an unmasked cluster with a finite ET of at
+// least 5 GeV becomes the event's leading source when its ET is strictly
+// higher than the current one.
+void PPG12ArbitrateSource(EventRecord& event, std::uint32_t clusterKey, std::int32_t encounter,
+                          bool masked, double et, double eta, double phi);
 // Atomic progress from the original controlling process, in outputFile +
 // ".progress.json". Negative processed arguments reuse its last observation.
 // A finite source budget is mandatory; invalid/regressing counts throw.
@@ -93,15 +160,29 @@ struct Job
   std::int64_t nEvents = -1;
 
   std::int64_t sourceFileOrdinal = -1;
+  std::int64_t sourceGlobalEntryBegin = -1;  // global entry of entry 0 in the source order
 
   std::string dataset;
   std::string sample;
   std::string period;
   std::string siDiRole;
 
+  // Archived double interaction only: the source's replayed random sequence,
+  // "s1,s2,s3,s4,s5:pedestal" (empty otherwise).
+  std::string historicalRng;
+
+  // Au+Au DATA only: the run's own CEMC bad-tower map and its SHA256, which
+  // restores HOT flags missing from the paired input's saved status.
+  std::string cemcRecoveryMap;
+  std::string cemcRecoveryMapSha256;
+
   std::string inputUriSha256;
   std::string inputFileSha256;
   std::string sourceManifestSha256;
+
+  // Parsed configuration envelope supplied by the thin launcher. The native
+  // plan verifies its binding to the exact original configuration bytes.
+  std::string resolvedConfigurationFile;
 
   // Hash of the actual steering macro, supplied by that macro itself.
   std::string macroSha256;
@@ -534,6 +615,15 @@ void RegisterReconstruction(Fun4AllServer* server,
  */
 void RegisterInputs(Fun4AllServer* server,
                     const Plan& plan);
+
+
+/**
+ * Open every source stream at the job's first entry. A job that starts at
+ * entry 0 reads from the beginning and needs nothing here; the exposure
+ * observer checks each event's entry in every case.
+ */
+void StartAtFirstEntry(Fun4AllServer* server,
+                       const Plan& plan);
 
 
 /**

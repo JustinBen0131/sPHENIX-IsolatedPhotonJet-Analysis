@@ -33,19 +33,20 @@ Everything:
 
 Options:
   --run N      Select one DATA run from the maintained catalogue.
-  --sample ID  Select one exact SIM sample (for example photon5).
+  --run-list FILE  Select DATA runs from a plain list (one run number per line).
+  --sample ID  Select one exact SIM sample (for example run28_photonjet20).
+  --sample-list FILE  Select SIM samples from a plain list (one name per line).
   --events N   Process at most N events per selected source (development).
   --source N   Select manifest source ordinal N (primitive commands only).
   --catalogue FILE  Use an explicitly prepared alternative catalogue.
   --output DIR Choose the output root; existing products are refused.
   --resume     Reuse only identity-matched, validated source/piece outputs.
-  --timeout N Maximum seconds per reconstruction piece (default 43200).
+  --timeout N  Maximum seconds per reconstruction piece (default 43200).
   --dry-run    Check bindings and show the plan; create nothing, run no ROOT.
   --help       Show this help.
 
-Populations: config/production_populations.json
+Populations: config/production_populations.json (or --catalogue FILE).
 Unbound populations fail; no input population or calibration is guessed.
-DI replay and final eventTree equivalence still require qualification.
 EOF
 }
 
@@ -108,7 +109,7 @@ while [[ $# -gt 0 ]]; do
             helper_args+=("$1" "$2")
             shift 2
             ;;
-        --sample|--catalogue|--output)
+        --sample|--run-list|--sample-list|--catalogue|--output)
             if [[ $# -lt 2 || -z $2 || $2 == --* ]]; then
                 printf 'ERROR: %s requires a value. See --help.\n' "$1" >&2
                 exit 2

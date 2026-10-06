@@ -8,6 +8,7 @@
 
 
 #include "PhotonJetTree.h"
+#include "internal/Production.h"
 
 #include <fun4all/Fun4AllReturnCodes.h>
 
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <set>
 #include <TH1.h>
+#include <TH2.h>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -33,9 +35,7 @@ namespace
  * End() one common policy: a broken production contract stops the run and the
  * output is never presented as a completed product.
  */
-int abortRun(const std::string& module,
-             const char* stage,
-             const std::exception& error)
+int abortRun(const std::string& module, const char* stage, const std::exception& error)
 {
   std::cerr << "\n"
             << module << ": " << stage << " failed\n"
@@ -51,11 +51,7 @@ int abortRun(const std::string& module,
 // Construction and ownership
 // ============================================================================
 
-PhotonJetTree::PhotonJetTree(Config config, const std::string& name)
-  : SubsysReco(name)
-  , m_config(std::move(config))
-{
-}
+PhotonJetTree::PhotonJetTree(Config config, const std::string& name) : SubsysReco(name), m_config(std::move(config)) {}
 
 PhotonJetTree::~PhotonJetTree()
 {
@@ -68,13 +64,18 @@ PhotonJetTree::~PhotonJetTree()
    */
   if (m_directOutput && !m_finalized)
   {
-    std::cerr << Name()
-              << ": destroyed before End(); output is not marked complete"
-              << std::endl;
-    try { closeOutput(); }
-    catch (const std::exception& error) { std::cerr << error.what() << std::endl; }
+    std::cerr << Name() << ": destroyed before End(); output is not marked complete" << std::endl;
+    try
+    {
+      closeOutput();
+    }
+    catch (const std::exception& error)
+    {
+      std::cerr << error.what() << std::endl;
+    }
   }
   delete m_vertexReweight;
+  delete m_ppg12TowerMask;
 }
 
 
@@ -86,51 +87,31 @@ PhotonJetTree::~PhotonJetTree()
 // not infer mode from the accidental presence or absence of DST nodes.
 // ============================================================================
 
-bool PhotonJetTree::isPP() const
-{
-  return m_config.system == CollisionSystem::PP;
-}
+bool PhotonJetTree::isPP() const { return m_config.system == CollisionSystem::PP; }
 
-bool PhotonJetTree::isAuAu() const
-{
-  return m_config.system == CollisionSystem::AuAu;
-}
+bool PhotonJetTree::isAuAu() const { return m_config.system == CollisionSystem::AuAu; }
 
-bool PhotonJetTree::isData() const
-{
-  return m_config.dataKind == DataKind::Data;
-}
+bool PhotonJetTree::isData() const { return m_config.dataKind == DataKind::Data; }
 
-bool PhotonJetTree::isSimulation() const
-{
-  return m_config.dataKind == DataKind::Simulation;
-}
+bool PhotonJetTree::isSimulation() const { return m_config.dataKind == DataKind::Simulation; }
 
 /*
  * Au+Au simulation in this analysis is embedded simulation: a simulated hard
  * scattering is overlaid with a minimum-bias Au+Au event. There is no
  * stand-alone Au+Au generator production lane represented by this mode.
  */
-bool PhotonJetTree::isEmbeddedSimulation() const
-{
-  return isAuAu() && isSimulation();
-}
+bool PhotonJetTree::isEmbeddedSimulation() const { return isAuAu() && isSimulation(); }
 
-bool PhotonJetTree::isArchivedDoubleInteraction() const
-{
-  return m_config.inputMode == InputMode::ArchivedG4Only;
-}
+bool PhotonJetTree::isArchivedDoubleInteraction() const { return m_config.inputMode == InputMode::ArchivedG4Only; }
 
 bool PhotonJetTree::isPhotonJetSimulation() const
 {
-  return isSimulation() &&
-         m_config.simulationRole == SimulationRole::PhotonJet;
+  return isSimulation() && m_config.simulationRole == SimulationRole::PhotonJet;
 }
 
 bool PhotonJetTree::isInclusiveJetSimulation() const
 {
-  return isSimulation() &&
-         m_config.simulationRole == SimulationRole::InclusiveJet;
+  return isSimulation() && m_config.simulationRole == SimulationRole::InclusiveJet;
 }
 
 
@@ -157,7 +138,13 @@ int PhotonJetTree::Init(PHCompositeNode* /*topNode*/)
     initializeSourceRecord();
     // Empty logical sources still book the complete schema and provenance;
     // they do not consume detector/model inputs or run the event loop.
-    if(m_config.source.maxEvents!=0)loadWeightInputs();
+    if (m_config.source.maxEvents != 0)
+    {
+      loadWeightInputs();
+      loadPPG12TowerMask();
+      m_nominalModel = std::make_shared<const photonjet::production::PinnedModel>(
+          m_config.photon.nominalId.modelFile, m_config.photon.nominalId.modelSha256);
+    }
     initializeOutput();
     m_outputReady = true;
   }
@@ -207,7 +194,7 @@ int PhotonJetTree::InitRun(PHCompositeNode* topNode)
  *
  *   accounting / identity
  *     -> event context
- *     -> reconstructed photons
+ *     -> reconstructed photons and their nominal labels
  *     -> reconstructed jets and recoil relations
  *     -> simulation truth and associations
  *     -> producer weights
@@ -259,6 +246,7 @@ int PhotonJetTree::process_event(PHCompositeNode* topNode)
     // after both reconstructed collections exist.
     // ------------------------------------------------------------------------
     capturePhotons(topNode);
+    labelNominalPhotons();
     captureJets(topNode);
     buildPhotonJetPairs();
 
@@ -276,13 +264,18 @@ int PhotonJetTree::process_event(PHCompositeNode* topNode)
     }
 
     // ------------------------------------------------------------------------
-    // Event weight
+    // Classification and event weight
     //
-    // Capture the producer-owned event weight after event/truth context is
-    // available. Downstream sample stitching and final normalization remain
-    // outside TreeProduction.
+    // The historical classification is recorded, not applied: it names the
+    // terminal status and the pp simulation sample ownership, and the PPG12
+    // bookkeeping logs this encounter's audit occurrences. The producer-owned
+    // event weight follows it; downstream sample stitching and final
+    // normalization remain outside TreeProduction.
     // ------------------------------------------------------------------------
+    classifyEvent();
     captureEventWeights(topNode);
+    recordPPG12Simulation();
+    recordPPG12PhotonYield();
 
     // ------------------------------------------------------------------------
     // Persist the complete encounter
@@ -352,11 +345,8 @@ int PhotonJetTree::End(PHCompositeNode* /*topNode*/)
     return abortRun(Name(), "End", error);
   }
 
-  std::cout << Name()
-            << ": encountered " << m_source.encounteredEvents
-            << ", retained " << m_source.retainedEvents
-            << ", upstream rejected " << m_source.upstreamRejectedEvents
-            << ", output " << m_config.outputFile
+  std::cout << Name() << ": encountered " << m_source.encounteredEvents << ", retained " << m_source.retainedEvents
+            << ", upstream rejected " << m_source.upstreamRejectedEvents << ", output " << m_config.outputFile
             << std::endl;
 
   return m_aborted ? Fun4AllReturnCodes::ABORTRUN : Fun4AllReturnCodes::EVENT_OK;
@@ -374,10 +364,8 @@ int PhotonJetTree::End(PHCompositeNode* /*topNode*/)
  * and the subset that reached this producer. They are exposure accounting, not
  * reconstructed-event records.
  */
-void PhotonJetTree::recordUpstreamRejectedEvent(
-    const int run,
-    const std::int64_t physicalEventSequence,
-    const std::int64_t sourceEntry)
+void PhotonJetTree::recordUpstreamRejectedEvent(const int run, const std::int64_t physicalEventSequence,
+                                                const std::int64_t sourceEntry)
 {
   UpstreamRejectedEventRecord rejected;
   rejected.sourceId = m_source.sourceId;
@@ -387,7 +375,7 @@ void PhotonJetTree::recordUpstreamRejectedEvent(
   fillRejectedOutput(rejected);
   m_upstreamRejectedEvents.push_back(rejected);
   ++m_source.upstreamRejectedEvents;
-  m_source.lastEntry=sourceEntry;
+  m_source.lastEntry = sourceEntry;
 }
 
 
@@ -429,15 +417,9 @@ void PhotonJetTree::validateConfiguration() const
 
   if (isArchivedDoubleInteraction() && !(isPP() && isSimulation()))
   {
-    throw std::runtime_error(
-        "archived Geant4-only input is only defined for p+p simulation");
+    throw std::runtime_error("archived Geant4-only input is only defined for p+p simulation");
   }
 
-  if (c.requireEmbeddedMinimumBias && !isEmbeddedSimulation())
-  {
-    throw std::runtime_error(
-        "the embedded minimum-bias requirement applies only to embedded simulation");
-  }
 
   // --------------------------------------------------------------------------
   // Provenance and source identity
@@ -445,15 +427,14 @@ void PhotonJetTree::validateConfiguration() const
   // Compact relational identities are only meaningful when their originating
   // source/configuration/software bytes are themselves pinned.
   // --------------------------------------------------------------------------
-  auto digestValid = [](const std::string& value) {
-    return value.size() == 64 && std::all_of(value.begin(), value.end(),
-        [](unsigned char c) { return std::isxdigit(c); });
+  auto digestValid = [](const std::string& value)
+  {
+    return value.size() == 64 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c); });
   };
 
-  for (const auto* digest : {&c.provenance.producerSourceSha256,
-                             &c.provenance.producerLibrarySha256,
-                             &c.provenance.macroSha256,
-                             &c.provenance.configurationSha256})
+  for (const auto* digest : {&c.provenance.producerSourceSha256, &c.provenance.producerLibrarySha256,
+                             &c.provenance.macroSha256, &c.provenance.configurationSha256})
     if (!digestValid(*digest)) throw std::runtime_error("source/library/macro/configuration provenance is not pinned");
 
   const bool haveFileDigest = digestValid(c.source.inputFileSha256);
@@ -470,15 +451,13 @@ void PhotonJetTree::validateConfiguration() const
    * One event row per producer encounter is a core schema invariant. Turning
    * this off would change the event/exposure denominator downstream.
    */
-  if (!c.retainEveryProducerEncounter)
-    throw std::runtime_error("canonical trees must retain every producer encounter");
+  if (!c.retainEveryProducerEncounter) throw std::runtime_error("canonical trees must retain every producer encounter");
 
   // --------------------------------------------------------------------------
   // Common numeric storage and matching bounds
   // --------------------------------------------------------------------------
-  for (double value : {c.photon.minEtGeV, c.photon.maxEtGeV, c.photon.maxAbsEta,
-                       c.photon.objectVertexAbsZMaxCm, c.jets.truthMatchMaxDeltaR,
-                       c.photon.truthIsolationSignalRadius, c.photon.truthIsolationMaxEtGeV,
+  for (double value : {c.photon.minEtGeV, c.photon.maxEtGeV, c.photon.maxAbsEta, c.photon.objectVertexAbsZMaxCm,
+                       c.jets.truthMatchMaxDeltaR, c.photon.truthIsolationSignalRadius, c.photon.truthIsolationMaxEtGeV,
                        c.photon.truthIsolationCoreRadius})
     if (!std::isfinite(value) || value < 0)
       throw std::runtime_error("storage and matching bounds must be finite and nonnegative");
@@ -499,8 +478,7 @@ void PhotonJetTree::validateConfiguration() const
 
   if (!haveFileDigest && !haveManifestDigest)
   {
-    throw std::runtime_error(
-        "source identity requires a pinned input-file or source-manifest SHA256");
+    throw std::runtime_error("source identity requires a pinned input-file or source-manifest SHA256");
   }
 
   if (c.source.firstEntry < 0)
@@ -534,7 +512,8 @@ void PhotonJetTree::validateConfiguration() const
   std::set<std::uint64_t> isolationCodes;
   for (const double radius : c.photon.isolationRadii)
   {
-    if (!std::isfinite(radius) || !isolationCodes.insert(photonjet::radiusCode(radius)).second || (std::abs(radius - 0.3) > 1e-6 && std::abs(radius - 0.4) > 1e-6))
+    if (!std::isfinite(radius) || !isolationCodes.insert(photonjet::radiusCode(radius)).second ||
+        (std::abs(radius - 0.3) > 1e-6 && std::abs(radius - 0.4) > 1e-6))
     {
       throw std::runtime_error("only R=0.3 and R=0.4 isolation cones are supported");
     }
@@ -571,8 +550,7 @@ void PhotonJetTree::validateConfiguration() const
      */
     if (jet.rawNode == jet.correctedNode)
     {
-      throw std::runtime_error(
-          "a jet collection names the same node before and after the energy scale");
+      throw std::runtime_error("a jet collection names the same node before and after the energy scale");
     }
 
     if (!(jet.radius > 0.0))
@@ -583,8 +561,7 @@ void PhotonJetTree::validateConfiguration() const
     const bool ppView = jet.view == JetView::PP;
     if (ppView != isPP())
     {
-      throw std::runtime_error(
-          "a jet collection view does not belong to the configured collision system");
+      throw std::runtime_error("a jet collection view does not belong to the configured collision system");
     }
   }
 
@@ -602,8 +579,7 @@ void PhotonJetTree::validateConfiguration() const
   // --------------------------------------------------------------------------
   if (c.centrality.reconstructDataCentrality && !(isAuAu() && isData()))
   {
-    throw std::runtime_error(
-        "centrality reconstruction during this pass applies only to Au+Au data");
+    throw std::runtime_error("centrality reconstruction during this pass applies only to Au+Au data");
   }
 
   for (double edge : c.centrality.edges)
@@ -654,22 +630,21 @@ void PhotonJetTree::initializeSourceRecord()
    * only through a manifest is anchored to that manifest and disambiguated by
    * its member ordinal below.
    */
-  const std::string& digest =
-      s.inputFileSha256.size() >= 32 ? s.inputFileSha256
-                                    : s.sourceManifestSha256;
+  const std::string& digest = s.inputFileSha256.size() >= 32 ? s.inputFileSha256 : s.sourceManifestSha256;
 
   m_source.sourceId = photonjet::makeSourceIdentity(digest);
 
   if (s.inputFileSha256.empty())
   {
-    m_source.sourceId.hi = photonjet::mixIdentityWord(m_source.sourceId.hi ^ static_cast<std::uint64_t>(s.sourceFileOrdinal));
-    m_source.sourceId.lo = photonjet::mixIdentityWord(m_source.sourceId.lo ^ static_cast<std::uint64_t>(s.sourceFileOrdinal));
+    m_source.sourceId.hi =
+        photonjet::mixIdentityWord(m_source.sourceId.hi ^ static_cast<std::uint64_t>(s.sourceFileOrdinal));
+    m_source.sourceId.lo =
+        photonjet::mixIdentityWord(m_source.sourceId.lo ^ static_cast<std::uint64_t>(s.sourceFileOrdinal));
   }
 
   if (!m_source.sourceId.valid())
   {
-    throw std::runtime_error(
-        "could not build a source identity from the configured SHA256");
+    throw std::runtime_error("could not build a source identity from the configured SHA256");
   }
 }
 

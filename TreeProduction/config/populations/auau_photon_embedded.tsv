@@ -1,0 +1,3 @@
+group	manifest	manifest_sha256	sources	events
+run28_embeddedPhoton12	../../lists/simulation/run28_embeddedPhoton12/sources.tsv	d2a87a9a69e8ce5a52bf014dc1a6503d36e3bce5b91484e6a4d23f0423567ac2	10000	9991946
+run28_embeddedPhoton20	../../lists/simulation/run28_embeddedPhoton20/sources.tsv	4011267d50491d1ebadb2c4debc41ea8f9e9482444e6dd04a322ab14c71ba374	10000	9991946

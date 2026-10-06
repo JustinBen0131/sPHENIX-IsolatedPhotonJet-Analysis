@@ -1,41 +1,75 @@
 """Inputs: source-bound H70 training rows from completed eventTree groups.
 
-Reuse TreeProduction's publication manifests and photon feature map. Two bounded ROOT
-passes write a disk-backed matrix; SQLite checks identities and assigns an
-event-grouped split once for every learner. Isolation never enters the labels.
-Weights reproduce the existing class balance and spline ET/eta flattening.
+Reuse TreeProduction's publication manifests and photon feature map through its
+installed ROOT-only eventTree library. Two bounded ROOT passes write a
+disk-backed matrix; SQLite checks identities and assigns an event-grouped
+split once for every learner. Isolation never enters the labels. Weights
+reproduce the existing class balance and spline ET/eta flattening.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
+import os
 from pathlib import Path
 import sqlite3
-import sys
 
 import awkward as ak
 import numpy as np
 
 from .Models import SYSTEMS, digest, file_hash, progress, read_json, require, save_json
 
-
-def use_format(code_root):
-    folder = Path(code_root).resolve() / 'TreeProduction/scripts'
-    require((folder / 'eventtree/schema.py').is_file(), 'the shared TreeProduction eventTree module is required')
-    if str(folder) not in sys.path:
-        sys.path.insert(0, str(folder))
+_EVENTTREE = None
 
 
-def published_inputs(groups, system, *, code_root):
+def eventtree():
+    """TreeProduction's installed eventTree library, bound through PyROOT.
+
+    MYINSTALL names the installation prefix (lib/ and include/TreeProduction/).
+    Only the ROOT product library is loaded, never a detector library.
+    """
+    global _EVENTTREE
+    if _EVENTTREE is None:
+        prefix = Path(os.environ.get('MYINSTALL', ''))
+        require(os.environ.get('MYINSTALL') and (prefix / 'include/TreeProduction/EventTree.h').is_file(),
+                'install TreeProduction (libEventTree) and set MYINSTALL to its installation prefix')
+        import ROOT
+        ROOT.gROOT.SetBatch(True)
+        ROOT.gInterpreter.AddIncludePath(str(prefix / 'include'))
+        require(ROOT.gSystem.Load(str(prefix / 'lib' / 'libEventTree')) >= 0, 'cannot load libEventTree from ' + str(prefix))
+        require(ROOT.gInterpreter.Declare('#include "TreeProduction/EventTree.h"'), 'cannot declare the eventTree interface')
+        _EVENTTREE = ROOT.eventtree
+    return _EVENTTREE
+
+
+def run(function, *arguments):
+    """One library call; its refusal becomes the ValueError this package reports."""
+    try:
+        return function(*arguments)
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError(str(error).strip().splitlines()[-1].split('runtime_error: ', 1)[-1]) from error
+
+
+def metadata(path):
+    """The saved file's direct meta/ records."""
+    return json.loads(str(run(eventtree().metadataJson, str(path))))
+
+
+def feature_branches():
+    """Model input name -> eventTree branch, as TreeProduction stores it."""
+    return {str(name): str(branch) for name, branch in eventtree().featureBranches()}
+
+
+def published_inputs(groups, system):
     """Resolve each CURRENT once and verify its exact logical-source roster."""
-    use_format(code_root)
-    from eventtree.publication import resolve
-    from eventtree.integrity import metadata
-    import uproot
     require(groups, 'no completed dataset groups configured; use --group or config datasets')
     inputs, seen = [], set()
     for group in groups:
-        version, manifest = resolve(group)
+        resolved = json.loads(str(run(eventtree().resolveGroup, str(group))))
+        version, manifest = Path(resolved['directory']), resolved['manifest']
         require(manifest['stage'] in (2, 3), 'training/scoring requires a completed group')
         for item in manifest['files']:
             path = (version / item['relative_path']).resolve()
@@ -43,11 +77,10 @@ def published_inputs(groups, system, *, code_root):
             require(file_hash(path) == item['sha256'], 'published input hash differs: ' + str(path))
             require(item['logical_id'] not in seen, 'duplicate logical source across selected groups')
             seen.add(item['logical_id'])
-            with uproot.open(path) as f:
-                meta = metadata(f)
-                require(meta['schema']['system'] == SYSTEMS[system], 'mixed collision systems')
-                require(meta['source']['logical_source_id'] == item['logical_id'], 'logical identity mismatch')
-                require('consolidation' in meta, 'input is not a completed logical-source file')
+            meta = metadata(path)
+            require(meta['schema']['system'] == SYSTEMS[system], 'mixed collision systems')
+            require(meta['source']['logical_source_id'] == item['logical_id'], 'logical identity mismatch')
+            require('consolidation' in meta, 'input is not a completed logical-source file')
             inputs.append(dict(path=str(path), sha256=item['sha256'], logical_id=item['logical_id'],
                                relative_path=item['relative_path'], group=str(Path(group).resolve()),
                                group_id=manifest['group_id'], version=manifest['version'],
@@ -58,9 +91,9 @@ def published_inputs(groups, system, *, code_root):
 def event_chunks(path, *, all_branches=False, branches=None, step_size='16 MB'):
     """Chunk-local metadata keeps view/code dictionaries valid after consolidation."""
     import uproot
-    from eventtree.integrity import metadata
+    meta = metadata(path)
     with uproot.open(path) as f:
-        meta = metadata(f); tree = f['eventTree']
+        tree = f['eventTree']
         chunks = meta.get('consolidation', {}).get('chunks')
         require(chunks is not None, 'consolidated provenance missing')
         previous = 0
@@ -76,7 +109,7 @@ def event_chunks(path, *, all_branches=False, branches=None, step_size='16 MB'):
 
 def feature_rows(arrays, meta, recipe):
     """Return one float32 feature vector per photon; prove named H70 parity."""
-    from eventtree.photon_id import BRANCH
+    BRANCH = feature_branches()
     counts = ak.to_numpy(ak.num(arrays['pho_et'])).astype(np.int64)
     n = int(counts.sum())
     if not n:
@@ -167,7 +200,7 @@ def source_role(source, recipe):
 
 def training_rows(item, recipe):
     """Read only training witnesses; exclude classes or events outside the recipe."""
-    from eventtree.photon_id import BRANCH
+    BRANCH = feature_branches()
     role = source_role(item['source'], recipe)
     branches = sorted(set([BRANCH[n] for n in recipe['features']] + [
         'pho_et','pho_eta','cent_value','vtx_z','vtx_valid','evt_record','evt_nodes_ready',

@@ -9,6 +9,7 @@
 
 #include "../PhotonJetTree.h"
 #include "../PhotonClusterBuilder.h"
+#include "Production.h"
 #include <calobase/RawCluster.h>
 #include <calobase/RawClusterContainer.h>
 #include <calobase/RawClusterUtility.h>
@@ -22,17 +23,23 @@
 #include <phool/PHCompositeNode.h>
 #include <phool/getClass.h>
 #include <CLHEP/Vector/ThreeVector.h>
+#include <TDirectory.h>
+#include <TFile.h>
+#include <TH2.h>
+#include <TVector2.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <jetbase/Jet.h>
 #include <jetbase/JetContainer.h>
+#include <jetbase/Jetv2.h>
 #include <vector>
 
 // Photon capture and optional reconstruction witnesses
@@ -40,16 +47,12 @@
 namespace
 {
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
-constexpr double kPi = 3.14159265358979323846;
 
 constexpr int kCemcEtaBins = 96;
 constexpr int kCemcPhiBins = 256;
 constexpr int kGridHalfWidth = 3;  // 7x7 grid about the seed tower
 
-bool finiteValue(const double value)
-{
-  return std::isfinite(value);
-}
+bool finiteValue(const double value) { return std::isfinite(value); }
 
 
 // ============================================================================
@@ -68,18 +71,6 @@ int wrapPhiIndex(int index)
 }
 
 
-/**
- * Wrap a physical azimuth onto (-pi, pi].
- */
-double wrapPhi(double phi)
-{
-  while (phi > kPi) phi -= 2.0 * kPi;
-  while (phi <= -kPi) phi += 2.0 * kPi;
-
-  return phi;
-}
-
-
 // ============================================================================
 // PhotonClusterBuilder-attached observables
 //
@@ -93,9 +84,7 @@ double namedShape(const RawCluster* cluster, const std::string& name)
   const auto& shapes = cluster->get_all_shower_shapes();
   const auto found = shapes.find(name);
 
-  return found == shapes.end()
-             ? kNaN
-             : static_cast<double>(found->second);
+  return found == shapes.end() ? kNaN : static_cast<double>(found->second);
 }
 
 bool hasNamedShape(const RawCluster* cluster, const std::string& name)
@@ -114,12 +103,9 @@ bool hasNamedShape(const RawCluster* cluster, const std::string& name)
  * id and the container key are distinct and both retained. Kinematic input
  * bits are available only for the frozen 25-feature NPB input order.
  */
-photonjet::ModelInvocationRecord modelInvocationWitness(
-    const photonjet::PhotonClusterBuilder::ModelInvocation& seen,
-    const RawCluster* cluster,
-    const std::uint64_t clusterKey,
-    const std::uint32_t ordinal,
-    const std::string& photonNode)
+photonjet::ModelInvocationRecord modelInvocationWitness(const photonjet::PhotonClusterBuilder::ModelInvocation& seen,
+                                                        const RawCluster* cluster, const std::uint64_t clusterKey,
+                                                        const std::uint32_t ordinal, const std::string& photonNode)
 {
   photonjet::ModelInvocationRecord witness;
   witness.captureVersion = 1;
@@ -139,12 +125,13 @@ photonjet::ModelInvocationRecord modelInvocationWitness(
   if (witness.inputsCaptured)
   {
     witness.orderedInputs = seen.inputs;
-    for (const float value : seen.inputs)
-      witness.orderedInputFinite.push_back(std::isfinite(value) ? 1 : 0);
+    for (const float value : seen.inputs) witness.orderedInputFinite.push_back(std::isfinite(value) ? 1 : 0);
   }
-  witness.inputsFinite = witness.inputsCaptured &&
-      std::all_of(witness.orderedInputFinite.begin(), witness.orderedInputFinite.end(),
-                  [](std::int32_t value) { return value == 1; }) ? 1 : 0;
+  witness.inputsFinite =
+      witness.inputsCaptured && std::all_of(witness.orderedInputFinite.begin(), witness.orderedInputFinite.end(),
+                                            [](std::int32_t value) { return value == 1; })
+          ? 1
+          : 0;
 
   witness.sourcePhotonId = static_cast<std::uint32_t>(cluster->get_id());
   witness.sourceClusterEt = static_cast<float>(namedShape(cluster, "cluster_pt"));
@@ -176,18 +163,17 @@ photonjet::ModelInvocationRecord modelInvocationWitness(
  * line applies. Missing AuAu cones preserve the legacy 1e9 fail-safe
  * (non-isolated); pp retains its NaN invalid witness.
  */
-std::vector<photonjet::IsolationWitnessRecord> isolationWitnesses(
-    const photonjet::PhotonRecord& photon,
-    const double centrality,
-    const photonjet::PhotonConfig& config,
-    const bool auau)
+std::vector<photonjet::IsolationWitnessRecord> isolationWitnesses(const photonjet::PhotonRecord& photon,
+                                                                  const double centrality,
+                                                                  const photonjet::PhotonConfig& config,
+                                                                  const bool auau)
 {
   using photonjet::IsolationMethod;
   const auto& witness = config.isolationWitness;
   const IsolationMethod method = auau ? IsolationMethod::CalorimeterSub1 : IsolationMethod::Topocluster;
   const int centralityBin = auau && std::isfinite(centrality) ? static_cast<int>(centrality) : -1;
-  const bool routed = centralityBin >= 0 && centralityBin >= witness.centralityMin &&
-                      centralityBin < witness.centralityMax;
+  const bool routed =
+      centralityBin >= 0 && centralityBin >= witness.centralityMin && centralityBin < witness.centralityMax;
 
   std::vector<photonjet::IsolationWitnessRecord> rows;
   for (std::size_t index = 0; index < config.isolationRadii.size(); ++index)
@@ -196,7 +182,7 @@ std::vector<photonjet::IsolationWitnessRecord> isolationWitnesses(
     row.radius = config.isolationRadii[index];
     row.subtractionMethod = auau ? 2 : 1;
     row.reconstructedOrTruth = 0;
-    if(auau)row.coneSum=1e9;
+    if (auau) row.coneSum = 1e9;
     for (const photonjet::IsolationRecord& cone : photon.isolation)
       if (cone.method == method && cone.radius == row.radius && cone.valid) row.coneSum = cone.coneSum;
 
@@ -254,10 +240,7 @@ using CellMap = std::map<std::pair<int, int>, Cell>;
  *
  * Phi is periodic; eta outside the physical CEMC range is ignored.
  */
-void addCell(CellMap& cells,
-             TowerInfoContainer* towers,
-             const int etaIndex,
-             const int phiIndex)
+void addCell(CellMap& cells, TowerInfoContainer* towers, const int etaIndex, const int phiIndex)
 {
   if (etaIndex < 0 || etaIndex >= kCemcEtaBins)
   {
@@ -266,25 +249,20 @@ void addCell(CellMap& cells,
 
   const int phi = wrapPhiIndex(phiIndex);
 
-  Cell& cell =
-      cells[{etaIndex, phi}];
+  Cell& cell = cells[{etaIndex, phi}];
 
   if (cell.towerKey != 0)
   {
     return;
   }
 
-  const unsigned int key =
-      TowerInfoDefs::encode_emcal(
-          etaIndex,
-          phi);
+  const unsigned int key = TowerInfoDefs::encode_emcal(etaIndex, phi);
 
   cell.towerKey = key;
   cell.etaIndex = etaIndex;
   cell.phiIndex = phi;
 
-  if (TowerInfo* tower =
-          towers->get_tower_at_channel(TowerInfoDefs::decode_emcal(key)))
+  if (TowerInfo* tower = towers->get_tower_at_channel(TowerInfoDefs::decode_emcal(key)))
   {
     cell.present = true;
     cell.good = tower->get_isGood();
@@ -297,6 +275,64 @@ void addCell(CellMap& cells,
 }
 
 }  // namespace
+
+
+// ============================================================================
+// PPG12 photon-yield source arbitration (pp)
+//
+// PPG12 counts photon yield from the leading cluster that is not on a masked
+// tower. Every cluster of the photon node is considered, in encounter order:
+// the mask is read at the cluster's energy-weighted tower centroid
+// (cluster_ietacent/iphicent, the builder's shower-shape centroid, the
+// position PPG12 used), and the leading source is the unmasked cluster with
+// the highest cluster_pt of at least 5 GeV.
+// ============================================================================
+
+bool photonjet::production::PPG12TowerMasked(const TH2& mask, const double ietaCentroid, const double iphiCentroid)
+{
+  // Truncate toward zero exactly as PPG12's integer conversion, range-checked
+  // before the conversion.
+  const double ieta = std::trunc(ietaCentroid), iphi = std::trunc(iphiCentroid);
+  if (!std::isfinite(ieta) || !std::isfinite(iphi) || ieta < 0 || iphi < 0 || ieta >= mask.GetNbinsX() ||
+      iphi >= mask.GetNbinsY())
+    return false;
+  return mask.GetBinContent(static_cast<int>(ieta) + 1, static_cast<int>(iphi) + 1) > 0.0;
+}
+
+void photonjet::production::PPG12ArbitrateSource(EventRecord& event, const std::uint32_t clusterKey,
+                                                 const std::int32_t encounter, const bool masked, const double et,
+                                                 const double eta, const double phi)
+{
+  constexpr double minimumSourceEtGeV = 5.0;
+  if (masked || !std::isfinite(et) || et < minimumSourceEtGeV) return;
+  if (std::isfinite(event.ppg12LeadEt) && et <= event.ppg12LeadEt) return;
+  event.ppg12LeadKey = clusterKey;
+  event.ppg12LeadEncounter = encounter;
+  event.ppg12LeadEt = et;
+  event.ppg12LeadEta = eta;
+  event.ppg12LeadPhi = phi;
+}
+
+/**
+ * Load the pinned PPG12 tower mask once (pp). Its digest was verified with
+ * the other pinned inputs before reconstruction.
+ */
+void PhotonJetTree::loadPPG12TowerMask()
+{
+  const PhotonConfig& photon = m_config.photon;
+  if (photon.ppg12TowerMaskFile.empty()) return;
+
+  TDirectory::TContext context;
+  std::unique_ptr<TFile> file(TFile::Open(photon.ppg12TowerMaskFile.c_str(), "READ"));
+  if (!file || file->IsZombie())
+    throw std::runtime_error("cannot open the PPG12 tower mask " + photon.ppg12TowerMaskFile);
+  auto* mask = dynamic_cast<TH2*>(file->Get(photon.ppg12TowerMaskHistogram.c_str()));
+  if (!mask)
+    throw std::runtime_error("PPG12 tower mask '" + photon.ppg12TowerMaskHistogram + "' is absent from " +
+                             photon.ppg12TowerMaskFile);
+  m_ppg12TowerMask = static_cast<TH2*>(mask->Clone("photonjet_ppg12_tower_mask"));
+  m_ppg12TowerMask->SetDirectory(nullptr);
+}
 
 
 // ============================================================================
@@ -319,40 +355,28 @@ void addCell(CellMap& cells,
  */
 void PhotonJetTree::capturePhotons(PHCompositeNode* topNode)
 {
-  RawClusterContainer* candidates =
-      findNode::getClass<RawClusterContainer>(
-          topNode,
-          m_config.photon.photonNode);
+  RawClusterContainer* candidates = findNode::getClass<RawClusterContainer>(topNode, m_config.photon.photonNode);
 
   if (!candidates)
   {
-    throw std::runtime_error(
-        "missing photon candidate node '" +
-        m_config.photon.photonNode +
-        "'");
+    throw std::runtime_error("missing photon candidate node '" + m_config.photon.photonNode + "'");
   }
 
-  TowerInfoContainer* cemcTowers =
-      findNode::getClass<TowerInfoContainer>(
-          topNode,
-          m_config.nodes.cemcTowers);
+  TowerInfoContainer* cemcTowers = findNode::getClass<TowerInfoContainer>(topNode, m_config.nodes.cemcTowers);
 
   if (!cemcTowers)
   {
-    throw std::runtime_error(
-        "missing calibrated CEMC tower node '" +
-        m_config.nodes.cemcTowers +
-        "'");
+    throw std::runtime_error("missing calibrated CEMC tower node '" + m_config.nodes.cemcTowers + "'");
   }
 
-  // Keep the existing event-summary domain for jet capture. Photons have a
-  // separately selected reconstructed vertex (notably the pp-SIM MBD component).
+  // The workfest DATA contract limits reconstructed objects to |z| < 60 cm.
+  // Its SIM population is unfiltered by that DATA storage cut. Photons use
+  // the builder's vertex (notably the pp-SIM MBD component).
   m_event.recoObjectVertexInDomain =
       m_event.recoVertexValid &&
-      std::abs(m_event.recoVertexZ) < m_config.photon.objectVertexAbsZMaxCm;
+      (isSimulation() || std::abs(m_event.recoVertexZ) < m_config.photon.objectVertexAbsZMaxCm);
 
-  if (!m_photonBuilder)
-    throw std::runtime_error("photon capture requires the registered builder's event witness");
+  if (!m_photonBuilder) throw std::runtime_error("photon capture requires the registered builder's event witness");
 
   const double photonVertexZ = m_photonBuilder->get_vertex_z();
   if (!finiteValue(photonVertexZ))
@@ -360,23 +384,29 @@ void PhotonJetTree::capturePhotons(PHCompositeNode* topNode)
     m_event.recoPhotonCaptureState = CaptureState::InputUnavailable;
     return;
   }
-  if (!(std::abs(photonVertexZ) < m_config.photon.objectVertexAbsZMaxCm))
+  if (isData() && !(std::abs(photonVertexZ) < m_config.photon.objectVertexAbsZMaxCm))
   {
     m_event.recoPhotonCaptureState = CaptureState::NotApplicable;
     return;
   }
   m_event.recoPhotonCaptureState = CaptureState::Complete;
   m_event.recoPhotonCaptureVersion = 1;
-  m_event.recoPhotonCaptureDomain = m_config.photon.minEtGeV == 5. &&
-      m_config.photon.maxEtGeV == 40. && m_config.photon.maxAbsEta == .7 ? 1 : -1;
+  // 1: ET 5-40 GeV, 2: ET 12-40 GeV (Au+Au DATA), both |eta| < 0.7; -1 otherwise.
+  const bool standardEdges = m_config.photon.maxEtGeV == 40. && m_config.photon.maxAbsEta == .7;
+  m_event.recoPhotonCaptureDomain = !standardEdges                    ? -1
+                                    : m_config.photon.minEtGeV == 5.  ? 1
+                                    : m_config.photon.minEtGeV == 12. ? 2
+                                                                      : -1;
 
   std::uint32_t encountered = 0;
 
-  for (const auto& [clusterKey, cluster] :
-       candidates->getClustersMap())
+  // The PPG12 source arbitration considers every cluster, retained or not.
+  const TH2* ppg12Mask = m_ppg12TowerMask;
+  if (ppg12Mask) m_event.ppg12ArbitrationState = 1;
+
+  for (const auto& [clusterKey, cluster] : candidates->getClustersMap())
   {
-    const std::uint32_t ordinal =
-        encountered++;
+    const std::uint32_t ordinal = encountered++;
     ++m_event.recoPhotonInspectedCount;
 
     if (!cluster)
@@ -385,11 +415,24 @@ void PhotonJetTree::capturePhotons(PHCompositeNode* topNode)
       continue;
     }
 
+    const bool ppg12Masked =
+        ppg12Mask && photonjet::production::PPG12TowerMasked(*ppg12Mask, namedShape(cluster, "cluster_ietacent"),
+                                                             namedShape(cluster, "cluster_iphicent"));
+
+    if (ppg12Mask)
+    {
+      photonjet::production::PPG12ArbitrateSource(
+          m_event, static_cast<std::uint32_t>(clusterKey), static_cast<std::int32_t>(ordinal), ppg12Masked,
+          namedShape(cluster, "cluster_pt"), namedShape(cluster, "cluster_eta"), namedShape(cluster, "cluster_phi"));
+    }
+
     PhotonRecord photon;
+    photon.ppg12TowerMaskState = ppg12Mask ? (ppg12Masked ? 1 : 0) : -1;
 
     photon.eventId = m_event.eventId;
     photon.nativeClusterKey = clusterKey;
     photon.producerVertexZ = namedShape(cluster, "vertex_z");
+    photon.clusterProbability = cluster->get_prob();
     photon.energy = cluster->get_energy();
     photon.et = namedShape(cluster, "cluster_pt");
     photon.eta = namedShape(cluster, "cluster_eta");
@@ -411,10 +454,18 @@ void PhotonJetTree::capturePhotons(PHCompositeNode* topNode)
       throw std::runtime_error("photon vertex does not match the current builder event");
 
     photon.kinematicsFinite =
-        finiteValue(photon.energy) &&
-        finiteValue(photon.et) &&
-        finiteValue(photon.eta) &&
-        finiteValue(photon.phi);
+        finiteValue(photon.energy) && finiteValue(photon.et) && finiteValue(photon.eta) && finiteValue(photon.phi);
+
+    // The PPG12 simulation bookkeeping reads every candidate, stored or not.
+    if (recordsPPG12Simulation())
+    {
+      PhotonRecord candidate = photon;
+      candidate.encounterOrdinal = ordinal;
+      candidate.isolation = photonIsolation(cluster, candidate);
+      if (!m_config.photon.productionScore.scoreName.empty())
+        candidate.productionScore = namedShape(cluster, m_config.photon.productionScore.scoreName);
+      m_ppg12Photons.push_back(std::move(candidate));
+    }
 
     if (!photonInCaptureDomain(photon))
     {
@@ -434,36 +485,24 @@ void PhotonJetTree::capturePhotons(PHCompositeNode* topNode)
      */
     photon.encounterOrdinal = ordinal;
 
-    photon.photonId =
-        photonjet::makePhotonIdentity(
-            m_event.eventId,
-            clusterKey,
-            ordinal);
+    photon.photonId = photonjet::makePhotonIdentity(m_event.eventId, clusterKey, ordinal);
 
-    capturePhotonTiming(
-        cluster,
-        photon);
+    capturePhotonTiming(cluster, photon);
 
-    capturePhotonShowerShapes(
-        cluster,
-        cemcTowers,
-        photon);
+    capturePhotonShowerShapes(cluster, cemcTowers, photon);
 
-    capturePhotonIsolation(
-        cluster,
-        photon);
+    // PhotonRecord carries the isolation views while the normalized Isolation
+    // table receives the same records for direct relational access.
+    photon.isolation = photonIsolation(cluster, photon);
+    m_isolationRecords.insert(m_isolationRecords.end(), photon.isolation.begin(), photon.isolation.end());
 
-    photon.isolationWitnesses =
-        isolationWitnesses(photon, m_event.analysisCentrality, m_config.photon, isAuAu());
+    photon.isolationWitnesses = isolationWitnesses(photon, m_event.analysisCentrality, m_config.photon, isAuAu());
 
     // The configured producer score exactly as the builder wrote it.
     if (!m_config.photon.productionScore.scoreName.empty())
       photon.productionScore = namedShape(cluster, m_config.photon.productionScore.scoreName);
 
-    capturePhotonIsolationConstituents(
-        topNode,
-        cluster,
-        photon);
+    capturePhotonIsolationConstituents(topNode, cluster, photon);
 
     /*
      * Truth.cc owns the dominant-primary calculation and final photon-truth
@@ -471,17 +510,13 @@ void PhotonJetTree::capturePhotons(PHCompositeNode* topNode)
      * evaluator as unavailable; DATA records truth as not applicable.
      */
     photon.dominantTruth.state =
-        isSimulation()
-            ? DominantTruthState::EvaluatorUnavailable
-            : DominantTruthState::NotSimulation;
+        isSimulation() ? DominantTruthState::EvaluatorUnavailable : DominantTruthState::NotSimulation;
 
-    m_photons.push_back(
-        std::move(photon));
+    m_photons.push_back(std::move(photon));
     ++m_event.recoPhotonWrittenCount;
   }
   if (m_event.recoPhotonInspectedCount != candidates->getClustersMap().size() ||
-      m_event.recoPhotonWrittenCount != m_event.recoPhotonEligibleCount ||
-      m_event.recoPhotonUnclassifiableCount != 0)
+      m_event.recoPhotonWrittenCount != m_event.recoPhotonEligibleCount || m_event.recoPhotonUnclassifiableCount != 0)
     m_event.recoPhotonCaptureState = CaptureState::InputUnavailable;
 }
 
@@ -504,14 +539,12 @@ bool PhotonJetTree::photonInCaptureDomain(const PhotonRecord& photon) const
     return false;
   }
 
-  if (photon.et < m_config.photon.minEtGeV ||
-      photon.et >= m_config.photon.maxEtGeV)
+  if (photon.et < m_config.photon.minEtGeV || photon.et >= m_config.photon.maxEtGeV)
   {
     return false;
   }
 
-  if (std::abs(photon.eta) >=
-      m_config.photon.maxAbsEta)
+  if (std::abs(photon.eta) >= m_config.photon.maxAbsEta)
   {
     return false;
   }
@@ -529,9 +562,7 @@ bool PhotonJetTree::photonInCaptureDomain(const PhotonRecord& photon) const
 // shower calculation.
 // ============================================================================
 
-void PhotonJetTree::capturePhotonTiming(
-    const RawCluster* cluster,
-    PhotonRecord& photon) const
+void PhotonJetTree::capturePhotonTiming(const RawCluster* cluster, PhotonRecord& photon) const
 {
   PhotonTimingRecord& timing = photon.timing;
   timing.energyWeightedNumerator = namedShape(cluster, "time_energy_numerator");
@@ -539,26 +570,21 @@ void PhotonJetTree::capturePhotonTiming(
   timing.meanTimeSamples = namedShape(cluster, "mean_time");
 
   const double count = namedShape(cluster, "time_contributing_towers");
-  const bool countValid = finiteValue(count) && count >= 0.0 &&
-      count <= std::numeric_limits<std::uint32_t>::max() && std::floor(count) == count;
+  const bool countValid = finiteValue(count) && count >= 0.0 && count <= std::numeric_limits<std::uint32_t>::max() &&
+                          std::floor(count) == count;
   if (countValid)
   {
     timing.contributingTowerCount = static_cast<std::uint32_t>(count);
   }
 
   timing.finite = finiteValue(timing.meanTimeSamples);
-  timing.valid = namedShape(cluster, "time_valid") > 0.5 && countValid &&
-      finiteValue(timing.energyWeightedNumerator) &&
-      finiteValue(timing.energyDenominator) && timing.energyDenominator > 0.0 &&
-      timing.finite;
-  timing.timeNs = timing.valid
-      ? timing.meanTimeSamples * m_config.photon.timingSampleNs : kNaN;
+  timing.valid = namedShape(cluster, "time_valid") > 0.5 && countValid && finiteValue(timing.energyWeightedNumerator) &&
+                 finiteValue(timing.energyDenominator) && timing.energyDenominator > 0.0 && timing.finite;
+  timing.timeNs = timing.valid ? timing.meanTimeSamples * m_config.photon.timingSampleNs : kNaN;
 }
 
-void PhotonJetTree::capturePhotonShowerShapes(
-    const RawCluster* cluster,
-    TowerInfoContainer* cemcTowers,
-    PhotonRecord& photon)
+void PhotonJetTree::capturePhotonShowerShapes(const RawCluster* cluster, TowerInfoContainer* cemcTowers,
+                                              PhotonRecord& photon)
 {
   CellMap cells;
   for (const auto& [rawKey, mapEnergy] : cluster->get_towermap())
@@ -586,24 +612,40 @@ void PhotonJetTree::capturePhotonShowerShapes(
     ShowerShapeRecord shape;
     shape.definitionName = definitionName;
     shape.energyFloorGeV = floor;
-    shape.et1 = value("et1"); shape.et2 = value("et2");
-    shape.et3 = value("et3"); shape.et4 = value("et4");
-    shape.e11 = value("e11"); shape.e13 = value("e13");
-    shape.e15 = value("e15"); shape.e17 = value("e17");
-    shape.e22 = value("e22"); shape.e31 = value("e31");
-    shape.e32 = value("e32"); shape.e33 = value("e33");
-    shape.e35 = value("e35"); shape.e37 = value("e37");
-    shape.e51 = value("e51"); shape.e52 = value("e52");
-    shape.e53 = value("e53"); shape.e55 = value("e55");
-    shape.e57 = value("e57"); shape.e71 = value("e71");
-    shape.e72 = value("e72"); shape.e73 = value("e73");
-    shape.e75 = value("e75"); shape.e77 = value("e77");
-    shape.weta = value("weta"); shape.wphi = value("wphi");
-    shape.wetaCog = value("weta_cog"); shape.wphiCog = value("wphi_cog");
-    shape.wetaCogX = value("weta_cogx"); shape.wphiCogX = value("wphi_cogx");
+    shape.et1 = value("et1");
+    shape.et2 = value("et2");
+    shape.et3 = value("et3");
+    shape.et4 = value("et4");
+    shape.e11 = value("e11");
+    shape.e13 = value("e13");
+    shape.e15 = value("e15");
+    shape.e17 = value("e17");
+    shape.e22 = value("e22");
+    shape.e31 = value("e31");
+    shape.e32 = value("e32");
+    shape.e33 = value("e33");
+    shape.e35 = value("e35");
+    shape.e37 = value("e37");
+    shape.e51 = value("e51");
+    shape.e52 = value("e52");
+    shape.e53 = value("e53");
+    shape.e55 = value("e55");
+    shape.e57 = value("e57");
+    shape.e71 = value("e71");
+    shape.e72 = value("e72");
+    shape.e73 = value("e73");
+    shape.e75 = value("e75");
+    shape.e77 = value("e77");
+    shape.weta = value("weta");
+    shape.wphi = value("wphi");
+    shape.wetaCog = value("weta_cog");
+    shape.wphiCog = value("wphi_cog");
+    shape.wetaCogX = value("weta_cogx");
+    shape.wphiCogX = value("wphi_cogx");
     shape.weta33CogX = value("weta33_cogx");
     shape.wphi33CogX = value("wphi33_cogx");
-    shape.w32 = value("w32"); shape.w52 = value("w52");
+    shape.w32 = value("w32");
+    shape.w52 = value("w52");
     shape.w72 = value("w72");
     shape.centerOfGravityEta = value("cog_eta_local");
     shape.centerOfGravityPhi = value("cog_phi_local");
@@ -613,8 +655,8 @@ void PhotonJetTree::capturePhotonShowerShapes(
 
     const double centerEta = value("center_ieta");
     const double centerPhi = value("center_iphi");
-    if (finiteValue(centerEta) && centerEta >= 0.0 && centerEta < kCemcEtaBins &&
-        finiteValue(centerPhi) && centerPhi >= 0.0 && centerPhi < kCemcPhiBins)
+    if (finiteValue(centerEta) && centerEta >= 0.0 && centerEta < kCemcEtaBins && finiteValue(centerPhi) &&
+        centerPhi >= 0.0 && centerPhi < kCemcPhiBins)
     {
       shape.centerEtaIndex = static_cast<std::int32_t>(centerEta);
       shape.centerPhiIndex = static_cast<std::int32_t>(centerPhi);
@@ -622,12 +664,9 @@ void PhotonJetTree::capturePhotonShowerShapes(
     const double deltaEtaMax = value("detamax");
     const double deltaPhiMax = value("dphimax");
     const double saturated = value("nsaturated");
-    if (finiteValue(deltaEtaMax) && deltaEtaMax >= 0.0)
-      shape.deltaEtaMax = static_cast<std::int32_t>(deltaEtaMax);
-    if (finiteValue(deltaPhiMax) && deltaPhiMax >= 0.0)
-      shape.deltaPhiMax = static_cast<std::int32_t>(deltaPhiMax);
-    if (finiteValue(saturated) && saturated >= 0.0)
-      shape.saturatedTowerCount = static_cast<std::uint32_t>(saturated);
+    if (finiteValue(deltaEtaMax) && deltaEtaMax >= 0.0) shape.deltaEtaMax = static_cast<std::int32_t>(deltaEtaMax);
+    if (finiteValue(deltaPhiMax) && deltaPhiMax >= 0.0) shape.deltaPhiMax = static_cast<std::int32_t>(deltaPhiMax);
+    if (finiteValue(saturated) && saturated >= 0.0) shape.saturatedTowerCount = static_cast<std::uint32_t>(saturated);
 
     const auto* witness = m_photonBuilder->get_shower_feature_view(cluster, definitionName);
     if (!witness) throw std::runtime_error("missing configured builder feature view: " + definitionName);
@@ -638,21 +677,28 @@ void PhotonJetTree::capturePhotonShowerShapes(
     shape.centerPhiIndex = static_cast<std::int32_t>(captured("center_iphi"));
     shape.centerOfGravityEta = captured("cog_eta_local");
     shape.centerOfGravityPhi = captured("cog_phi_local");
-    shape.e11 = captured("e11"); shape.e33 = captured("e33");
-    shape.e32 = captured("e32"); shape.e35 = captured("e35");
+    shape.e11 = captured("e11");
+    shape.e33 = captured("e33");
+    shape.e32 = captured("e32");
+    shape.e35 = captured("e35");
     shape.e11OverE33 = captured("e11_over_e33");
     shape.e32OverE35 = captured("e32_over_e35");
-    shape.wetaCogX = captured("weta_cogx"); shape.wphiCogX = captured("wphi_cogx");
-    shape.weta33CogX = captured("weta33_cogx"); shape.wphi33CogX = captured("wphi33_cogx");
-    shape.et1 = captured("et1"); shape.et2 = captured("et2");
-    shape.et3 = captured("et3"); shape.et4 = captured("et4");
+    shape.wetaCogX = captured("weta_cogx");
+    shape.wphiCogX = captured("wphi_cogx");
+    shape.weta33CogX = captured("weta33_cogx");
+    shape.wphi33CogX = captured("wphi33_cogx");
+    shape.et1 = captured("et1");
+    shape.et2 = captured("et2");
+    shape.et3 = captured("et3");
+    shape.et4 = captured("et4");
     shape.energySource = static_cast<std::int32_t>(captured("energy_source"));
     shape.rectangularMembership = static_cast<std::int32_t>(captured("rectangular_membership"));
     shape.momentMembership = static_cast<std::int32_t>(captured("moment_membership"));
     shape.activeSumCellCount = static_cast<std::uint32_t>(captured("active_sum_cell_count"));
     shape.activeMomentCellCount = static_cast<std::uint32_t>(captured("active_moment_cell_count"));
-    const std::array<const char*, 6> momentKeys{{"moment_eta_numerator", "moment_phi_numerator",
-        "moment_denominator", "moment33_eta_numerator", "moment33_phi_numerator", "moment33_denominator"}};
+    const std::array<const char*, 6> momentKeys{{"moment_eta_numerator", "moment_phi_numerator", "moment_denominator",
+                                                 "moment33_eta_numerator", "moment33_phi_numerator",
+                                                 "moment33_denominator"}};
     for (std::size_t index = 0; index < momentKeys.size(); ++index)
       shape.momentSums[index] = captured(momentKeys[index]);
 
@@ -690,10 +736,10 @@ void PhotonJetTree::capturePhotonShowerShapes(
     shape.zeroCellCount = static_cast<std::uint32_t>(captured("zero_cell_count"));
     shape.negativeCellCount = static_cast<std::uint32_t>(captured("negative_cell_count"));
     shape.nonFiniteCellCount = static_cast<std::uint32_t>(captured("non_finite_cell_count"));
-    shape.valid = finiteValue(shape.et1) && finiteValue(shape.et2) && finiteValue(shape.et3) && finiteValue(shape.et4) &&
-        finiteValue(shape.wetaCogX) && finiteValue(shape.wphiCogX) &&
-        finiteValue(shape.weta33CogX) && finiteValue(shape.wphi33CogX) &&
-        finiteValue(shape.e11OverE33) && finiteValue(shape.e32OverE35);
+    shape.valid = finiteValue(shape.et1) && finiteValue(shape.et2) && finiteValue(shape.et3) &&
+                  finiteValue(shape.et4) && finiteValue(shape.wetaCogX) && finiteValue(shape.wphiCogX) &&
+                  finiteValue(shape.weta33CogX) && finiteValue(shape.wphi33CogX) && finiteValue(shape.e11OverE33) &&
+                  finiteValue(shape.e32OverE35);
     photon.showerShapes.push_back(std::move(shape));
   }
 
@@ -705,7 +751,7 @@ void PhotonJetTree::capturePhotonShowerShapes(
 
   for (const auto& [index, cell] : cells)
   {
-    (void) index;
+    (void)index;
 
     PhotonCellRecord row;
 
@@ -718,52 +764,28 @@ void PhotonJetTree::capturePhotonShowerShapes(
     row.etaIndex = cell.etaIndex;
     row.phiIndex = cell.phiIndex;
 
-    row.calibratedEnergy =
-        cell.present
-            ? cell.energy
-            : kNaN;
+    row.calibratedEnergy = cell.present ? cell.energy : kNaN;
 
-    row.clusterMapEnergy =
-        cell.owned
-            ? cell.clusterMapEnergy
-            : kNaN;
+    row.clusterMapEnergy = cell.owned ? cell.clusterMapEnergy : kNaN;
 
-    row.towerTimeSamples =
-        cell.present
-            ? cell.timeSamples
-            : kNaN;
+    row.towerTimeSamples = cell.present ? cell.timeSamples : kNaN;
 
-    row.towerStatus =
-        cell.status;
+    row.towerStatus = cell.status;
     row.towerAvailable = cell.present;
 
-    row.ownedByCluster =
-        cell.owned;
+    row.ownedByCluster = cell.owned;
 
-    row.inShowerSupport =
-        cell.inSupport;
+    row.inShowerSupport = cell.inSupport;
 
-    row.good =
-        cell.present &&
-        cell.good;
+    row.good = cell.present && cell.good;
 
-    row.zeroEnergy =
-        cell.present &&
-        finiteValue(cell.energy) &&
-        cell.energy == 0.0;
+    row.zeroEnergy = cell.present && finiteValue(cell.energy) && cell.energy == 0.0;
 
-    row.negativeEnergy =
-        cell.present &&
-        finiteValue(cell.energy) &&
-        cell.energy < 0.0;
+    row.negativeEnergy = cell.present && finiteValue(cell.energy) && cell.energy < 0.0;
 
-    row.finite =
-        cell.present &&
-        finiteValue(cell.energy) &&
-        finiteValue(cell.timeSamples);
+    row.finite = cell.present && finiteValue(cell.energy) && finiteValue(cell.timeSamples);
 
-    m_photonCells.push_back(
-        std::move(row));
+    m_photonCells.push_back(std::move(row));
   }
 }
 
@@ -791,25 +813,15 @@ void PhotonJetTree::capturePhotonShowerShapes(
 // remain downstream and can therefore be recalibrated without tree production.
 // ============================================================================
 
-void PhotonJetTree::capturePhotonIsolation(
-    const RawCluster* cluster,
-    PhotonRecord& photon)
+std::vector<photonjet::IsolationRecord> PhotonJetTree::photonIsolation(const RawCluster* cluster,
+                                                                       const PhotonRecord& photon) const
 {
-  for (const double radius :
-       m_config.photon.isolationRadii)
+  std::vector<IsolationRecord> cones;
+  for (const double radius : m_config.photon.isolationRadii)
   {
-    const int code =
-        static_cast<int>(
-            std::lround(
-                radius *
-                100.0));
+    const int code = static_cast<int>(std::lround(radius * 100.0));
 
-    const std::string key =
-        code == 30 ? "03" :
-        code == 40 ? "04" :
-        code == 20 ? "02" :
-        code == 10 ? "01" :
-                     "";
+    const std::string key = code == 30 ? "03" : code == 40 ? "04" : code == 20 ? "02" : code == 10 ? "01" : "";
 
     if (key.empty())
     {
@@ -823,15 +835,9 @@ void PhotonJetTree::capturePhotonIsolation(
     {
       IsolationRecord cone;
 
-      cone.axisEta =
-          namedShape(
-              cluster,
-              "isolation_axis_eta");
+      cone.axisEta = namedShape(cluster, "isolation_axis_eta");
 
-      cone.axisPhi =
-          namedShape(
-              cluster,
-              "isolation_axis_phi");
+      cone.axisPhi = namedShape(cluster, "isolation_axis_phi");
 
       cone.eventId = photon.eventId;
       cone.photonId = photon.photonId;
@@ -839,39 +845,24 @@ void PhotonJetTree::capturePhotonIsolation(
       cone.radius = radius;
       cone.method = IsolationMethod::CalorimeterRaw;
 
-      cone.electromagneticComponent =
-          namedShape(
-              cluster,
-              "iso_" + key + "_emcal");
+      cone.electromagneticComponent = namedShape(cluster, "iso_" + key + "_emcal");
 
-      cone.innerHadronicComponent =
-          namedShape(
-              cluster,
-              "iso_" + key + "_hcalin");
+      cone.innerHadronicComponent = namedShape(cluster, "iso_" + key + "_hcalin");
 
-      cone.outerHadronicComponent =
-          namedShape(
-              cluster,
-              "iso_" + key + "_hcalout");
+      cone.outerHadronicComponent = namedShape(cluster, "iso_" + key + "_hcalout");
 
       cone.candidateRemoved = true;
 
-      cone.valid =
-          namedShape(cluster, "iso_" + key + "_valid") > 0.5 &&
-          finiteValue(cone.axisEta) && finiteValue(cone.axisPhi) &&
-          finiteValue(cone.electromagneticComponent) &&
-          finiteValue(cone.innerHadronicComponent) &&
-          finiteValue(cone.outerHadronicComponent);
+      cone.valid = namedShape(cluster, "iso_" + key + "_valid") > 0.5 && finiteValue(cone.axisEta) &&
+                   finiteValue(cone.axisPhi) && finiteValue(cone.electromagneticComponent) &&
+                   finiteValue(cone.innerHadronicComponent) && finiteValue(cone.outerHadronicComponent);
 
       if (cone.valid)
       {
-        cone.coneSum =
-            cone.electromagneticComponent +
-            cone.innerHadronicComponent +
-            cone.outerHadronicComponent;
+        cone.coneSum = cone.electromagneticComponent + cone.innerHadronicComponent + cone.outerHadronicComponent;
       }
 
-      photon.isolation.push_back(cone);
+      cones.push_back(cone);
     }
 
     // ------------------------------------------------------------------------
@@ -882,15 +873,9 @@ void PhotonJetTree::capturePhotonIsolation(
     {
       IsolationRecord cone;
 
-      cone.axisEta =
-          namedShape(
-              cluster,
-              "isolation_axis_eta");
+      cone.axisEta = namedShape(cluster, "isolation_axis_eta");
 
-      cone.axisPhi =
-          namedShape(
-              cluster,
-              "isolation_axis_phi");
+      cone.axisPhi = namedShape(cluster, "isolation_axis_phi");
 
       cone.eventId = photon.eventId;
       cone.photonId = photon.photonId;
@@ -898,64 +883,41 @@ void PhotonJetTree::capturePhotonIsolation(
       cone.radius = radius;
       cone.method = IsolationMethod::CalorimeterSub1;
 
-      cone.electromagneticComponent =
-          namedShape(
-              cluster,
-              "iso_sub_" + key + "_emcal");
+      cone.electromagneticComponent = namedShape(cluster, "iso_sub_" + key + "_emcal");
 
-      cone.innerHadronicComponent =
-          namedShape(
-              cluster,
-              "iso_sub_" + key + "_hcalin");
+      cone.innerHadronicComponent = namedShape(cluster, "iso_sub_" + key + "_hcalin");
 
-      cone.outerHadronicComponent =
-          namedShape(
-              cluster,
-              "iso_sub_" + key + "_hcalout");
+      cone.outerHadronicComponent = namedShape(cluster, "iso_sub_" + key + "_hcalout");
 
       cone.candidateRemoved = true;
 
-      cone.valid =
-          namedShape(cluster, "iso_sub_" + key + "_valid") > 0.5 &&
-          finiteValue(cone.axisEta) && finiteValue(cone.axisPhi) &&
-          finiteValue(cone.electromagneticComponent) &&
-          finiteValue(cone.innerHadronicComponent) &&
-          finiteValue(cone.outerHadronicComponent);
+      cone.valid = namedShape(cluster, "iso_sub_" + key + "_valid") > 0.5 && finiteValue(cone.axisEta) &&
+                   finiteValue(cone.axisPhi) && finiteValue(cone.electromagneticComponent) &&
+                   finiteValue(cone.innerHadronicComponent) && finiteValue(cone.outerHadronicComponent);
 
       if (cone.valid)
       {
-        cone.coneSum =
-            cone.electromagneticComponent +
-            cone.innerHadronicComponent +
-            cone.outerHadronicComponent;
+        cone.coneSum = cone.electromagneticComponent + cone.innerHadronicComponent + cone.outerHadronicComponent;
       }
       else
       {
         cone.electromagneticComponent = cone.innerHadronicComponent = cone.outerHadronicComponent = kNaN;
       }
 
-      photon.isolation.push_back(cone);
+      cones.push_back(cone);
     }
 
     // ------------------------------------------------------------------------
     // pp topological-cluster cone
     // ------------------------------------------------------------------------
 
-    if (isPP() &&
-        (key == "03" ||
-         key == "04"))
+    if (isPP() && (key == "03" || key == "04"))
     {
       IsolationRecord cone;
 
-      cone.axisEta =
-          namedShape(
-              cluster,
-              "iso_topo_axis_eta");
+      cone.axisEta = namedShape(cluster, "iso_topo_axis_eta");
 
-      cone.axisPhi =
-          namedShape(
-              cluster,
-              "iso_topo_axis_phi");
+      cone.axisPhi = namedShape(cluster, "iso_topo_axis_phi");
 
       cone.eventId = photon.eventId;
       cone.photonId = photon.photonId;
@@ -965,43 +927,20 @@ void PhotonJetTree::capturePhotonIsolation(
 
       cone.candidateRemoved = true;
 
-      const double validFlag =
-          namedShape(
-              cluster,
-              "iso_topo_" + key + "_valid");
+      const double validFlag = namedShape(cluster, "iso_topo_" + key + "_valid");
 
-      const double value =
-          namedShape(
-              cluster,
-              "iso_topo_" + key);
+      const double value = namedShape(cluster, "iso_topo_" + key);
 
-      cone.valid =
-          hasNamedShape(
-              cluster,
-              "iso_topo_" + key) &&
-          finiteValue(validFlag) &&
-          validFlag > 0.5 &&
-          finiteValue(cone.axisEta) && finiteValue(cone.axisPhi) &&
-          finiteValue(value);
+      cone.valid = hasNamedShape(cluster, "iso_topo_" + key) && finiteValue(validFlag) && validFlag > 0.5 &&
+                   finiteValue(cone.axisEta) && finiteValue(cone.axisPhi) && finiteValue(value);
 
-      cone.coneSum =
-          cone.valid
-              ? value
-              : kNaN;
+      cone.coneSum = cone.valid ? value : kNaN;
 
-      photon.isolation.push_back(cone);
+      cones.push_back(cone);
     }
   }
 
-  /*
-   * PhotonRecord carries the isolation views while the normalized Isolation
-   * table receives the same records for direct relational access.
-   */
-  for (const IsolationRecord& cone :
-       photon.isolation)
-  {
-    m_isolationRecords.push_back(cone);
-  }
+  return cones;
 }
 
 
@@ -1028,10 +967,8 @@ void PhotonJetTree::capturePhotonIsolation(
 // isolated/non-isolated analysis regions.
 // ============================================================================
 
-void PhotonJetTree::capturePhotonIsolationConstituents(
-    PHCompositeNode* topNode,
-    const RawCluster* cluster,
-    const PhotonRecord& photon)
+void PhotonJetTree::capturePhotonIsolationConstituents(PHCompositeNode* topNode, const RawCluster* cluster,
+                                                       const PhotonRecord& photon)
 {
   if (!m_config.output.writeIsolationConstituents)
   {
@@ -1039,25 +976,16 @@ void PhotonJetTree::capturePhotonIsolationConstituents(
   }
 
   const double maxRadius =
-      *std::max_element(
-          m_config.photon.isolationRadii.begin(),
-          m_config.photon.isolationRadii.end());
+      *std::max_element(m_config.photon.isolationRadii.begin(), m_config.photon.isolationRadii.end());
 
-  const double axisEta =
-      namedShape(
-          cluster,
-          "isolation_axis_eta");
-
-  const double axisPhi =
-      namedShape(
-          cluster,
-          "isolation_axis_phi");
-
-  if (!finiteValue(axisEta) ||
-      !finiteValue(axisPhi))
-  {
-    return;  // invalid nominal axis; keep the candidate and invalid cone state
-  }
+  // Offsets are measured from the axis each system's cone uses: the photon
+  // cluster direction in pp, the builder's centre-of-gravity tower axis in
+  // Au+Au (the cluster direction when that axis is undefined). Azimuthal
+  // offsets use ROOT's [-pi, pi) convention.
+  const double builderAxisEta = namedShape(cluster, "isolation_axis_eta");
+  const double builderAxisPhi = namedShape(cluster, "isolation_axis_phi");
+  const double axisEta = isAuAu() && finiteValue(builderAxisEta) ? builderAxisEta : photon.eta;
+  const double axisPhi = isAuAu() && finiteValue(builderAxisPhi) ? builderAxisPhi : photon.phi;
 
   // ==========================================================================
   // Au+Au tower-based isolation witnesses
@@ -1075,80 +1003,69 @@ void PhotonJetTree::capturePhotonIsolationConstituents(
      * Historical source anchor:
      *   RecoilJets_AuAu.cc:7970-8033
      */
-    struct Layer { const char* raw; const char* sub; const char* geometry; RawTowerDefs::CalorimeterId id; };
+    struct Layer
+    {
+      const char* raw;
+      const char* sub;
+      const char* geometry;
+      RawTowerDefs::CalorimeterId id;
+    };
 
     const Layer layers[] = {
-      {"TOWERINFO_CALIB_CEMC_RETOWER", "TOWERINFO_CALIB_CEMC_RETOWER_SUB1", "TOWERGEOM_HCALIN", RawTowerDefs::HCALIN},
-      {"TOWERINFO_CALIB_HCALIN", "TOWERINFO_CALIB_HCALIN_SUB1", "TOWERGEOM_HCALIN", RawTowerDefs::HCALIN},
-      {"TOWERINFO_CALIB_HCALOUT", "TOWERINFO_CALIB_HCALOUT_SUB1", "TOWERGEOM_HCALOUT", RawTowerDefs::HCALOUT}};
+        {"TOWERINFO_CALIB_CEMC_RETOWER", "TOWERINFO_CALIB_CEMC_RETOWER_SUB1", "TOWERGEOM_HCALIN", RawTowerDefs::HCALIN},
+        {"TOWERINFO_CALIB_HCALIN", "TOWERINFO_CALIB_HCALIN_SUB1", "TOWERGEOM_HCALIN", RawTowerDefs::HCALIN},
+        {"TOWERINFO_CALIB_HCALOUT", "TOWERINFO_CALIB_HCALOUT_SUB1", "TOWERGEOM_HCALOUT", RawTowerDefs::HCALOUT}};
 
     for (int layer = 0; layer < 3; ++layer)
     {
       const auto& node = layers[layer];
 
-      auto* raw =
-          findNode::getClass<TowerInfoContainer>(
-              topNode,
-              node.raw);
+      auto* raw = findNode::getClass<TowerInfoContainer>(topNode, node.raw);
 
-      auto* sub =
-          findNode::getClass<TowerInfoContainer>(
-              topNode,
-              node.sub);
+      auto* sub = findNode::getClass<TowerInfoContainer>(topNode, node.sub);
 
-      auto* geometry =
-          findNode::getClass<RawTowerGeomContainer>(
-              topNode,
-              node.geometry);
+      auto* geometry = findNode::getClass<RawTowerGeomContainer>(topNode, node.geometry);
 
       if (!raw || !sub || !geometry) continue;
       const unsigned int channelCount = std::min(raw->size(), sub->size());
 
-      for (unsigned int channel = 0;
-           channel < channelCount;
-           ++channel)
+      for (unsigned int channel = 0; channel < channelCount; ++channel)
       {
-        auto* rawTower =
-            raw->get_tower_at_channel(channel);
+        auto* rawTower = raw->get_tower_at_channel(channel);
 
-        auto* subTower =
-            sub->get_tower_at_channel(channel);
+        auto* subTower = sub->get_tower_at_channel(channel);
 
-        if (!rawTower ||
-            !subTower)
+        if (!rawTower || !subTower)
         {
           continue;  // historical witness census skips unavailable pairs
         }
 
-        const auto key =
-            TowerInfoDefs::encode_hcal(channel);
+        const auto key = TowerInfoDefs::encode_hcal(channel);
 
-        const int etaBin =
-            TowerInfoDefs::getCaloTowerEtaBin(key);
+        const int etaBin = TowerInfoDefs::getCaloTowerEtaBin(key);
 
-        const int phiBin =
-            TowerInfoDefs::getCaloTowerPhiBin(key);
+        const int phiBin = TowerInfoDefs::getCaloTowerPhiBin(key);
 
-        auto* geom =
-            geometry->get_tower_geometry(
-                RawTowerDefs::encode_towerid(
-                    node.id,
-                    etaBin,
-                    phiBin));
+        auto* geom = geometry->get_tower_geometry(RawTowerDefs::encode_towerid(node.id, etaBin, phiBin));
 
         IsolationConstituentRecord row;
 
-        row.eventId = photon.eventId; row.photonId = photon.photonId;
+        row.eventId = photon.eventId;
+        row.photonId = photon.photonId;
 
-        row.radius = maxRadius; row.source = "calorimeter_sub1";
+        row.radius = maxRadius;
+        row.source = "calorimeter_sub1";
 
-        row.nativeKey = channel; row.subsystem = layer;
+        row.nativeKey = channel;
+        row.subsystem = layer;
 
-        row.rawEnergy = rawTower->get_energy(); row.subtractedEnergy = subTower->get_energy();
+        row.rawEnergy = rawTower->get_energy();
+        row.subtractedEnergy = subTower->get_energy();
 
         row.maskState = (rawTower->get_isGood() ? 0U : 1U) | (subTower->get_isGood() ? 0U : 2U);
 
-        row.masked = !subTower->get_isGood(); row.qualityState = subTower->get_isGood() ? 1 : 0;
+        row.masked = !subTower->get_isGood();
+        row.qualityState = subTower->get_isGood() ? 1 : 0;
 
         if (etaBin < 0 || etaBin >= 24 || phiBin < 0 || phiBin >= 64)
         {
@@ -1168,13 +1085,10 @@ void PhotonJetTree::capturePhotonIsolationConstituents(
          * Recompute tower eta relative to the reconstructed collision vertex.
          * The geometry object itself is detector-centered.
          */
-        const double eta =
-            std::asinh(
-                (std::sinh(geom->get_eta()) * r -
-                 photon.producerVertexZ) /
-                r);
+        const double eta = std::asinh((std::sinh(geom->get_eta()) * r - photon.producerVertexZ) / r);
 
-        row.deltaEta = eta - axisEta; row.deltaPhi = wrapPhi(geom->get_phi() - axisPhi);
+        row.deltaEta = eta - axisEta;
+        row.deltaPhi = TVector2::Phi_mpi_pi(geom->get_phi() - axisPhi);
 
         row.deltaR = std::hypot(row.deltaEta, row.deltaPhi);
 
@@ -1202,70 +1116,39 @@ void PhotonJetTree::capturePhotonIsolationConstituents(
   // pp topological-cluster isolation witnesses
   // ==========================================================================
 
-  auto* topoclusters =
-      findNode::getClass<RawClusterContainer>(
-          topNode,
-          m_config.photon.topoclusterNode);
+  auto* topoclusters = findNode::getClass<RawClusterContainer>(topNode, m_config.photon.topoclusterNode);
 
   if (!topoclusters)
   {
     return;  // builder's explicit invalid topo state remains authoritative
   }
 
-  const CLHEP::Hep3Vector vertex(
-      0.0,
-      0.0,
-      photon.producerVertexZ);
+  const CLHEP::Hep3Vector vertex(0.0, 0.0, photon.producerVertexZ);
 
-  const auto range =
-      topoclusters->getClusters();
+  const auto range = topoclusters->getClusters();
 
-  for (auto it = range.first;
-       it != range.second;
-       ++it)
+  for (auto it = range.first; it != range.second; ++it)
   {
-    const RawCluster* topo =
-        it->second;
+    const RawCluster* topo = it->second;
 
     if (!topo)
     {
       continue;
     }
 
-    const double eta =
-        RawClusterUtility::GetPseudorapidity(
-            *topo,
-            vertex);
+    const double eta = RawClusterUtility::GetPseudorapidity(*topo, vertex);
 
-    const double phi =
-        RawClusterUtility::GetAzimuthAngle(
-            *topo,
-            vertex);
+    const double phi = RawClusterUtility::GetAzimuthAngle(*topo, vertex);
 
-    const double energy =
-        topo->get_energy();
+    const double energy = topo->get_energy();
 
-    if (!finiteValue(eta) || !finiteValue(phi))
-    {
-      continue;
-    }
+    const double dEta = eta - axisEta;
 
-    const double dEta =
-        eta -
-        axisEta;
+    const double dPhi = TVector2::Phi_mpi_pi(phi - axisPhi);
 
-    const double dPhi =
-        wrapPhi(
-            phi -
-            axisPhi);
+    const double dR = std::hypot(dEta, dPhi);
 
-    const double dR =
-        std::hypot(
-            dEta,
-            dPhi);
-
-    if (!finiteValue(dR) ||
-        dR >= maxRadius)
+    if (!finiteValue(dR) || dR >= maxRadius)
     {
       continue;
     }
@@ -1295,12 +1178,228 @@ void PhotonJetTree::capturePhotonIsolationConstituents(
      * Historical candidate-removal witness: a topological cluster coincident
      * with the photon axis is identified as the candidate itself.
      */
-    row.candidateRemoved =
-        dR < 0.02;
+    row.candidateRemoved = dR < 0.02;
 
-    m_isolationConstituents.push_back(
-        std::move(row));
+    m_isolationConstituents.push_back(std::move(row));
   }
+}
+
+// ============================================================================
+// Nominal photon labels
+//
+// Every stored candidate receives the frozen PhotonID label and isolation
+// class before writing; retention never depends on them. Inputs are the
+// stored values: double kinematics, centrality and cone sums, and the view's
+// binary32 model features.
+// ============================================================================
+
+double photonjet::production::ModelFeature(const std::string& name, const PhotonRecord& p, const EventRecord& e,
+                                           const ShowerShapeRecord* v)
+{
+  constexpr double missing = std::numeric_limits<double>::quiet_NaN();
+  double value = missing;
+  if (name == "cluster_Et")
+    value = p.et;
+  else if (name == "cluster_Eta")
+    value = p.eta;
+  else if (name == "vertexz")
+    value = e.recoVertexZ;
+  else if (name == "centrality")
+    value = e.analysisCentrality >= 0 ? e.analysisCentrality : missing;
+  else if (v)
+  {
+    const std::map<std::string, double> values = {{"cluster_weta_cogx", v->wetaCogX},
+                                                  {"cluster_wphi_cogx", v->wphiCogX},
+                                                  {"cluster_weta33_cogx", v->weta33CogX},
+                                                  {"cluster_wphi33_cogx", v->wphi33CogX},
+                                                  {"e11_over_e33", v->e11OverE33},
+                                                  {"e32_over_e35", v->e32OverE35},
+                                                  {"cluster_et1", v->et1},
+                                                  {"cluster_et2", v->et2},
+                                                  {"cluster_et3", v->et3},
+                                                  {"cluster_et4", v->et4}};
+    value = values.at(name);
+  }
+  else if (name == "e11_over_e33" || name == "e32_over_e35")
+  {
+    const int a = name == "e11_over_e33" ? 10 : 12, b = a + 1;
+    value = std::isfinite(p.primaryShapes[a]) && std::isfinite(p.primaryShapes[b]) && p.primaryShapes[b] > 0
+                ? p.primaryShapes[a] / p.primaryShapes[b]
+                : missing;
+  }
+  else
+  {
+    const std::string suffix = name.substr(8);
+    const auto it = std::find(PhotonRecord::primaryShapeNames.begin(), PhotonRecord::primaryShapeNames.end(), suffix);
+    if (it == PhotonRecord::primaryShapeNames.end()) throw std::runtime_error("unknown frozen model feature: " + name);
+    value = p.primaryShapes[std::distance(PhotonRecord::primaryShapeNames.begin(), it)];
+  }
+  return static_cast<float>(value);  // exact evaluator input, widened for storage
+}
+
+bool photonjet::production::ReferencePreselection(const PhotonRecord& photon)
+{
+  const auto ratio = [](const double a, const double b)
+  { return std::isfinite(a) && std::isfinite(b) && b > 0 ? a / b : std::numeric_limits<double>::quiet_NaN(); };
+  const double e11OverE33 = ratio(photon.primaryShapes[10], photon.primaryShapes[11]);
+  const double e32OverE35 = ratio(photon.primaryShapes[12], photon.primaryShapes[13]);
+  // Every input, w_phi and the photon ET included, must be finite.
+  return std::isfinite(photon.primaryShapes[1]) && std::isfinite(photon.et) && e11OverE33 < .98 &&
+         photon.primaryShapes[6] > .60 && photon.primaryShapes[6] < 1. && e32OverE35 > .80 && e32OverE35 < 1. &&
+         photon.primaryShapes[0] < .60;
+}
+
+
+int photonjet::production::ActivePreselection(const PhotonConfig& config, const PhotonRecord& photon)
+{
+  const auto& pre = config.preselection;
+  if (pre.variant == "reference") return ReferencePreselection(photon) ? 1 : 0;
+  if (pre.variant != "newPPG12") return -1;
+  double cut = std::numeric_limits<double>::quiet_NaN();
+  for (const auto& model : config.models)
+    if (model.scoreName == pre.npbScoreName) cut = model.configuredCut;
+  const double npb = (pre.npbScoreName == "auau_npb_score" ? photon.auauNpbCapture : photon.npbCapture).rawScore;
+  const auto ratio = [](const double a, const double b)
+  { return std::isfinite(a) && std::isfinite(b) && b > 0 ? a / b : std::numeric_limits<double>::quiet_NaN(); };
+  const double et1 = photon.primaryShapes[6];
+  const double e11OverE33 = ratio(photon.primaryShapes[10], photon.primaryShapes[11]);
+  const double e32OverE35 = ratio(photon.primaryShapes[12], photon.primaryShapes[13]);
+  return std::isfinite(npb) && std::isfinite(et1) && std::isfinite(e11OverE33) && std::isfinite(e32OverE35) &&
+         npb > cut && et1 > pre.et1Min && et1 < pre.et1Max && e11OverE33 < pre.e11OverE33Max &&
+         e32OverE35 > pre.e32OverE35Min && e32OverE35 < pre.e32OverE35Max;
+}
+
+
+bool photonjet::production::ViewShapesFinite(const ShowerShapeRecord& v)
+{
+  return std::isfinite(v.wetaCogX) && std::isfinite(v.wphiCogX) && std::isfinite(v.weta33CogX) &&
+         std::isfinite(v.wphi33CogX) && std::isfinite(v.e11OverE33) && std::isfinite(v.e32OverE35) &&
+         std::isfinite(v.et1) && std::isfinite(v.et2) && std::isfinite(v.et3) && std::isfinite(v.et4);
+}
+
+namespace
+{
+// PPG12 pp regions in photon ET, as frozen in PhotonID/models/nominal.json:
+// tight above the tight line, non-tight strictly inside the lower band.
+int ppIdClass(const double score, const double et)
+{
+  using photonjet::PPG12IdLines;
+  const double tight = PPG12IdLines::tight(et);
+  const double low = PPG12IdLines::nonTightLow(et);
+  const double high = PPG12IdLines::nonTightHigh(et);
+  return score > tight ? 3 : (low < score && score < high) ? 1 : score >= high ? 2 : 0;
+}
+
+// Au+Au regions: the package's WP70/WP80 lines in centrality.
+int auauIdClass(const double score, const double centrality, const photonjet::NominalPhotonIdConfig& id)
+{
+  const double wp70 = id.wp70.interceptGeV + id.wp70.slope * centrality;
+  const double wp80 = id.wp80.interceptGeV + id.wp80.slope * centrality;
+  return score > wp70 ? 3 : (0.1 < score && score < wp80) ? 1 : score >= wp80 ? 2 : 0;
+}
+
+// Distance between two scores in binary32 units in the last place of the stored one.
+double float32Ulp(const double recomputed, const double stored)
+{
+  const float magnitude = std::fabs(static_cast<float>(stored));
+  const double spacing =
+      static_cast<double>(std::nextafter(magnitude, std::numeric_limits<float>::infinity())) - magnitude;
+  return std::fabs(recomputed - stored) / spacing;
+}
+
+int isolationClass(const photonjet::NominalIsolationConfig& c, const photonjet::PhotonRecord& p,
+                   const double centrality)
+{
+  if (c.witnessIndex < 0 || static_cast<std::size_t>(c.witnessIndex) >= p.isolationWitnesses.size())
+    throw std::runtime_error("the nominal isolation witness was not captured");
+  const auto& w = p.isolationWitnesses[c.witnessIndex];
+  const bool reconstructed =
+      w.reconstructedOrTruth == 0 && w.subtractionMethod == c.subtractionMethod && std::isfinite(w.coneSum);
+  if (c.storedThresholds)
+  {
+    const bool valid = reconstructed && std::isfinite(w.threshold) && std::isfinite(w.sidebandThreshold) &&
+                       w.sidebandThreshold >= w.threshold;
+    return !valid ? -1 : w.coneSum < w.threshold ? 2 : w.coneSum > w.sidebandThreshold ? 0 : 1;
+  }
+  const double threshold = c.threshold.interceptGeV + c.threshold.slope * centrality;
+  const bool valid = reconstructed && std::isfinite(centrality) && centrality >= c.centralityMin &&
+                     centrality < c.centralityMaxExclusive;
+  return !valid ? -1 : w.coneSum < threshold ? 2 : w.coneSum > threshold + c.threshold.sidebandGapGeV ? 0 : 1;
+}
+}  // namespace
+
+photonjet::NominalPhotonRecord photonjet::production::LabelNominalPhoton(const PhotonConfig& config,
+                                                                         const PinnedModel& model,
+                                                                         const PhotonRecord& photon,
+                                                                         const EventRecord& event,
+                                                                         NominalReceiptRecord& receipt)
+{
+  const NominalPhotonIdConfig& id = config.nominalId;
+  const auto view = std::find_if(photon.showerShapes.begin(), photon.showerShapes.end(),
+                                 [&](const ShowerShapeRecord& v) { return v.definitionName == id.view; });
+  if (view == photon.showerShapes.end())
+    throw std::runtime_error("the nominal model view was not captured: " + id.view);
+  std::vector<float> features;
+  bool valid = ViewShapesFinite(*view);
+  for (const std::string& name : id.featureOrder)
+  {
+    features.push_back(static_cast<float>(ModelFeature(name, photon, event, &*view)));
+    valid = valid && std::isfinite(features.back());
+  }
+  NominalPhotonRecord label;
+  const double et = photon.et, centrality = event.analysisCentrality;
+  if (id.usesProducerScore)
+  {
+    // pp: the PPG12 producer score where ET reaches the package minimum; a
+    // recompute of the same model must agree and keep every region.
+    const double producer = photon.productionScore;
+    if (et >= id.etMin)
+    {
+      if (valid && std::isfinite(producer) && producer != -1.0)
+      {
+        const double recomputed = model.score(features);
+        const double ulp = float32Ulp(recomputed, producer);
+        if (!(ulp <= id.recomputeUlpLimit))
+          throw std::runtime_error("pp producer score differs from the recompute by " + std::to_string(ulp) +
+                                   " float32 ulp");
+        if (ppIdClass(recomputed, et) != ppIdClass(producer, et))
+          throw std::runtime_error("pp recompute changes a photon-ID region");
+        receipt.maxRecomputeUlp = std::max(receipt.maxRecomputeUlp, ulp);
+        label.score = producer;
+        label.state = 1;
+        label.idClass = ppIdClass(producer, et);
+      }
+      else
+        label.state = 2;
+    }
+  }
+  else
+  {
+    const bool inside = et >= id.etMin && et < id.etMaxExclusive && std::isfinite(centrality) &&
+                        centrality >= id.centralityMin && centrality < id.centralityMaxExclusive;
+    if (inside && valid)
+    {
+      label.score = model.score(features);
+      if (!std::isfinite(label.score)) throw std::runtime_error("a scored photon has a non-finite nominal score");
+      label.state = 1;
+      label.idClass = auauIdClass(label.score, centrality, id);
+    }
+    else if (inside)
+      label.state = 2;
+  }
+  label.isolationClass = isolationClass(config.nominalIsolation, photon, centrality);
+  ++receipt.photons;
+  ++receipt.states[label.state];
+  ++receipt.idClasses[label.idClass];
+  ++receipt.isolationClasses[label.isolationClass];
+  return label;
+}
+
+void PhotonJetTree::labelNominalPhotons()
+{
+  for (PhotonRecord& photon : m_photons)
+    photon.nominal =
+        photonjet::production::LabelNominalPhoton(m_config.photon, *m_nominalModel, photon, m_event, m_nominalReceipt);
 }
 
 // Jet capture and photon-jet pairing
@@ -1341,20 +1440,6 @@ enum JetQualityBit : std::uint64_t
 // ============================================================================
 
 /**
- * Return |phi1 - phi2| wrapped onto [0, pi].
- */
-double absoluteDeltaPhi(const double phi1, const double phi2)
-{
-  double delta = phi1 - phi2;
-
-  while (delta > kPi) delta -= 2.0 * kPi;
-  while (delta <= -kPi) delta += 2.0 * kPi;
-
-  return std::abs(delta);
-}
-
-
-/**
  * Read the FastJet active area associated with one jet.
  *
  * Jetv2 may store properties at container-defined indices, so the semantic
@@ -1365,8 +1450,7 @@ double jetArea(JetContainer* container, Jet* jet)
 {
   if (container->has_property(Jet::PROPERTY::prop_area))
   {
-    const Jet::PROPERTY index =
-        container->property_index(Jet::PROPERTY::prop_area);
+    const Jet::PROPERTY index = container->property_index(Jet::PROPERTY::prop_area);
 
     const float area = jet->get_property(index);
 
@@ -1375,8 +1459,7 @@ double jetArea(JetContainer* container, Jet* jet)
 
   if (jet->has_property(Jet::PROPERTY::prop_area))
   {
-    const float area =
-        jet->get_property(Jet::PROPERTY::prop_area);
+    const float area = jet->get_property(Jet::PROPERTY::prop_area);
 
     return finiteValue(area) ? area : kNaN;
   }
@@ -1422,38 +1505,36 @@ bool radiusCompatible(JetContainer* container, const double expected)
  */
 void PhotonJetTree::captureJets(PHCompositeNode* topNode)
 {
+  // Workfest DATA keeps every event, but recoil support belongs only to
+  // photon-bearing events. SIM retains its full reconstructed-jet population.
+  // An inapplicable event has no collection occurrence, as in the original
+  // producer; file-level collection definitions remain in metadata.
+  if (!m_event.recoObjectVertexInDomain || (isData() && m_photons.empty())) return;
+
   for (const JetNodeConfig& collection : m_config.jets.nodes)
   {
-    m_event.recoJetView.push_back(
-        static_cast<int>(collection.view));
+    m_event.recoJetView.push_back(static_cast<int>(collection.view));
 
-    m_event.recoJetRadiusCode.push_back(
-        static_cast<int>(photonjet::radiusCode(collection.radius)));
+    m_event.recoJetRadiusCode.push_back(static_cast<int>(photonjet::radiusCode(collection.radius)));
 
-    m_event.recoJetCaptureState.push_back(
-        static_cast<int>(CaptureState::NotApplicable));
+    m_event.recoJetCaptureState.push_back(static_cast<int>(CaptureState::NotApplicable));
 
     m_event.recoJetCount.push_back(0);
-
-    if (!m_event.recoObjectVertexInDomain) continue;
 
     /*
      * Once the event is in the reconstructed-object domain, failure to obtain
      * the configured collection is an unavailable-input state until the
      * collection capture succeeds.
      */
-    m_event.recoJetCaptureState.back() =
-        static_cast<int>(CaptureState::InputUnavailable);
+    m_event.recoJetCaptureState.back() = static_cast<int>(CaptureState::InputUnavailable);
 
     const auto before = m_jets.size();
 
     captureJetCollection(topNode, collection);
 
-    m_event.recoJetCaptureState.back() =
-        static_cast<int>(CaptureState::Complete);
+    m_event.recoJetCaptureState.back() = static_cast<int>(CaptureState::Complete);
 
-    m_event.recoJetCount.back() =
-        static_cast<std::uint32_t>(m_jets.size() - before);
+    m_event.recoJetCount.back() = static_cast<std::uint32_t>(m_jets.size() - before);
   }
 }
 
@@ -1474,33 +1555,20 @@ void PhotonJetTree::captureJets(PHCompositeNode* topNode)
  * Multiplicity or radius disagreements indicate a broken upstream contract and
  * stop the run rather than producing ambiguously paired jets.
  */
-void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
-                                         const JetNodeConfig& collection)
+void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode, const JetNodeConfig& collection)
 {
-  JetContainer* corrected =
-      findNode::getClass<JetContainer>(
-          topNode,
-          collection.correctedNode);
+  JetContainer* corrected = findNode::getClass<JetContainer>(topNode, collection.correctedNode);
 
-  JetContainer* raw =
-      findNode::getClass<JetContainer>(
-          topNode,
-          collection.rawNode);
+  JetContainer* raw = findNode::getClass<JetContainer>(topNode, collection.rawNode);
 
   if (!corrected)
   {
-    throw std::runtime_error(
-        "missing corrected jet node '" +
-        collection.correctedNode +
-        "'");
+    throw std::runtime_error("missing corrected jet node '" + collection.correctedNode + "'");
   }
 
   if (!raw)
   {
-    throw std::runtime_error(
-        "missing raw jet node '" +
-        collection.rawNode +
-        "'");
+    throw std::runtime_error("missing raw jet node '" + collection.rawNode + "'");
   }
 
   /*
@@ -1508,29 +1576,20 @@ void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
    * correspondence. A size mismatch means that relationship cannot be
    * established safely.
    */
-  const bool sizesMatch =
-      raw->size() == corrected->size();
+  const bool sizesMatch = raw->size() == corrected->size();
 
   if (!sizesMatch)
   {
-    throw std::runtime_error(
-        "raw and corrected jet multiplicity differ for '" +
-        collection.rawNode +
-        "' and '" +
-        collection.correctedNode +
-        "'");
+    throw std::runtime_error("raw and corrected jet multiplicity differ for '" + collection.rawNode + "' and '" +
+                             collection.correctedNode + "'");
   }
 
-  const bool radiusMatches =
-      radiusCompatible(corrected, collection.radius) &&
-      radiusCompatible(raw, collection.radius);
+  const bool radiusMatches = radiusCompatible(corrected, collection.radius) && radiusCompatible(raw, collection.radius);
 
   if (!radiusMatches)
   {
-    throw std::runtime_error(
-        "configured radius disagrees with the container metadata of '" +
-        collection.correctedNode +
-        "'");
+    throw std::runtime_error("configured radius disagrees with the container metadata of '" + collection.correctedNode +
+                             "'");
   }
 
   /*
@@ -1553,21 +1612,15 @@ void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
      * removed before a raw/calibrated row is constructed. Retained ordering
      * therefore counts only surviving corrected jets.
      */
-    if (!correctedJet ||
-        !finiteValue(correctedJet->get_pt()) ||
-        correctedJet->get_pt() < 0)
+    if (!correctedJet || !finiteValue(correctedJet->get_pt()) || correctedJet->get_pt() < 0)
     {
       continue;
     }
 
     if (!rawJet)
     {
-      throw std::runtime_error(
-          "null jet at ordinal " +
-          std::to_string(ordinal) +
-          " in '" +
-          collection.correctedNode +
-          "'");
+      throw std::runtime_error("null jet at ordinal " + std::to_string(ordinal) + " in '" + collection.correctedNode +
+                               "'");
     }
 
     JetRecord jet;
@@ -1586,15 +1639,30 @@ void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
     jet.encounterOrdinal = ordinal;
 
     /*
-     * The corrected collection defines the stored reconstructed four-vector
-     * quantities. Raw pT is retained independently so the JES transformation
-     * remains inspectable. Jet mass is intentionally not part of this record.
+     * JetCalib rebuilds each calibrated jet from the raw jet's binary32
+     * (pT, eta, phi) as (c cos phi, c sin phi, c sinh eta) for the calibrated
+     * pT c. The stored direction is that construction at unit scale (c equal
+     * to the raw pT), so it never depends on the JES value. A negative JES
+     * reverses the calibrated vector: that jet's JES is undefined, and it
+     * keeps the unit-scale pT. Raw pT is retained beside both.
      */
-    jet.rawPt = rawJet->get_pt();
-    jet.correctedPt = correctedJet->get_pt();
+    const float rawJetPt = rawJet->get_pt();
+    const float rawJetEta = rawJet->get_eta();
+    const float rawJetPhi = rawJet->get_phi();
+    Jetv2 unitScale;
+    unitScale.set_px(rawJetPt * std::cos(rawJetPhi));
+    unitScale.set_py(rawJetPt * std::sin(rawJetPhi));
+    unitScale.set_pz(rawJetPt * std::sinh(rawJetEta));
+    const double alignment = static_cast<double>(correctedJet->get_px()) * unitScale.get_px() +
+                             static_cast<double>(correctedJet->get_py()) * unitScale.get_py() +
+                             static_cast<double>(correctedJet->get_pz()) * unitScale.get_pz();
+    const bool jesDefined = alignment > 0.0;
 
-    jet.eta = correctedJet->get_eta();
-    jet.phi = correctedJet->get_phi();
+    jet.rawPt = rawJet->get_pt();
+    jet.correctedPt = jesDefined ? correctedJet->get_pt() : unitScale.get_pt();
+    jet.eta = unitScale.get_eta();
+    jet.phi = unitScale.get_phi();
+    jet.unitScalePt = unitScale.get_pt();
 
     /*
      * JetCalib does not propagate the FastJet area into the corrected object,
@@ -1613,59 +1681,39 @@ void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
     // Calibration and raw/corrected binding
     // ------------------------------------------------------------------------
 
-    const bool calibratedFlag =
-        correctedJet->get_isCalib() != 0;
+    const bool calibratedFlag = correctedJet->get_isCalib() != 0;
 
-    const unsigned int correctedId =
-        correctedJet->get_id();
+    const unsigned int correctedId = correctedJet->get_id();
 
-    const unsigned int rawId =
-        rawJet->get_id();
+    const unsigned int rawId = rawJet->get_id();
 
-    const bool correctedIdMatches =
-        correctedId == ordinal;
+    const bool correctedIdMatches = correctedId == ordinal;
 
     /*
      * Raw native ids are retained as evidence but historically need not equal
      * their container ordinal. The corrected id is the authoritative ordinal
      * binding produced by JetCalib.
      */
-    const bool rawIdCompatible =
-        rawId == kInvalidJetId ||
-        rawId == ordinal ||
-        rawId == correctedId;
+    const bool rawIdCompatible = rawId == kInvalidJetId || rawId == ordinal || rawId == correctedId;
 
-    const bool rawPtNonNegative =
-        finiteValue(jet.rawPt) &&
-        jet.rawPt >= 0.0;
+    const bool rawPtNonNegative = finiteValue(jet.rawPt) && jet.rawPt >= 0.0;
 
-    jet.calibrationValid =
-        rawPtNonNegative &&
-        finiteValue(jet.correctedPt) &&
-        finiteValue(jet.eta) &&
-        finiteValue(jet.phi) &&
-        calibratedFlag &&
-        correctedIdMatches;
+    jet.calibrationValid = jesDefined && rawPtNonNegative && finiteValue(jet.correctedPt) && finiteValue(jet.eta) &&
+                           finiteValue(jet.phi) && calibratedFlag && correctedIdMatches;
 
     /*
      * These are production-contract requirements, not analysis-quality cuts.
      * A broken raw/calibrated binding cannot be represented as an ordinary jet
      * without losing the meaning of the stored corrected momentum.
      */
-    if (!rawPtNonNegative ||
-        !calibratedFlag ||
-        !correctedIdMatches)
+    if (!rawPtNonNegative || !calibratedFlag || !correctedIdMatches)
     {
-      throw std::runtime_error(
-          "invalid calibrated/raw jet binding: " +
-          collection.correctedNode);
+      throw std::runtime_error("invalid calibrated/raw jet binding: " + collection.correctedNode);
     }
 
     if (!finiteValue(jet.area) || jet.area < 0.0)
     {
-      throw std::runtime_error(
-          "missing or invalid FastJet active area: " +
-          collection.rawNode);
+      throw std::runtime_error("missing or invalid FastJet active area: " + collection.rawNode);
     }
 
     // ------------------------------------------------------------------------
@@ -1709,12 +1757,8 @@ void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
      */
     jet.deterministicOrder = retainedOrder;
 
-    jet.jetId = photonjet::makeJetIdentity(
-        m_event.eventId,
-        jet.view,
-        jet.radius,
-        jet.nativeKey,
-        jet.deterministicOrder);
+    jet.jetId =
+        photonjet::makeJetIdentity(m_event.eventId, jet.view, jet.radius, jet.nativeKey, jet.deterministicOrder);
 
     ++retainedOrder;
 
@@ -1736,9 +1780,7 @@ void PhotonJetTree::captureJetCollection(PHCompositeNode* topNode,
  */
 bool PhotonJetTree::jetInCaptureDomain(const JetRecord& jet) const
 {
-  if (!finiteValue(jet.correctedPt) ||
-      !finiteValue(jet.eta) ||
-      !finiteValue(jet.phi))
+  if (!finiteValue(jet.correctedPt) || !finiteValue(jet.eta) || !finiteValue(jet.phi))
   {
     return false;
   }
@@ -1754,31 +1796,41 @@ bool PhotonJetTree::jetInCaptureDomain(const JetRecord& jet) const
 // TreeProduction records the geometric and momentum-balance facts but does not
 // discard non-away-side pairs. Downstream analysis can therefore reproduce or
 // change the recoil requirement from the stored delta-phi.
+//
+// Pairs are stored in the established producer's order: for each retained jet
+// (views, then radii, then jets), every retained photon in candidate order.
 // ============================================================================
+
+std::vector<const photonjet::JetRecord*> photonjet::production::CanonicalJetOrder(
+    const std::vector<photonjet::JetRecord>& jets)
+{
+  std::vector<const JetRecord*> ordered;
+  ordered.reserve(jets.size());
+  for (const bool unsubtracted : {false, true})
+    for (const int radiusCode : {2, 3, 4})
+      for (const JetRecord& jet : jets)
+        if (jet.radius == radiusCode / 10. && (jet.view == JetView::AuAuNoSub) == unsubtracted) ordered.push_back(&jet);
+  return ordered;
+}
+
 
 void PhotonJetTree::buildPhotonJetPairs()
 {
   m_photonJetPairs.clear();
 
-  if (!m_config.output.writePhotonJetPairs ||
-      m_photons.empty() ||
-      m_jets.empty())
+  if (!m_config.output.writePhotonJetPairs || m_photons.empty() || m_jets.empty())
   {
     return;
   }
 
-  m_photonJetPairs.reserve(
-      m_photons.size() *
-      m_jets.size());
+  m_photonJetPairs.reserve(m_photons.size() * m_jets.size());
 
-  for (std::size_t photonIndex = 0;
-       photonIndex < m_photons.size();
-       ++photonIndex)
+  // Each jet in canonical collection order, with every photon, as the
+  // established producer emitted the pairs.
+  for (const JetRecord* jetPointer : photonjet::production::CanonicalJetOrder(m_jets))
   {
-    const PhotonRecord& photon =
-        m_photons[photonIndex];
-
-    for (const JetRecord& jet : m_jets)
+    const JetRecord& jet = *jetPointer;
+    for (const PhotonRecord& photon : m_photons)
     {
       PhotonJetPairRecord pair;
 
@@ -1798,44 +1850,29 @@ void PhotonJetTree::buildPhotonJetPairs()
       pair.photonRank = 0;
       pair.jetRank = jet.deterministicOrder;
 
-      if (finiteValue(photon.phi) && finiteValue(jet.phi))
-      {
-        pair.deltaPhi =
-            absoluteDeltaPhi(
-                jet.phi,
-                photon.phi);
-      }
+      // Azimuthal separation in ROOT's [-pi, pi) convention, then |.|.
+      pair.deltaPhi = std::fabs(TVector2::Phi_mpi_pi(jet.phi - photon.phi));
 
       /*
        * xJgamma uses the calibrated reconstructed jet momentum divided by the
-       * reconstructed photon transverse energy. A non-positive or invalid
-       * photon denominator leaves the quantity undefined.
+       * reconstructed photon transverse energy. A non-positive photon
+       * denominator, or a jet whose JES is undefined (negative), leaves the
+       * quantity undefined.
        */
-      if (finiteValue(jet.correctedPt) &&
-          finiteValue(photon.et) &&
-          photon.et > 0.0)
+      if (jet.calibrationValid && photon.et > 0.0)
       {
-        pair.xJGamma =
-            jet.correctedPt /
-            photon.et;
+        pair.xJGamma = jet.correctedPt / photon.et;
       }
 
       /*
        * Keep the recoil decision as a witness instead of a retention cut.
        * The boundary is inclusive: |delta phi| >= 7 pi / 8.
        */
-      pair.recoilWitness =
-          finiteValue(pair.deltaPhi) &&
-          pair.deltaPhi >= photonjet::kRecoilDeltaPhiMin;
+      pair.recoilWitness = pair.deltaPhi >= photonjet::kRecoilDeltaPhiMin;
 
-      pair.pairId =
-          photonjet::makePairIdentity(
-              pair.photonId,
-              pair.jetId,
-              pair.jetRank);
+      pair.pairId = photonjet::makePairIdentity(pair.photonId, pair.jetId, pair.jetRank);
 
-      m_photonJetPairs.push_back(
-          std::move(pair));
+      m_photonJetPairs.push_back(std::move(pair));
     }
   }
 }

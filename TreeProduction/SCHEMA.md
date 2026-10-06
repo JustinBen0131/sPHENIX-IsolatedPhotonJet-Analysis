@@ -1,6 +1,6 @@
 # eventTree v1
 
-*Generated from `TreeProduction/config/eventTree_v1.yaml` by `TreeProduction/tests/make_schema_doc.py`; do not edit.*
+*Generated from `config/eventTree_v1.yaml`; do not edit.*
 
 One TTree per file. DATA files are one run segment; SIM files are one product part. One entry per event occurrence, in source order (evt_src_entry). Per-event quantities are scalars; each collection is a group of equal-length vectors named <group>_<field>; sub-objects of photons are flat vectors with a parent index or a fixed stride; links are event-local indices (-1 = none).
 
@@ -872,4 +872,4 @@ All 809 columns of the historical production layout are accounted for:
 | STORE_CODE | 5 |
 | STORE_INDEX | 5 |
 
-The per-column list, with the rebuild rule of every column that is not stored as a branch, is the `sources` section of `TreeProduction/tests/historical_Format/schema/eventTree_v1.yaml`.
+Every column that is not stored as a branch is rebuilt exactly from the stored branches, the file metadata or the row order.

@@ -1,0 +1,5 @@
+group	manifest	manifest_sha256	sources	events
+run28_embeddedJet12	../../lists/simulation/run28_embeddedJet12/sources.tsv	35ff61a77676a62b1cba5c2427d2ffbef65a522423c820fd6673c9b54f217a5a	9998	9989946
+run28_embeddedJet20	../../lists/simulation/run28_embeddedJet20/sources.tsv	04afaa699b18142a1ee16c695f044d0593ffe5063701c8bbef5cde6d307b0e25	10000	9991946
+run28_embeddedJet30	../../lists/simulation/run28_embeddedJet30/sources.tsv	260fd97c6bf89cd34cce161803aec41344cbaf52351b1d111a50ed9e6bec4744	10000	9991946
+run28_embeddedJet40	../../lists/simulation/run28_embeddedJet40/sources.tsv	8d3fb67180ea563b6c382e96d859228e2b02f3833cd77c36d4e85ee10ccb9ef1	10000	9991946

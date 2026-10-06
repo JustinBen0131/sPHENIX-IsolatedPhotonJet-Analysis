@@ -10,7 +10,6 @@ scores/
 !PhotonID/frozen/*.tmva.root
 *.npz
 .pytest_cache/
-TreeProduction/PHOTON_RECONSTRUCTION_THE358_AUDIT.md
 CANONICAL_PLOT_PROVENANCE.md
 /Makefile
 
@@ -20,3 +19,27 @@ CANONICAL_PLOT_PROVENANCE.md
 **/.work/
 **/build/
 !PhotonID/models/**/model.tmva.root
+
+# Private development and operator context is excluded from releases.
+/agent_context/
+/codex_notes/
+/AGENTS.md
+/CLAUDE.md
+/.claude/
+/.codex/
+/.env
+/.venv/
+**/tests/
+**/reports/
+**/QUALIFICATION.md
+**/.work/
+**/build/
+/*/output/
+**/outputs/
+**/results/
+/FinalAnalysis/fig/*
+!/FinalAnalysis/fig/README.md
+**/tables/
+**/logs/
+**/histograms/
+TreeProduction/*_AUDIT.md

@@ -1,0 +1,16 @@
+{
+ "schema": "AuAuEmbeddedStitchingV1",
+ "rule": "Each Au+Au embedded sample keeps only the events it owns: an inclusive-jet sample the events whose leading anti-kT R = 0.4 truth jet pT lies in its window, a photon+jet sample the events whose generator-filter photon pT lies in its window. Windows are half open [low, high); a null high is unbounded. Every owned event carries cross_section_pb / N, with N the sample's events in its own window (inclusive jets) or all of its post-filter events (photon+jet).",
+ "provenance": {
+  "inclusive_jet": "CanonicalSchema10EmbeddedInclusiveStitchingAuthorityV1 (Justin Bennett, 2026-09-02, sha256 b0cf1059e454452a97984902dfd88e7a8bbd1384a37aaa616177772d8bfba18b): ownership-effective cross sections over the events in the same truth-jet ownership window",
+  "photon_jet": "Accepted 2026-09-07 (JSTG normalization decision, sha256 292d5181a395cbe3e3259433bcd690cf451b964f2109bee52c5a40e622c9bfd2): 1 / sum of the PHGenIntegral luminosities of the 10,000 original files per post-filter event with the producer's 20 GeV generator-filter partition; cross_section_pb = post-filter events / sum L (9991946 / 3553.7398390716226 and 9991946 / 76457.70098405574 pb^-1)"
+ },
+ "samples": {
+  "jet12": {"family": "inclusivejet", "owner": "leading_truth_jet_r04_pt", "window_gev": [12.0, 21.0], "cross_section_pb": 1227724.77, "denominator": "events_in_window"},
+  "jet20": {"family": "inclusivejet", "owner": "leading_truth_jet_r04_pt", "window_gev": [21.0, 31.0], "cross_section_pb": 38811.785, "denominator": "events_in_window"},
+  "jet30": {"family": "inclusivejet", "owner": "leading_truth_jet_r04_pt", "window_gev": [31.0, 41.0], "cross_section_pb": 1736.65908, "denominator": "events_in_window"},
+  "jet40": {"family": "inclusivejet", "owner": "leading_truth_jet_r04_pt", "window_gev": [41.0, null], "cross_section_pb": 100.642312, "denominator": "events_in_window"},
+  "photon12": {"family": "photonjet", "owner": "generator_filter_photon_pt", "window_gev": [12.0, 20.0], "cross_section_pb": 2811.6706490845127, "denominator": "all_events"},
+  "photon20": {"family": "photonjet", "owner": "generator_filter_photon_pt", "window_gev": [20.0, null], "cross_section_pb": 130.68593315516628, "denominator": "all_events"}
+ }
+}

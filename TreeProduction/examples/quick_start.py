@@ -19,7 +19,9 @@ with uproot.open(path) as f:
                           'cent_value', 'w_event', 'pho_et', 'pho_eta', 'jet02_pt', 'jet03_pt', 'jet04_pt', 'jet04_eta',
                           'pair_pho', 'pair_jet', 'pair_xjgamma', 'pair_delta_phi'], library='ak')
 
-# The documented reader predicate: retained events whose reconstruction finished with a valid vertex.
+# The documented reader predicate: a retained event whose reconstruction finished with a valid vertex and
+# which the established event classification accepted (evt_terminal_status 0: triggered or owned by its
+# simulation sample, |vz| inside the cut; Au+Au also minimum bias and centrality 0-80%).
 analysis = events[(events.evt_record == 0) & (events.evt_nodes_ready == 1) & (events.vtx_valid == 1)
                   & (events.evt_terminal_status == 0)]
 print('%s (%s, %s layout): %d entries, %d analysis events'

@@ -3,8 +3,9 @@
 
 All algorithms share one eventTree input contract and saved split. Existing
 validated releases are reused; an interrupted candidate is never promoted by
-filename alone. Completed groups are published by the maintained eventTree API.
-The shell entry point selects an already configured Python environment.
+filename alone. Completed groups are published by TreeProduction's installed
+eventTree library (MYINSTALL). The shell entry point selects an already
+configured Python environment.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ def arguments(argv=None):
     parser.add_argument('--config', type=Path, default=HERE / 'config/training.yaml')
     parser.add_argument('--models', type=Path, default=HERE / 'models', help='model release root')
     parser.add_argument('--group', type=Path, action='append', default=[], help='complete published group; repeat as needed')
-    parser.add_argument('--code-root', type=Path, default=HERE.parent, help='repository containing shared TreeProduction eventTree module')
+    parser.add_argument('--code-root', type=Path, default=HERE.parent, help='repository containing TreeProduction and its eventTree schema')
     parser.add_argument('--release-version', default='v1', help='explicit version for a new training recipe/input population')
     parser.add_argument('--check', action='store_true', help='read-only input, recipe and dependency preview')
     parser.add_argument('--no-score', action='store_true', help='finish model release without publishing dataset augmentation')
@@ -184,7 +185,7 @@ def main(argv=None):
             groups = args.group or [Path(p) for p in config['datasets'][system]]
             # For a paired command, configuration owns the separate system collections.
             Models.require(not (len(systems) > 1 and args.group), 'paired systems use separate config dataset groups')
-            inputs = Inputs.published_inputs(groups, system, code_root=args.code_root)
+            inputs = Inputs.published_inputs(groups, system)
             for name in names:
                 if args.command == 'score':
                     folder = Models.release_dir(args.models, system, name)
@@ -195,7 +196,7 @@ def main(argv=None):
                     record = train_release(inputs, config, system, name, args)
                     if not args.check and not args.no_score:
                         # Resolve again after each family: a previous family may have advanced CURRENT.
-                        current = Inputs.published_inputs(groups, system, code_root=args.code_root)
+                        current = Inputs.published_inputs(groups, system)
                         record['augmentation'] = Scoring.score_groups(current, record['release'], code_root=args.code_root)
                 result.append(record)
     print(json.dumps(result, indent=2, allow_nan=False))

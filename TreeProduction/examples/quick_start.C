@@ -33,7 +33,8 @@ void quick_start(const char* path) {
   long long entries = 0, analysis = 0, with_photon = 0;
   while (reader.Next()) {
     ++entries;
-    // The documented reader predicate.
+    // The documented reader predicate: reconstruction finished with a valid vertex, and the established
+    // event classification accepted the event (evt_terminal_status 0).
     if (*record != 0 || *nodes_ready != 1 || *vertex_valid != 1 || *terminal != 0) continue;
     ++analysis;
     if (photon_et.GetSize() > 0) ++with_photon;

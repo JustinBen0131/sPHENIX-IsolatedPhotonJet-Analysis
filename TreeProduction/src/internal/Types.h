@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -120,8 +121,7 @@ enum class AssociationState : std::int32_t
 // State of the calorimeter truth evaluator for one reconstructed cluster. It
 // describes the evaluator, not the final reconstruction-to-truth relation.
 //
-// The integer values follow the reference production so that the two remain
-// directly comparable during migration.
+// The integer values are the stored eventTree codes.
 enum class DominantTruthState : std::int32_t
 {
   NotSimulation        = -1,
@@ -428,7 +428,11 @@ struct SourceConfig
   int run = 0;
   int segment = 0;
 
-  std::int64_t sourceFileOrdinal = -1;  // position of this file in the job
+  // Position of this file in the maintained source order, and the global
+  // entry of its entry 0 in that order (-1 when the catalogue has none). The
+  // PPG12 half-sample convention keys on this global entry.
+  std::int64_t sourceFileOrdinal = -1;
+  std::int64_t sourceGlobalEntryBegin = -1;
 
   std::int64_t firstEntry = 0;  // first source entry this job reads
   std::int64_t maxEvents = -1;  // event budget, negative means no limit
@@ -552,16 +556,21 @@ struct ProductionScoreConfig
   double validatedCentralityMin = std::numeric_limits<double>::quiet_NaN();
   double validatedCentralityMax = std::numeric_limits<double>::quiet_NaN();
 
-  // Historical working points of this model in photon-ET bins, recorded as
-  // witnesses inside the validated domain; empty when none are configured.
+  // Historical working points of this model, recorded as witnesses inside the
+  // validated domain: per photon-ET bin (p+p), or lines in the centrality
+  // percent, intercept + slope x centrality (Au+Au). Empty when none apply.
   std::vector<double> workingPointEtEdges;
-  std::array<std::vector<double>, 3> workingPoints;  // WP70, WP80, WP90
+  std::array<std::vector<double>, 3> workingPoints;  // WP70, WP80, WP90 per ET bin
+  bool centralityLinearWorkingPoints = false;
+  std::array<double, 3> workingPointIntercepts{};
+  std::array<double, 3> workingPointSlopes{};
 };
 
-// The active photon preselection recorded per candidate (pho_presel_active).
-// newPPG12: the named NPB score above its model's configured cut, and et1,
-// e11/e33 and e32/e35 inside their open windows; no weta cut. An empty
-// variant records -1 (no active preselection configured).
+// The active photon preselection recorded per candidate (pho_presel_active),
+// in the profile's established variant. reference: e11/e33 < 0.98,
+// 0.6 < et1 < 1, 0.8 < e32/e35 < 1 and weta < 0.6. newPPG12: the named NPB
+// score above its model's configured cut, and et1, e11/e33 and e32/e35 inside
+// their open windows; no weta cut. An empty variant records -1.
 struct PreselectionConfig
 {
   std::string variant;
@@ -596,6 +605,56 @@ struct IsolationWitnessConfig
   double centralityMax = std::numeric_limits<double>::quiet_NaN();
 };
 
+// Nominal photon identification, frozen by the PhotonID package
+// (PhotonID/models/nominal.json and each system's nominal manifest). Every
+// stored candidate is labelled before writing; labels never change retention.
+//
+// Au+Au: the model is evaluated on the primary H70 view features inside
+// etMin <= ET < etMaxExclusive and centralityMin <= centrality <
+// centralityMaxExclusive. pp: the PPG12 producer score (7 GeV minimum, -1
+// sentinel) is the nominal score where ET >= etMin; it must agree with a
+// recompute of the same model within recomputeUlpLimit float32 ulp without
+// changing any region. Regions: tight score > WP70; non-tight 0.1 < score <
+// WP80; the band between is excluded; otherwise fail.
+struct NominalPhotonIdConfig
+{
+  std::string packageFile, packageSha256;
+  std::string system;  // "auau" or "pp", the package key
+  std::string modelFile, modelSha256;
+  std::string view;
+  std::vector<std::string> featureOrder;
+  double etMin = std::numeric_limits<double>::quiet_NaN();
+  double etMaxExclusive = std::numeric_limits<double>::quiet_NaN();  // NaN: open
+  double centralityMin = std::numeric_limits<double>::quiet_NaN();
+  double centralityMaxExclusive = std::numeric_limits<double>::quiet_NaN();
+  IsolationLine wp70, wp80;  // Au+Au lines in centrality (sidebandGapGeV unused)
+  bool usesProducerScore = false;
+  double recomputeUlpLimit = 2.0;
+};
+
+// Nominal isolation class definition.
+//
+// Au+Au: the pinned freeze package; its reconstructed witness at one radius
+// and subtraction method against threshold = intercept + slope * centrality,
+// with a sideband gap and a centrality domain. pp: PPG12 at R = 0.4 against
+// the witness's own stored threshold and sideband (its cone already carries
+// the producer's SIM correction). Cone < threshold is isolated, cone above
+// the sideband is non-isolated, the band between is excluded, anything
+// invalid is -1.
+struct NominalIsolationConfig
+{
+  std::string system;
+  std::string freezeFile, freezeSha256, derivationSha256;
+  std::string definitionJson;  // pp definition, pinned by its canonical digest
+  int witnessIndex = -1;
+  double radius = std::numeric_limits<double>::quiet_NaN();
+  std::int32_t subtractionMethod = 0;
+  IsolationLine threshold;  // Au+Au: centrality line and sideband gap
+  double centralityMin = std::numeric_limits<double>::quiet_NaN();
+  double centralityMaxExclusive = std::numeric_limits<double>::quiet_NaN();
+  bool storedThresholds = false;  // pp
+};
+
 // Photon capture.
 //
 // These bounds are the storage domain, not the measurement selection. The
@@ -607,15 +666,15 @@ struct PhotonConfig
   ProductionScoreConfig productionScore;
   PreselectionConfig preselection;
   IsolationWitnessConfig isolationWitness;
+  NominalPhotonIdConfig nominalId;
+  NominalIsolationConfig nominalIsolation;
   double minEtGeV = 5.0;
   double maxEtGeV = 40.0;
   double maxAbsEta = 0.7;
 
-  // Reconstructed-object vertex domain, cm. Photons and jets are captured
-  // only when the reconstructed vertex is valid and |z| is below this value;
-  // the event row is retained either way and records the outcome. This is
-  // the explicit object domain of the retention profile, not an analysis
-  // vertex selection, which is narrower and lives downstream.
+  // DATA reconstructed-object vertex domain, cm. The event row is retained
+  // outside it; DATA jets additionally require a stored photon. The original
+  // SIM retention contract does not apply this DATA vertex cut.
   double objectVertexAbsZMaxCm = 60.0;
 
   std::string rawClusterNode = "CLUSTERINFO_CEMC";
@@ -632,6 +691,12 @@ struct PhotonConfig
 
   // Conversion from calorimeter time samples to nanoseconds.
   double timingSampleNs = 17.6;
+
+  // PPG12 photon-yield source arbitration (pp): the PPG12 tower mask, pinned
+  // by digest. An empty file means the arbitration does not apply (Au+Au).
+  std::string ppg12TowerMaskFile;
+  std::string ppg12TowerMaskSha256;
+  std::string ppg12TowerMaskHistogram;
 };
 
 // One reconstructed jet collection: a radius, a physical view, and the pair of
@@ -674,15 +739,10 @@ struct CentralityConfig
   std::vector<int> edges = {0, 20, 50, 80};
 
   // Au+Au data reconstructs centrality during this pass from run-bound frozen
-  // payloads. Embedded simulation consumes the centrality already present in
-  // its input instead.
+  // payloads (the plan's conditions carry them). Embedded simulation consumes
+  // the centrality already present in its input instead.
   bool reconstructDataCentrality = false;
-  bool requireOwnRunPayload = true;
-
   std::string calibrationTag;
-  std::string divisionPayloadPath;
-  std::string runScalePayloadPath;
-  std::string vertexScalePayloadPath;
 };
 
 // Producer-side weight inputs.
@@ -702,18 +762,129 @@ struct WeightConfig
   bool ppg12Nominal = false;
   bool doubleInteraction = false;
   int ppg12LaneCode = 0;  // 1 photon+jet, 2 inclusive jet
+  std::string ppg12Slice;  // generator slice of the sample, e.g. photon20 or jet12
+  int ppg12SliceCode = 0;  // the slice's bookkeeping sample code
+  // Event-ownership window of the slice, [low, high] GeV (high +inf when open).
+  double ownershipLowGeV = std::numeric_limits<double>::quiet_NaN();
+  double ownershipHighGeV = std::numeric_limits<double>::quiet_NaN();
+  // Inclusive-jet slices: photon candidates above this ET belong to the next
+  // slice (+inf for photon slices).
+  double clusterEtUpperGeV = std::numeric_limits<double>::infinity();
   double sliceFactor = 1.0;
   double interactionFactor = 1.0;
   double periodFactor = 1.0;
 };
 
-// Which optional tables the file carries. The mandatory tables are always
-// written; these switches govern the large witness tables whose final
-// disposition is a mapping-ledger decision.
+// One PPG12 crossing-angle period: its run range, luminosity share, SI/DI
+// mixture and closure vertex window. An empty key means no period contract;
+// the remaining values are then the producer's unset values, which its audit
+// rows record as such.
+struct PPG12PeriodConfig
+{
+  std::string key;  // "0mrad" or "1p5mrad"
+  int runMin = -1;
+  int runMaxExclusive = -1;
+  double luminosityPbInv = 1.0;
+  double targetLuminosityPbInv = 1.0;
+  double doubleFraction = -1.0;
+  double closureZCutCm = -1.0;
+};
+
+// The PPG12 pp photon-ID lines in photon ET (PhotonID/models/PP/nominal): a
+// score above tight() is tight; non-tight lies strictly between
+// nonTightLow() and nonTightHigh().
+struct PPG12IdLines
+{
+  static double tight(const double et) { return 0.815625 - 0.0015625 * et; }
+  static double nonTightLow(const double et) { return 0.7333333333333333 - 0.01333333333333333 * et; }
+  static double nonTightHigh(const double et) { return 0.684375 + 0.0015625 * et; }
+};
+
+// The established pp producer's PPG12 bookkeeping (PPG12.cc and
+// PPG12Simulation.cc). Photons in these ET bins (GeV, [low, high)) entered its
+// per-photon audit. In simulation its histograms also used the recoil-jet
+// definition and the unfolding axes below.
+struct PPG12BookkeepingConfig
+{
+  std::vector<double> photonEtBins;
+
+  double recoilJetPtMinGeV = std::numeric_limits<double>::quiet_NaN();
+  double recoilDeltaPhiMin = std::numeric_limits<double>::quiet_NaN();  // rad
+  double jetMatchMaxDeltaR = std::numeric_limits<double>::quiet_NaN();
+  std::vector<double> unfoldRecoPhotonEtBins;
+  std::vector<double> unfoldTruthPhotonEtBins;
+  std::vector<double> unfoldXJBins;
+
+  // The run the producer seeded its simulation response-ET draws with: its
+  // conditions timestamp.
+  std::uint64_t responseSeedRun = 0;
+};
+
+// The historical pp producer's event classification. It is recorded, never
+// applied: it fills evt_terminal_status and the PPG12 vertex/period audit
+// occurrences (pdiag_*), and no event or object is removed by it.
+//
+// DATA: an event is classified when its mandatory MBD vertex exists. The
+// configured triggers (GL1 name -> stream key) and the PPG12 scaled-bit audit
+// stream define the active streams; then the period run filter and the |vz|
+// cut apply. SIM uses the single stream "SIM" and the |vz| cut only.
+struct EventClassificationConfig
+{
+  bool enabled = false;
+  std::vector<std::pair<std::string, std::string>> triggers;
+  std::string scaledBitStream;
+  int scaledBit = -1;
+  bool useVertexCut = false;
+  double vertexCutCm = std::numeric_limits<double>::quiet_NaN();
+  std::vector<PPG12PeriodConfig> periods;  // every period, for run labels
+  PPG12PeriodConfig period;                // this job's period (key empty: none)
+  bool filterDataByPeriod = false;
+  bool useLuminosityWeight = true;
+  bool doubleInteraction = false;
+  double mixWeight = 1.0;  // SI/DI mixture weight (SIM)
+  bool mixWeightFromPeriod = false;
+  bool vertexFileFromPeriod = false;
+
+  // Au+Au: the GL1 scaled bits that activate a DATA event (bit, stream), the
+  // minimum-bias requirement, the analysis centrality range [low, high) in
+  // truncated percent, and each embedded jet sample's ownership window
+  // [low, high) GeV of the maximum R = 0.4 truth-jet pT (high +inf when open).
+  std::vector<std::pair<int, std::string>> scaledTriggers;
+  bool requireMinimumBias = false;
+  int centralityMinPercent = 0;
+  int centralityMaxPercent = 0;
+  std::map<int, std::pair<double, double>> embeddedJetWindows;
+};
+
+// The established producer's Au+Au embedded truth-photon misses (truthmiss_*):
+// an accepted embedded event whose leading truth signal photon has no
+// reconstructed photon with |eta| < absEtaMax, ET in [etMinGeV, etMaxGeV), the
+// active preselection, a passing isolation witness at isolationRadius and the
+// production's tight identification, or whose leading such photon is another
+// truth particle. The tight identification is the established cut-based one:
+// weta and wphi in (widthMin, widthMaxIntercept + widthMaxSlopePerGeV x ET),
+// e11/e33, et1 and e32/e35 inside their open windows.
+struct TruthMissConfig
+{
+  bool enabled = false;
+  double etMinGeV = std::numeric_limits<double>::quiet_NaN();
+  double etMaxGeV = std::numeric_limits<double>::quiet_NaN();
+  double absEtaMax = std::numeric_limits<double>::quiet_NaN();
+  double isolationRadius = std::numeric_limits<double>::quiet_NaN();
+  double widthMin = std::numeric_limits<double>::quiet_NaN();
+  double widthMaxIntercept = std::numeric_limits<double>::quiet_NaN();
+  double widthMaxSlopePerGeV = std::numeric_limits<double>::quiet_NaN();
+  std::array<double, 2> e11OverE33{{std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}};
+  std::array<double, 2> et1{{std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}};
+  std::array<double, 2> e32OverE35{{std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}};
+};
+
+// One eventTree branch as the schema declares it.
 struct OutputField
 {
   std::string name, type, title, counter;
   int length = 0;  // scalar 0, vector -1, fixed array positive
+  bool reserved = false;
 };
 
 struct OutputConfig
@@ -739,6 +910,7 @@ struct ProvenanceConfig
 
   std::string macroSha256;
   std::string configurationSha256;
+  std::string resolvedConfigurationSha256;
 
   // The exact configuration bytes, embedded in the output so a file never
   // has to be matched to a configuration by name.
@@ -763,6 +935,9 @@ struct Config
   JetConfig jets;
   CentralityConfig centrality;
   WeightConfig weights;
+  EventClassificationConfig classification;
+  TruthMissConfig truthMisses;
+  PPG12BookkeepingConfig ppg12;
   OutputConfig output;
   ProvenanceConfig provenance;
 
@@ -778,11 +953,6 @@ struct Config
   // denominator of every later normalisation, so it is not filtered by object
   // yield.
   bool retainEveryProducerEncounter = true;
-
-  // Embedded Au+Au simulation may require the embedded minimum-bias
-  // classifier. The event record is retained either way; the requirement
-  // affects object capture, not exposure accounting.
-  bool requireEmbeddedMinimumBias = false;
 };
 
 //
@@ -841,6 +1011,69 @@ struct UpstreamRejectedEventRecord
   int run = 0;
   std::int64_t physicalEventSequence = -1;
   std::int64_t sourceEntry = -1;
+};
+
+// One PPG12 audit occurrence (pdiag_*): a stream and kind with the stage,
+// value or vertex the historical bookkeeping recorded, in emission order.
+// Unset integers keep their -1/0 defaults and unset measurements stay NaN.
+struct PPG12DiagnosticRecord
+{
+  std::string trigger;
+  std::string kind;
+  std::int32_t stageCode = 0;
+  std::int32_t sourceCode = 0;
+  std::int32_t sampleCode = 0;
+  std::int32_t decision = 0;
+  std::int32_t clusterOrdinal = -1;
+  std::int32_t truthTrackId = -1;
+  std::int32_t generatorBarcode = -1;
+  double sourcePhotonPt = std::numeric_limits<double>::quiet_NaN();
+  double flowValue = std::numeric_limits<double>::quiet_NaN();
+  double recoPhotonPt = std::numeric_limits<double>::quiet_NaN();
+  double responsePhotonPt = std::numeric_limits<double>::quiet_NaN();
+  double truthPhotonPt = std::numeric_limits<double>::quiet_NaN();
+  double truthPriorWeight = std::numeric_limits<double>::quiet_NaN();
+  double recoVertexZ = std::numeric_limits<double>::quiet_NaN();
+  double hardTruthVertexZ = std::numeric_limits<double>::quiet_NaN();
+  double minimumBiasTruthVertexZ = std::numeric_limits<double>::quiet_NaN();
+  double vertexWeight = std::numeric_limits<double>::quiet_NaN();
+  double periodEventWeight = std::numeric_limits<double>::quiet_NaN();
+  double clusterEnergy = std::numeric_limits<double>::quiet_NaN();
+  double clusterEta = std::numeric_limits<double>::quiet_NaN();
+  double clusterEt = std::numeric_limits<double>::quiet_NaN();
+  double truthEnergy = std::numeric_limits<double>::quiet_NaN();
+  double truthEta = std::numeric_limits<double>::quiet_NaN();
+  double truthEt = std::numeric_limits<double>::quiet_NaN();
+  double energyContribution = std::numeric_limits<double>::quiet_NaN();
+  double occurrenceWeight = 1.0;
+  std::uint64_t selectionBits = 0;
+};
+
+// One Au+Au embedded diagnostic occurrence (embdiag_*): the sample stitch
+// decision, an audit category of the truth-isolation diagnostic, or a truth
+// photon it accepted, in emission order. Unset fields keep their defaults.
+struct EmbeddedDiagnosticRecord
+{
+  std::string kind;  // STITCH, AUDIT or TRUTH_PHOTON
+  std::int32_t auditBin = 0;
+  std::int32_t sampleCode = 0;
+  std::int32_t centralityBinIndex = -1;
+  std::int32_t photonClass = 0;
+  double truthPt = std::numeric_limits<double>::quiet_NaN();
+  double truthIsolationWitness = std::numeric_limits<double>::quiet_NaN();
+  std::int32_t stitchDecision = 0;
+  double stitchPhotonPt = std::numeric_limits<double>::quiet_NaN();
+};
+
+// One Au+Au embedded truth-photon miss (truthmiss_*): the event's centrality
+// class index (0-20, 20-50, 50-80%), the missed truth photon pT, and the
+// established producer's decision path (NO_SELECTED_RECO, or
+// SELECTED_RECO_NOT_TRUTH_SIGNAL), recorded in the file's constants.
+struct TruthMissRecord
+{
+  std::int32_t centralityBin = -1;
+  double truthPt = std::numeric_limits<double>::quiet_NaN();
+  std::string decisionPath;
 };
 
 // One row per retained event.
@@ -913,8 +1146,8 @@ struct EventRecord
   // 0 none, 1 the minimum-bias detector vertex map, 2 the global vertex map.
   std::int32_t recoVertexSource = 0;
 
-  // True when the reconstructed vertex is valid and inside the configured
-  // object vertex domain, so that photon and jet capture ran for this event.
+  // Reconstructed vertex satisfies the mode's storage domain. DATA also
+  // requires a captured photon before its jet collections are retained.
   bool recoObjectVertexInDomain = false;
 
   //
@@ -931,7 +1164,10 @@ struct EventRecord
 
   double mbdSouthCharge = std::numeric_limits<double>::quiet_NaN();
   double mbdNorthCharge = std::numeric_limits<double>::quiet_NaN();
+  // Sequential binary64 sum of the finite positive PMT charges; NaN without a
+  // PMT container. Complete: 128 channels, each with its identity and charge.
   double mbdTotalCharge = std::numeric_limits<double>::quiet_NaN();
+  bool mbdPmtArrayComplete = false;
 
   bool mbdValid = false;
   bool mbdAvailable = false;
@@ -978,8 +1214,8 @@ struct EventRecord
   bool centralityNativeValid = false;
 
   std::int32_t centralityBin = -1;
-  // Legacy analysis uses truncation of the mbd_NS bin accessor, independently
-  // of the coarse jet bin and native validity witness. pp remains -1.
+  // The analysis centrality: the truncated percent of the mbd_NS bin accessor,
+  // independent of the coarse jet bin and the native validity witness. pp -1.
   std::int32_t analysisCentrality = -1;
   double centralityPercent = std::numeric_limits<double>::quiet_NaN();
   bool centralityValid = false;
@@ -1039,7 +1275,11 @@ struct EventRecord
   double truthMinimumBiasVertexZ = std::numeric_limits<double>::quiet_NaN();
   bool truthMinimumBiasVertexValid = false;
 
-  TriState embeddedMinimumBias = TriState::Unknown;
+  // The embedded photon sample's generator-filter witness uses the original
+  // HepMC selection, before any reconstructed-photon acceptance. -1 is the
+  // measured absence of a qualifying photon; false means capture never ran.
+  bool embeddedFilterPhotonCaptured = false;
+  double embeddedFilterPhotonPt = -1.0;
 
   // Truth photon census. These counters are what makes the truth denominator
   // auditable: a reader can tell how many candidate truth photons existed, how
@@ -1079,6 +1319,21 @@ struct EventRecord
   std::uint32_t recoPhotonUnclassifiableCount = 0;
 
   //
+  // PPG12 photon-yield source arbitration (pp with the PPG12 tower mask)
+  //
+  // State 1 when the arbitration ran over this event's photon clusters, else
+  // 0. The leading source is the unmasked cluster with the highest cluster_pt
+  // of at least 5 GeV, the first encountered on ties; key 0, encounter -1 and
+  // NaN kinematics when there is none.
+  //
+  std::int32_t ppg12ArbitrationState = 0;
+  std::uint32_t ppg12LeadKey = 0;
+  std::int32_t ppg12LeadEncounter = -1;
+  double ppg12LeadEt = std::numeric_limits<double>::quiet_NaN();
+  double ppg12LeadEta = std::numeric_limits<double>::quiet_NaN();
+  double ppg12LeadPhi = std::numeric_limits<double>::quiet_NaN();
+
+  //
   // Producer weight
   //
   // One composed weight per event, with its factors in the weight table. Data
@@ -1097,9 +1352,35 @@ struct EventRecord
   std::uint32_t truthPhotonCount = 0;
   std::uint32_t truthJetCount = 0;
 
-  // Producer terminal status. Zero is ordinary completion. Non-zero values are
-  // diagnostic and never act as an output retention cut.
+  // Historical event classification (EventClassificationConfig). The
+  // mandatory-vertex flag, the active streams in configuration order, the
+  // terminal status (pp: 0 none, 1 trigger, 2 vz, 3 period, 4 ownership;
+  // Au+Au: 0 none, 1 trigger, 2 vz, 3 minimum bias, 4 stitch, 5 centrality),
+  // the PPG12 audit occurrences and the Au+Au embedded diagnostics and truth
+  // misses. Diagnostic only; never a retention cut.
+  bool nodesReady = false;
+  std::vector<std::string> activeTriggers;
   std::int32_t terminalStatus = 0;
+  std::vector<PPG12DiagnosticRecord> ppg12Diagnostics;
+  std::vector<EmbeddedDiagnosticRecord> embeddedDiagnostics;
+  std::vector<TruthMissRecord> truthMisses;
+
+  // pp simulation sample ownership (PPG12 stitching). The stitch inputs are
+  // the maximum stored truth photon pT of each established definition, in
+  // order g4Stored, hepmcParent, hepmcParentStable, hepmcAnyPhoton, g4NoEmbed,
+  // the embedded |eta| < 0.7 source and the maximum truth R=0.4 jet pT; -1
+  // when absent. The event weight applies only to an owned, accepted event.
+  std::array<double, 5> ppg12StitchPhotonPt{{-1.0, -1.0, -1.0, -1.0, -1.0}};
+  double ppg12SourcePhotonPt = -1.0;
+  double ppg12MaxTruthJetPtR04 = -1.0;
+  bool ppg12Owned = false;
+  bool ppg12WeightActive = false;
+
+  // pp simulation: the fills the established producer's weighted and raw
+  // histograms received in this event, indexed by weighting lane code (1 to
+  // 4; index 0 unused). Fills before the weight configuration are not counted.
+  std::array<std::int64_t, 5> ppg12WeightedFills{{0, 0, 0, 0, 0}};
+  std::array<std::int64_t, 5> ppg12RawFills{{0, 0, 0, 0, 0}};
 };
 
 //
@@ -1138,9 +1419,14 @@ struct ModelInvocationRecord
   std::int32_t captureVersion = 0, evaluationState = 0, domainMode = 0;
   std::int32_t inProducerDomain = -1, modelAvailable = -1;
   std::int32_t inputOrderIsNpb25 = 0, inputsCaptured = 0, inputsFinite = 0;
-  float minEt = NAN, maxEt = NAN, maxAbsEta = NAN, rawScore = NAN;
+  float minEt = std::numeric_limits<float>::quiet_NaN();
+  float maxEt = std::numeric_limits<float>::quiet_NaN();
+  float maxAbsEta = std::numeric_limits<float>::quiet_NaN();
+  float rawScore = std::numeric_limits<float>::quiet_NaN();
   std::uint32_t sourcePhotonId = 0, sourceNativeClusterKey = 0;
-  float sourceClusterEt = NAN, sourceEta = NAN, sourcePhi = NAN;
+  float sourceClusterEt = std::numeric_limits<float>::quiet_NaN();
+  float sourceEta = std::numeric_limits<float>::quiet_NaN();
+  float sourcePhi = std::numeric_limits<float>::quiet_NaN();
   std::int32_t bindingPolicy = 0, sourceIdentityAvailable = 0;
   std::int32_t kinematicInputBitsAvailable = 0;
   std::uint32_t inputEtBits = 0, inputEtaBits = 0;
@@ -1283,10 +1569,6 @@ struct ShowerShapeRecord
 // are kept, with the full tower status word rather than a reduced good flag,
 // so that a later quality convention can be applied without re-running
 // reconstruction.
-//
-// DISPOSITION PENDING (reference-production field mapping): whether the cell
-// table stays in the delivered tree or becomes an optional diagnostic product
-// is a mapping-ledger decision, not one taken here.
 struct PhotonCellRecord
 {
   Identity eventId;
@@ -1360,12 +1642,8 @@ struct IsolationWitnessRecord
   std::int32_t constituentCount = 0;
 };
 
-// One object entering an isolation cone.
-//
-// DISPOSITION PENDING (reference-production field mapping): constituent-level
-// storage is large and its final disposition is a mapping-ledger decision. It
-// is retained now because dropping it would be irreversible and because the
-// stored cone sums cannot otherwise be re-derived.
+// One object entering an isolation cone. The constituents are stored because
+// the cone sums cannot otherwise be re-derived with a different convention.
 struct IsolationConstituentRecord
 {
   Identity eventId;
@@ -1404,12 +1682,33 @@ struct DominantTruthRecord
   DominantTruthState state = DominantTruthState::NotSimulation;
   DominantTruthEvaluator evaluator = DominantTruthEvaluator::NotApplicable;
 
+  // -1 marks an unmeasured identity, including DATA and a missing primary.
   std::int32_t trackId = -1;
   std::int32_t pid = 0;
-  std::int32_t barcode = std::numeric_limits<std::int32_t>::min();
+  std::int32_t barcode = -1;
   std::int32_t embeddingId = 0;
   std::int32_t vertexId = -1;
 
+  double energyContribution = std::numeric_limits<double>::quiet_NaN();
+};
+
+// One cluster of the photon builder's input container as the PPG12
+// simulation bookkeeping reads it: its energy; its energy vector from the
+// reconstructed vertex (RawClusterUtility::GetEVec), whose magnitude and
+// massless pT, eta, phi the producer used; its pseudorapidity from the same
+// vertex (GetPseudorapidity); and the Geant4 primary depositing most of its
+// energy. Not stored.
+struct PPG12ClusterRecord
+{
+  double energy = std::numeric_limits<double>::quiet_NaN();
+  double directionEnergy = std::numeric_limits<double>::quiet_NaN();
+  double pt = std::numeric_limits<double>::quiet_NaN();
+  double eta = std::numeric_limits<double>::quiet_NaN();
+  double phi = std::numeric_limits<double>::quiet_NaN();
+  double vertexEta = std::numeric_limits<double>::quiet_NaN();
+
+  bool primaryFound = false;
+  std::int32_t truthTrackId = -1;
   double energyContribution = std::numeric_limits<double>::quiet_NaN();
 };
 
@@ -1418,6 +1717,27 @@ struct DominantTruthRecord
 // Candidates are admitted on kinematics alone. No identification score and no
 // isolation working point takes part in retention, which is what lets a model
 // change without re-reading the DST.
+// The nominal labels of one candidate (NominalPhotonIdConfig and
+// NominalIsolationConfig), stored as pho_bdt_score, pho_bdt_state,
+// pho_id_class and pho_iso_class.
+struct NominalPhotonRecord
+{
+  double score = std::numeric_limits<double>::quiet_NaN();  // NaN unless scored
+  std::int32_t state = 0;           // 1 scored, 0 outside the domain, 2 invalid input
+  std::int32_t idClass = -1;        // 3 tight, 2 excluded gap, 1 non-tight, 0 fail, -1 not scored
+  std::int32_t isolationClass = -1; // 2 isolated, 1 excluded gap, 0 non-isolated, -1 invalid
+};
+
+// Source totals of the nominal labels, written with the file's receipts.
+struct NominalReceiptRecord
+{
+  std::uint64_t photons = 0;
+  std::uint64_t parityMismatches = 0;
+  std::map<int, std::uint64_t> states, idClasses, isolationClasses;
+  double maxRecomputeUlp = 0.0;
+  std::uint64_t recomputeRegionFlips = 0;
+};
+
 struct PhotonRecord
 {
   Identity eventId;
@@ -1445,6 +1765,14 @@ struct PhotonRecord
   // direction. Stored because it is part of the measurement.
   double producerVertexZ = std::numeric_limits<double>::quiet_NaN();
 
+  // The clusterizer's shower-profile probability (RawCluster::get_prob). It
+  // is not a tree branch; the PPG12 bookkeeping's common selection reads it.
+  double clusterProbability = std::numeric_limits<double>::quiet_NaN();
+
+  // PPG12 tower mask at this cluster's tower centroid: 1 masked, 0 not
+  // masked, -1 when the arbitration does not apply.
+  std::int32_t ppg12TowerMaskState = -1;
+
   PhotonTimingRecord timing;
   DominantTruthRecord dominantTruth;
 
@@ -1458,6 +1786,8 @@ struct PhotonRecord
   std::vector<ShowerShapeRecord> showerShapes;
   std::vector<IsolationRecord> isolation;
   std::vector<IsolationWitnessRecord> isolationWitnesses;
+
+  NominalPhotonRecord nominal;
 };
 
 //
@@ -1528,6 +1858,11 @@ struct JetRecord
   // zero. It makes the output reproducible; it is not a momentum ranking.
   std::uint32_t deterministicOrder = 0;
 
+  // eta and phi are the pre-JES direction: the raw jet rebuilt through the
+  // calibration's binary32 four-vector arithmetic at unit scale, so a JES
+  // value never changes the stored direction. calibrationValid is false where
+  // the JES function is negative (the calibrated vector is reversed); such a
+  // jet keeps its unit-scale pT, and its pairs carry an undefined xJ.
   double rawPt = std::numeric_limits<double>::quiet_NaN();
   double correctedPt = std::numeric_limits<double>::quiet_NaN();
   double eta = std::numeric_limits<double>::quiet_NaN();
@@ -1543,6 +1878,12 @@ struct JetRecord
   std::uint64_t qualityBitmask = 0;
 
   bool calibrationValid = false;
+
+  // pT of the unit-scale construction above. Not stored: the established
+  // producer's simulation conditions carried no jet energy scale, so its
+  // histograms read exactly these (unitScalePt, eta, phi) jets, which the PPG12
+  // simulation bookkeeping replays.
+  double unitScalePt = std::numeric_limits<double>::quiet_NaN();
 };
 
 // One photon and one retained jet of one collection.
@@ -1550,13 +1891,8 @@ struct JetRecord
 // The recoil state is the nominal away-side witness, an absolute azimuthal
 // separation of at least kRecoilDeltaPhiMin. It is a stored flag and not a
 // retention cut: every pair is written, and any away-side requirement is
-// reproducible downstream from the stored separation.
-//
-// DISPOSITION PENDING (reference-production field mapping): these rows are a
-// Cartesian product and form the largest table in the file. They may become a
-// downstream derivation once the ledger shows that the retained photon and jet
-// rows carry enough ordering, population and validity information to rebuild
-// them exactly.
+// reproducible downstream from the stored separation. The rows are the full
+// photon x jet product of each event, the largest table in the file.
 struct PhotonJetPairRecord
 {
   Identity eventId;
@@ -1618,6 +1954,7 @@ struct TruthPhotonRecord
   double pt = std::numeric_limits<double>::quiet_NaN();
   double eta = std::numeric_limits<double>::quiet_NaN();
   double phi = std::numeric_limits<double>::quiet_NaN();
+  double energy = std::numeric_limits<double>::quiet_NaN();  // Geant4; not stored
 
   bool geantValid = false;
   bool generatorAssociationValid = false;

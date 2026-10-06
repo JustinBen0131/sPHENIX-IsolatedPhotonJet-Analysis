@@ -1,26 +1,12 @@
-// Fill the photon + recoil-jet histograms from eventTree v1 files.
-//
-//   root -l -q 'TreeToHists/src/FillPhotonJet.C("a.eventtree.root b.eventtree.root", "out.root", "nominal")'
-//
-// Analysis events: evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0.
-// Per centrality class <c> (Au+Au: cent0_20, cent20_50, cent50_80; pp: all) and recoil-jet threshold <t>
-// (jet5, jet7, jet10, jet12 GeV):
-//   events_<c>                TH1D  one bin                            all analysis events of the class
-//   photons_<c>               TH1D  photon ET                          photons passing the kinematic selection (no ID)
-//   abcd_<c>                  TH2D  region (A,B,C,D) x photon ET       the event-leading photon of each region
-//   recoil_<c>_<t>            TH3D  region (A,C) x photon ET x xJ      every recoil jet of the A and C leaders
-//   dphi<R>_<c>_<t>_<eta>     TH3D  photon ET x xJ x |dphi|           R = A, C; every jet of the leader passing
-//                                                                      the recoil cuts except dphi; eta = near
-//                                                                      (|deta| <= 0.8) or far (|deta| > 0.8)
-// and one event table per output, for whole-event resampling (bootstrap):
-//   table_events   run, seq, file, entry, centrality, slice (5% slices of 0-80; -1 in pp), weight
-//   table_photons  event, region (0-3 = A-D), et, et_bin              the event-leading photon of each region
-//   table_jets     event, region (0 = A, 1 = C), et_bin, xj, xj_bin, pt, dphi, far, window, thresholds (bit k: pt >= threshold k)
-//                  every jet around the A and C leaders passing the recoil cuts at the lowest threshold except dphi;
-//                  far = 1 when |deta| > 0.8; window = 1 when it also passes the dphi cut (a recoil jet); bins are ROOT
-//                  bin numbers
-// Weights are w_event (1 when it is not finite). All histograms keep Sumw2.
-#include "SelectionInput.h"
+/* Measurement reduction from eventTree v1.
+
+   Fills event counts, photons, ABCD leaders, recoil spectra and Delta-phi
+   sidebands, plus event/photon/jet records for whole-event resampling.
+   PhotonJet.h owns all cuts, stitching admission and event weights.
+   Histograms retain Sumw2; public plans enforce finite weights and input
+   provenance. The inventory below defines the saved cells and records.
+   Run through tree_to_hists.sh; README.md describes the package contract. */
+#include "PhotonJet.h"
 
 #ifdef __CLING__
 R__LOAD_LIBRARY(libTreePlayer)
@@ -45,6 +31,29 @@ R__LOAD_LIBRARY(libTreePlayer)
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+/* Fill the photon + recoil-jet histograms from eventTree v1 files. */
+
+/* root -l -q 'TreeToHists/src/FillPhotonJet.C("a.eventtree.root b.eventtree.root", "out.root", "nominal")' */
+
+/* Analysis events: evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0.
+   Per centrality class <c> (Au+Au: cent0_20, cent20_50, cent50_80; pp: all) and recoil-jet threshold <t>
+   (jet5, jet7, jet10, jet12 GeV):
+   events_<c>                TH1D  one bin                            all analysis events of the class
+   photons_<c>               TH1D  photon ET                          photons passing the kinematic selection (no ID)
+   abcd_<c>                  TH2D  region (A,B,C,D) x photon ET       the event-leading photon of each region
+   recoil_<c>_<t>            TH3D  region (A,C) x photon ET x xJ      every recoil jet of the A and C leaders
+   dphi<R>_<c>_<t>_<eta>     TH3D  photon ET x xJ x |dphi|           R = A, C; every jet of the leader passing
+   the recoil cuts except dphi; eta = near
+   (|deta| <= 0.8) or far (|deta| > 0.8)
+   and one event table per output, for whole-event resampling (bootstrap):
+   table_events   run, seq, file, entry, centrality, slice (5% slices of 0-80; -1 in pp), weight
+   table_photons  event, region (0-3 = A-D), et, et_bin              the event-leading photon of each region
+   table_jets     event, region (0 = A, 1 = C), et_bin, xj, xj_bin, pt, dphi, far, window, thresholds (bit k: pt >= threshold k)
+   every jet around the A and C leaders passing the recoil cuts at the lowest threshold except dphi;
+   far = 1 when |deta| > 0.8; window = 1 when it also passes the dphi cut (a recoil jet); bins are ROOT
+   bin numbers
+   Weights are w_event (1 when it is not finite). All histograms keep Sumw2. */
 
 namespace photonjet {
 
@@ -127,7 +136,7 @@ struct EventTable {
       r = run[k], q = seq[k], f = fileIndex[k], e = entry[k], c = centrality[k], s = slice[k], w = weight[k];
       events.Fill();
     }
-    events.Write("", TObject::kOverwrite);  // one key: an autosave cycle is replaced
+    events.Write("", TObject::kOverwrite);  /* one key: an autosave cycle is replaced */
     TTree photons("table_photons", "event-leading photon of each region");
     Int_t pe, pr, pb;
     Double_t pet;
@@ -139,7 +148,7 @@ struct EventTable {
       pe = photonEvent[k], pr = photonRegion[k], pet = photonEt[k], pb = photonEtBin[k];
       photons.Fill();
     }
-    photons.Write("", TObject::kOverwrite);  // one key: an autosave cycle is replaced
+    photons.Write("", TObject::kOverwrite);  /* one key: an autosave cycle is replaced */
     TTree jets("table_jets", "jets around the A and C leaders at the lowest threshold; window = 1 for recoil jets");
     Int_t je, jr, jb, jx, jt, jw, jf;
     Double_t xj, pt, dphi;
@@ -158,7 +167,7 @@ struct EventTable {
       dphi = jetDeltaPhi[k], jt = jetThresholds[k], jw = jetWindow[k], jf = jetFar[k];
       jets.Fill();
     }
-    jets.Write("", TObject::kOverwrite);  // one key: an autosave cycle is replaced
+    jets.Write("", TObject::kOverwrite);  /* one key: an autosave cycle is replaced */
   }
 };
 
@@ -172,6 +181,7 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
   if (fileSystem(*file) != profile.system) throw std::runtime_error("profile system differs from " + path);
   TTreeReader reader("eventTree", file.get());
   const VertexEventWeight vertexWeight(*file,reader);
+  const PpSimulationGate ppSelection(*file,reader);
   const DataEventSelection dataSelection(*file,profile);
   const ULong64_t triggerMask = dataTrigger.empty() ? 0 : dataTriggerMask(*file,dataTrigger);
   std::unique_ptr<TTreeReaderValue<ULong64_t>> scaled;
@@ -190,18 +200,21 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
   TTreeReaderArray<int> method(reader, "isow_subtraction_method"), role(reader, "isow_reconstructed_or_truth");
   TTreeReaderArray<int> idClass(reader, "pho_id_class"), isoClass(reader, "pho_iso_class");
   TTreeReaderArray<double> jetPt(reader, "jet04_pt"), jetEta(reader, "jet04_eta"), jetPhi(reader, "jet04_phi");
+  const OwnershipGate owner(reader);  /* a stitched sample's events outside its window belong to another sample */
 
   while (reader.Next()) {
     reportProgress(progressOffset+reader.GetCurrentEntry()+1);
     validateSelectionEvent(profile, *centrality, et, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
     if (*record != 0 || *ready != 1 || *vtxValid != 1 || *terminal != 0) continue;
+    if (!ppSelection.accepts()) continue;
+    if (!owner.owned()) continue;
     if(profile.configured && (!std::isfinite(*vz) || std::fabs(*vz)>=profile.vertexAbsZMax)) continue;
     if(!dataSelection.accepts(*run,scaled?**scaled:0,mb?**mb:0)) continue;
     if(!dataTrigger.empty() && !(**scaled & triggerMask)) continue;
     const double product = *weightValue * vertexWeight() * weights(*centrality);
     if (strictReduction && !std::isfinite(product)) throw std::runtime_error("nonfinite event weight in " + path);
     const double w = std::isfinite(product) ? product : 1.0;
-    int k = 0;  // the event's centrality class (classes are disjoint)
+    int k = 0;  /* the event's centrality class (classes are disjoint) */
     if (profile.system == System::auau) {
       while (k < static_cast<int>(classes.size()) && !(classes[k].low <= *centrality && *centrality < classes[k].high)) ++k;
       if (k == static_cast<int>(classes.size())) continue;
@@ -255,7 +268,7 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
             h.h3("recoil_" + tag).Fill(r == kA ? 0.5 : 1.5, et[i], xj, w);
             passed |= 1 << t;
           }
-          // the same cuts without the dphi requirement, for a data-driven fake-jet estimate
+          /* the same cuts without the dphi requirement, for a data-driven fake-jet estimate */
           Profile anyAngle = p;
           anyAngle.deltaPhiMin = 0.0;
           if (recoilJet(anyAngle, eta[i], phi[i], jetPt[j], jetEta[j], jetPhi[j])) {
@@ -280,15 +293,15 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
       }
     }
   }
-  // a missing branch or a read error ends the loop like the end of the tree; only the end is accepted
+  /* a missing branch or a read error ends the loop like the end of the tree; only the end is accepted */
   if (reader.GetEntryStatus() != TTreeReader::kEntryBeyondEnd && reader.GetEntryStatus() != TTreeReader::kEntryNotFound)
     throw std::runtime_error("eventTree read stopped before the end of " + path);
 }
 
-}  // namespace photonjet
+}  /* namespace photonjet */
 
-// inputs: whitespace-separated eventTree paths. profile: "nominal" (the analysis), a variant of it (EventTreeInput.h
-// namedProfile), or "historical" (the reference reproduction only).
+/* inputs: whitespace-separated eventTree paths. profile: "nominal" (the analysis), a variant of it (PhotonJet.h
+   namedProfile), or "historical" (the reference reproduction only). */
 int FillPhotonJet(const char* inputs, const char* output, const char* profileName = "nominal", const char* selection = "",
                   const char* centralityWeightText = "") {
   using namespace photonjet;

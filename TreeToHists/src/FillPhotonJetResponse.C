@@ -1,41 +1,12 @@
-// Fill the photon + recoil-jet response inputs from eventTree v1 simulation files.
-//
-//   root -l -q 'TreeToHists/src/FillPhotonJetResponse.C("a.eventtree.root b.eventtree.root", "out.root", "nominal")'
-//
-// Analysis events (evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0) whose vertex
-// is finite and inside the profile window. The reco photon is the region-A event-leading photon (PhotonJetSelection.h),
-// the truth photon and the truth recoil jets come from PhotonJetTruth.h, and the two are paired by the reco-truth
-// matches (plink_, jlink_; see eventMatches: jets use the match inside the analysis jet view, rebuilt from the
-// producer's candidate edges). Per centrality class <c> (Au+Au: cent0_20, cent20_50, cent50_80; pp: all) and jet-pT
-// threshold <t> (jet5, jet7, jet10, jet12 GeV), every name below carries the suffix _<c>_<t>:
-//   photon_reco                             TH1D  reco pT                  region-A photon
-//   photon_truth                            TH1D  truth pT                 truth photon
-//   photon_response_truth_x_reco            TH2D  truth pT x reco pT       matched photons
-//   photon_fakes, photon_misses             TH1D  reco pT, truth pT        unmatched reco, truth photons
-//   xj_reco, xj_truth                       TH2D  pT x xJ                  reco, truth recoil jets
-//   xj_response_truth_global_x_reco_global  TH2D  truth cell x reco cell   matched recoil jets
-//   xj_fakes                                TH2D  reco pT x xJ             reco recoil jets without a match, split into
-//   xj_fake_photon_reco, xj_combinatoric_reco, xj_detector_fakes_reco      (RecoilClass in PhotonJetTruth.h)
-//   xj_misses                               TH2D  truth pT x xJ            truth recoil jets without a match
-//   signal_leakage_truth_matched_abcd       TH2D  region x reco pT         one region leader per signal truth photon
-//   dphi_truthjet_<side>                    TH3D  reco pT x xJ x |dphi|    every jet of a matched region-A photon passing
-//   dphi_combinatoric_<side>                                               the recoil cuts except dphi, with and without
-//                                                                          a truth jet nearby (nearbyTruthJet); side near
-//                                                                          (|deta| <= 0.8) or far
-// The dphi fills are the simulation closure of the data-driven combinatoric estimate (FinalAnalysis combinatoric.py):
-// their sum is what FillPhotonJet.C fills on data, and the recoil-window integral of dphi_combinatoric is
-// xj_combinatoric_reco.
-// Axes (arguments; the defaults are the reference analysis's): reco pT 10 15 20 25 35 40 GeV; truth pT 5 10 15 20 25
-// 35 40 GeV; xJ in 0.05 steps to 2, then 3; dphi deltaPhiEdges() (EventTreeInput.h). A response cell is pT bin *
-// (xJ bins) + xJ bin (0-based). A value outside its axis is never filled (no under- or overflow) and decides the
-// category as described in PhotonJetTruth.h, so only the axis ranges change the categories. The axes used (dphi
-// excepted) are written as the JSON object "grids". Weights are w_event
-// times, in Au+Au, the centrality weight of the event's 5% slice (an input, CentralityWeights in EventTreeInput.h; 1
-// when the product is not finite), written as "centrality_weights". All histograms keep Sumw2. "sources" lists every
-// input with its production input identity (meta/source input_file_sha256), which the half closure splits on.
-// "variation" records the reco energy scale and resolution variation of a systematic run (Variation; "" is nominal).
-#include "SelectionInput.h"
-#include "PhotonJetTruth.h"
+/* Simulation response reduction from eventTree v1.
+
+   Fills photon and joint photon-pT/xJ responses, misses, categorized fakes,
+   leakage and combinatoric templates on the plan's native axes.
+   PhotonJet.h owns selection, truth matching, source admission and weights.
+   Sumw2 and source identity support independently resampled responses.
+   Public execution is tree_to_hists.sh; the detailed response contract
+   below defines categories and saved grids. */
+#include "PhotonJet.h"
 
 #ifdef __CLING__
 R__LOAD_LIBRARY(libTreePlayer)
@@ -62,20 +33,57 @@ R__LOAD_LIBRARY(libTreePlayer)
 #include <utility>
 #include <vector>
 
+/* Fill the photon + recoil-jet response inputs from eventTree v1 simulation files. */
+
+/* root -l -q 'TreeToHists/src/FillPhotonJetResponse.C("a.eventtree.root b.eventtree.root", "out.root", "nominal")' */
+
+/* Analysis events (evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0) whose vertex
+   is finite and inside the profile window. The reco photon is the region-A event-leading photon (PhotonJet.h),
+   the truth photon and the truth recoil jets come from PhotonJet.h, and the two are paired by the reco-truth
+   matches (plink_, jlink_; see eventMatches: jets use the match inside the analysis jet view, rebuilt from the
+   producer's candidate edges). Per centrality class <c> (Au+Au: cent0_20, cent20_50, cent50_80; pp: all) and jet-pT
+   threshold <t> (jet5, jet7, jet10, jet12 GeV), every name below carries the suffix _<c>_<t>:
+   photon_reco                             TH1D  reco pT                  region-A photon
+   photon_truth                            TH1D  truth pT                 truth photon
+   photon_response_truth_x_reco            TH2D  truth pT x reco pT       matched photons
+   photon_fakes, photon_misses             TH1D  reco pT, truth pT        unmatched reco, truth photons
+   xj_reco, xj_truth                       TH2D  pT x xJ                  reco, truth recoil jets
+   xj_response_truth_global_x_reco_global  TH2D  truth cell x reco cell   matched recoil jets
+   xj_fakes                                TH2D  reco pT x xJ             reco recoil jets without a match, split into
+   xj_fake_photon_reco, xj_combinatoric_reco, xj_detector_fakes_reco      (RecoilClass in PhotonJet.h)
+   xj_misses                               TH2D  truth pT x xJ            truth recoil jets without a match
+   signal_leakage_truth_matched_abcd       TH2D  region x reco pT         one region leader per signal truth photon
+   dphi_truthjet_<side>                    TH3D  reco pT x xJ x |dphi|    every jet of a matched region-A photon passing
+   dphi_combinatoric_<side>                                               the recoil cuts except dphi, with and without
+   a truth jet nearby (nearbyTruthJet); side near
+   (|deta| <= 0.8) or far
+   The dphi fills are the simulation closure of the data-driven combinatoric estimate (FinalAnalysis combinatoric.py):
+   their sum is what FillPhotonJet.C fills on data, and the recoil-window integral of dphi_combinatoric is
+   xj_combinatoric_reco.
+   Axes (arguments; the defaults are the reference analysis's): reco pT 10 15 20 25 35 40 GeV; truth pT 5 10 15 20 25
+   35 40 GeV; xJ in 0.05 steps to 2, then 3; dphi deltaPhiEdges() (PhotonJet.h). A response cell is pT bin *
+   (xJ bins) + xJ bin (0-based). A value outside its axis is never filled (no under- or overflow) and decides the
+   category as described in PhotonJet.h, so only the axis ranges change the categories. The axes used (dphi
+   excepted) are written as the JSON object "grids". Weights are w_event
+   times, in Au+Au, the centrality weight of the event's 5% slice (an input, CentralityWeights in PhotonJet.h; 1
+   when the product is not finite), written as "centrality_weights". All histograms keep Sumw2. "sources" lists every
+   input with its production input identity (meta/source input_file_sha256), which the half closure splits on.
+   "variation" records the reco energy scale and resolution variation of a systematic run (Variation; "" is nominal). */
+
 namespace photonjet {
 namespace response {
 
-// The response axes. The response categories depend only on the outer range of each axis (a value outside it is
-// never filled and decides the category as described in PhotonJetTruth.h), not on the inner edges. So a response
-// filled on fine axes sums exactly onto any coarser axes with the same ranges whose edges lie on the fine ones.
-// The defaults are the reference analysis's axes.
+/* The response axes. The response categories depend only on the outer range of each axis (a value outside it is
+   never filled and decides the category as described in PhotonJet.h), not on the inner edges. So a response
+   filled on fine axes sums exactly onto any coarser axes with the same ranges whose edges lie on the fine ones.
+   The defaults are the reference analysis's axes. */
 struct ResponseGrids {
   std::vector<double> reco{10.0, 15.0, 20.0, 25.0, 35.0, 40.0};
   std::vector<double> truth{5.0, 10.0, 15.0, 20.0, 25.0, 35.0, 40.0};
   std::vector<double> xj = xjEdges();
 };
 
-// Whitespace-separated, strictly increasing edges; an empty string keeps the default.
+/* Whitespace-separated, strictly increasing edges; an empty string keeps the default. */
 inline std::vector<double> parseEdges(const char* text, const std::vector<double>& fallback) {
   std::vector<double> edges;
   std::istringstream stream(text ? text : "");
@@ -95,12 +103,12 @@ inline std::string jsonArray(const std::vector<double>& edges) {
   return s.str() + ']';
 }
 
-// A variation of the reco energy scale and resolution, for the systematic uncertainties: every reco jet (jet04) and
-// photon of the event is taken at value x scale x (1 + smear g) before any selection, g a standard Gaussian drawn per
-// object from a counter-based generator keyed by (seed, the file's production input, entry, object), so the draws of
-// one file do not depend on the other inputs or their order. The reco-truth jet match stays the producer's, and the
-// photon classes and isolation thresholds are the stored ones. The text is "" (nominal) or whitespace-separated
-// key=value pairs of jet_scale, jet_smear, photon_scale, photon_smear, seed.
+/* A variation of the reco energy scale and resolution, for the systematic uncertainties: every reco jet (jet04) and
+   photon of the event is taken at value x scale x (1 + smear g) before any selection, g a standard Gaussian drawn per
+   object from a counter-based generator keyed by (seed, the file's production input, entry, object), so the draws of
+   one file do not depend on the other inputs or their order. The reco-truth jet match stays the producer's, and the
+   photon classes and isolation thresholds are the stored ones. The text is "" (nominal) or whitespace-separated
+   key=value pairs of jet_scale, jet_smear, photon_scale, photon_smear, seed. */
 struct Variation {
   double jetScale = 1.0, jetSmear = 0.0, photonScale = 1.0, photonSmear = 0.0;
   std::uint64_t seed = 0;
@@ -159,21 +167,21 @@ inline std::uint64_t splitmix64(std::uint64_t x) {
   return x ^ (x >> 31);
 }
 
-inline std::uint64_t textKey(const std::string& text) {  // FNV-1a
+inline std::uint64_t textKey(const std::string& text) {  /* FNV-1a */
   std::uint64_t h = 14695981039346656037ULL;
   for (unsigned char c : text) h = (h ^ c) * 1099511628211ULL;
   return h;
 }
 
-// Standard Gaussian of one key: Box-Muller on two 53-bit uniforms.
+/* Standard Gaussian of one key: Box-Muller on two 53-bit uniforms. */
 inline double gaussian(std::uint64_t key) {
   const std::uint64_t a = splitmix64(key), b = splitmix64(a);
-  const double unit = 1.0 / 9007199254740992.0;  // 2^-53
+  const double unit = 1.0 / 9007199254740992.0;  /* 2^-53 */
   const double u1 = ((a >> 11) + 1.0) * unit, u2 = (b >> 11) * unit;
   return std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
 }
 
-// The reco values of one collection of one entry under a variation; scale 1 without smearing keeps them exactly.
+/* The reco values of one collection of one entry under a variation; scale 1 without smearing keeps them exactly. */
 class Varied {
  public:
   template <class Values>
@@ -193,7 +201,7 @@ class Varied {
   std::vector<double> v_;
 };
 
-// Bin of value on edges, -1 when it is not finite or outside [front, back).
+/* Bin of value on edges, -1 when it is not finite or outside [front, back). */
 inline int binIndex(double value, const std::vector<double>& edges) {
   if (!std::isfinite(value) || value < edges.front() || value >= edges.back()) return -1;
   for (size_t i = 0; i + 1 < edges.size(); ++i)
@@ -201,7 +209,7 @@ inline int binIndex(double value, const std::vector<double>& edges) {
   return -1;
 }
 
-// The JSON object of meta/collections whose name is `name` (compact JSON, Format tables.dumps).
+/* The JSON object of meta/collections whose name is `name` (compact JSON, Format tables.dumps). */
 inline std::string collectionEntry(const std::string& collections, const std::string& name) {
   const size_t at = collections.find("\"name\":\"" + name + "\"");
   if (at == std::string::npos) return "";
@@ -209,8 +217,8 @@ inline std::string collectionEntry(const std::string& collections, const std::st
   return open == std::string::npos || close == std::string::npos ? "" : collections.substr(open, close - open + 1);
 }
 
-// System of a simulation file. Fails unless it is simulation with anti-kT jet04 and truthjet04 collections, the jet04
-// view being the analysis view of the system.
+/* System of a simulation file. Fails unless it is simulation with anti-kT jet04 and truthjet04 collections, the jet04
+   view being the analysis view of the system. */
 inline System simulationSystem(TFile& f) {
   const System system = fileSystem(f);
   if (!isSimulation(f)) throw std::runtime_error(std::string("not a simulation file: ") + f.GetName());
@@ -224,13 +232,13 @@ inline System simulationSystem(TFile& f) {
   return system;
 }
 
-// The accumulators of one centrality class and jet threshold.
+/* The accumulators of one centrality class and jet threshold. */
 struct Accumulators {
   TH1D *photonReco, *photonTruth, *photonFakes, *photonMisses;
   TH2D *photonResponse, *leakage;
   TH2D *xjReco, *xjTruth, *xjResponse, *xjFakes, *xjFakePhoton, *xjDetectorFakes, *xjCombinatoric, *xjMisses;
-  std::array<TH3D*, 2> dphiTruthJet{}, dphiCombinatoric{};  // side 0 near, 1 far
-  std::vector<std::unique_ptr<TH1>> owned;  // booking order, which is the write order
+  std::array<TH3D*, 2> dphiTruthJet{}, dphiCombinatoric{};  /* side 0 near, 1 far */
+  std::vector<std::unique_ptr<TH1>> owned;  /* booking order, which is the write order */
 
   Accumulators(const std::string& suffix, const ResponseGrids& g) {
     const std::vector<double>& xj = g.xj;
@@ -297,27 +305,27 @@ struct Accumulators {
   }
 };
 
-// Reco-truth matches of one event. Links index the event's concatenated collections in meta/collections order: reco
-// jet02, jet03, jet04 (then jetunsub02..04 in Au+Au) and truth truthjet02, truthjet03, truthjet04.
-//
-// Photons: the final matches (link class kLinkMatch). A reco photon with a second final match throws, as the
-// reference does.
-//
-// Jets: the producer makes its final jet match in one greedy pass over the candidate edges (kLinkMatchCandidate) of
-// every reconstructed jet view at once, so in Au+Au an unsubtracted jet can take the truth jet of its analysis twin;
-// the analysis jet would then count as a fake and its truth jet as a miss. The analysis match is the same greedy
-// (greedyJetMatch) rerun over the analysis view alone, jet04 x truthjet04. It is used only when the greedy over every
-// view at R = 0.4 (jet04 and jetunsub04) reproduces the producer's final R = 0.4 matches exactly, which proves the
-// ordering, the stored precision, and that the file keeps every candidate edge. In pp (one view) the analysis match
-// is the producer's. Throws on a jet link joining different radii (the producer never makes one), on a candidate
-// edge without a finite Delta R or reco pT, and on a reco jet with a second final match, as the reference does.
+/* Reco-truth matches of one event. Links index the event's concatenated collections in meta/collections order: reco
+   jet02, jet03, jet04 (then jetunsub02..04 in Au+Au) and truth truthjet02, truthjet03, truthjet04. */
+
+/* Photons: the final matches (link class kLinkMatch). A reco photon with a second final match throws, as the
+   reference does. */
+
+/* Jets: the producer makes its final jet match in one greedy pass over the candidate edges (kLinkMatchCandidate) of
+   every reconstructed jet view at once, so in Au+Au an unsubtracted jet can take the truth jet of its analysis twin;
+   the analysis jet would then count as a fake and its truth jet as a miss. The analysis match is the same greedy
+   (greedyJetMatch) rerun over the analysis view alone, jet04 x truthjet04. It is used only when the greedy over every
+   view at R = 0.4 (jet04 and jetunsub04) reproduces the producer's final R = 0.4 matches exactly, which proves the
+   ordering, the stored precision, and that the file keeps every candidate edge. In pp (one view) the analysis match
+   is the producer's. Throws on a jet link joining different radii (the producer never makes one), on a candidate
+   edge without a finite Delta R or reco pT, and on a reco jet with a second final match, as the reference does. */
 struct EventMatches {
-  std::vector<long> photonTruth;     // truth photon of each reco photon, -1 when none
-  std::vector<double> photonMetric;  // its match metric
-  std::vector<long> jetTruth;        // truthjet04 jet of each jet04 jet, -1 when none
+  std::vector<long> photonTruth;     /* truth photon of each reco photon, -1 when none */
+  std::vector<double> photonMetric;  /* its match metric */
+  std::vector<long> jetTruth;        /* truthjet04 jet of each jet04 jet, -1 when none */
 };
 
-// Where the R = 0.4 collections sit among the event's concatenated reco and truth jet collections.
+/* Where the R = 0.4 collections sit among the event's concatenated reco and truth jet collections. */
 struct JetRanges {
   size_t nReco, jet04Start, nJet04, unsub04Start, nUnsub04, nTruth, truth04Start, nTruth04;
   bool jet04(size_t i) const { return i >= jet04Start && i < jet04Start + nJet04; }
@@ -385,6 +393,7 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
   const std::uint64_t source = textKey(sourceSha(*file));
   TTreeReader reader("eventTree", file.get());
   const VertexEventWeight vertexWeight(*file,reader);
+  const PpSimulationGate ppSelection(*file,reader);
   TTreeReaderValue<int> record(reader, "evt_record"), ready(reader, "evt_nodes_ready"), vtxValid(reader, "vtx_valid"),
       terminal(reader, "evt_terminal_status");
   TTreeReaderValue<double> vz(reader, "vtx_z"), centrality(reader, "cent_value"), weightValue(reader, "w_event");
@@ -413,16 +422,17 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
   TTreeReaderArray<int> jlinkReco(reader, "jlink_reco"), jlinkTruth(reader, "jlink_truth"),
       jlinkClass(reader, "jlink_class");
   TTreeReaderArray<double> jlinkMetric(reader, "jlink_metric"), unsubPt(reader, "jetunsub04_pt");
+  const OwnershipGate owner(reader);
 
   const std::vector<double>& xj = grids.xj;
   const long nXj = xj.size() - 1;
-  // Sums: entries are in source order, the reference's event order. Every fill of one event carries the same weight,
-  // so the order of the fills inside an event (region, truth photon, recoil order) cannot change any sum.
+  /* Sums: entries are in source order, the reference's event order. Every fill of one event carries the same weight,
+     so the order of the fills inside an event (region, truth photon, recoil order) cannot change any sum. */
   while (reader.Next()) {
     reportProgress(reader.GetCurrentEntry()+1);
     validateSelectionEvent(profile, *centrality, storedEt, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
-    if (*record != 0) continue;  // upstream-rejected entries carry only evt_ fields
-    // the reco energies every selection below uses (Variation); the reco-truth match uses the stored ones
+    if (*record != 0) continue;  /* upstream-rejected entries carry only evt_ fields */
+    /* the reco energies every selection below uses (Variation); the reco-truth match uses the stored ones */
     const std::uint64_t entry = static_cast<std::uint64_t>(reader.GetCurrentEntry());
     const Varied et(storedEt, variation.photonScale, variation.photonSmear, variation.seed, source, entry, 0);
     const Varied jetPt(storedJetPt, variation.jetScale, variation.jetSmear, variation.seed, source, entry, 1);
@@ -431,7 +441,7 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
       throw std::runtime_error("photon-ID branches pho_bdt_score, pho_bdt_state are not filled in " + path);
     if (profile.augmentedClasses && (idClass.GetSize() != nPhoton || isoClass.GetSize() != nPhoton))
       throw std::runtime_error("the augmented classes pho_id_class, pho_iso_class are not filled in " + path);
-    // Matches are read for every event: the reference refuses a duplicate final match anywhere in its input.
+    /* Matches are read for every event: the reference refuses a duplicate final match anywhere in its input. */
     const JetRanges ranges{static_cast<size_t>(*nJet02 + *nJet03 + *nJet04 + *nUnsub02 + *nUnsub03 + *nUnsub04),
                            static_cast<size_t>(*nJet02 + *nJet03), storedJetPt.GetSize(),
                            static_cast<size_t>(*nJet02 + *nJet03 + *nJet04 + *nUnsub02 + *nUnsub03), unsubPt.GetSize(),
@@ -443,14 +453,16 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
     const EventMatches match =
         eventMatches(nPhoton, truthPt.GetSize(), plinkReco, plinkTruth, plinkClass, plinkMetric, plinkReco.GetSize(),
                      ranges, storedJetPt, unsubPt, jlinkReco, jlinkTruth, jlinkClass, jlinkMetric, jlinkReco.GetSize());
-    // The producer's signal flag must be the analysis truth signal of the stored primitives.
+    /* The producer's signal flag must be the analysis truth signal of the stored primitives. */
     for (size_t t = 0; t < truthPt.GetSize(); ++t)
       if (analysisTruthSignal(truthG4Valid[t], truthPromptClass[t], truthEta[t], truthIsolation[t]) !=
           (truthRole[t] == kSignalSourceRole))
         throw std::runtime_error("truth signal flag differs from its definition in " + path);
     if (*ready != 1 || *vtxValid != 1 || *terminal != 0) continue;
+    if (!ppSelection.accepts()) continue;
+    if (!owner.owned()) continue;  /* a stitched sample's events outside its window belong to another sample */
     if (!responseEvent(profile, *vz)) continue;
-    // w_event x the centrality weight; a non-finite product counts 1, as the reference does
+    /* w_event x the centrality weight; a non-finite product counts 1, as the reference does */
     const double product = *weightValue * vertexWeight() * centralityWeight(*centrality);
     if (strictReduction && !std::isfinite(product)) throw std::runtime_error("nonfinite response weight");
     const double w = std::isfinite(product) ? product : 1.0;
@@ -481,8 +493,8 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
         for (int r = 0; r < 4; ++r)
           if (witness[r] && binIndex(et[leader[r]], grids.reco) >= 0) h.leakage->Fill(r + 0.5, et[leader[r]], w);
 
-        // Truth recoils of the truth photon inside the xJ axis, in orderedByPt order.
-        std::vector<int> truthXjBin(nTruthJets04, -1);  // xJ bin of each selected truth recoil
+        /* Truth recoils of the truth photon inside the xJ axis, in orderedByPt order. */
+        std::vector<int> truthXjBin(nTruthJets04, -1);  /* xJ bin of each selected truth recoil */
         std::vector<long> selected;
         if (truthBin >= 0) {
           auto truthRecoil = [&](size_t j) {
@@ -498,8 +510,8 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
           }
         }
 
-        // Reco recoils of the region-A photon, in orderedByPt order. The order decides which of several reco jets
-        // linked to one truth recoil is matched: the first; the others are fakes (RecoilClass).
+        /* Reco recoils of the region-A photon, in orderedByPt order. The order decides which of several reco jets
+           linked to one truth recoil is matched: the first; the others are fakes (RecoilClass). */
         std::vector<char> taken(nTruthJets04, 0);
         if (a >= 0) {
           auto recoRecoil = [&](size_t j) { return recoilJet(p, eta[a], phi[a], jetPt[j], jetEta[j], jetPhi[j]); };
@@ -528,7 +540,7 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
         for (long j : selected)
           if (!taken[j]) h.xjMisses->Fill(truthPt[tp], truthJetPt[j] / truthPt[tp], w);
 
-        // Every jet of a matched photon at any Delta phi, by whether a truth jet is nearby.
+        /* Every jet of a matched photon at any Delta phi, by whether a truth jet is nearby. */
         if (photonMatched && recoBin >= 0) {
           Profile anyAngle = p;
           anyAngle.deltaPhiMin = 0.0;
@@ -545,7 +557,7 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
       }
     }
   }
-  // a missing branch or a read error ends the loop like the end of the tree; only the end is accepted
+  /* a missing branch or a read error ends the loop like the end of the tree; only the end is accepted */
   if (reader.GetEntryStatus() != TTreeReader::kEntryBeyondEnd && reader.GetEntryStatus() != TTreeReader::kEntryNotFound)
     throw std::runtime_error("eventTree read stopped before the end of " + path);
 }
@@ -573,7 +585,7 @@ inline int run(const char* inputs, const char* output, const char* profileName, 
   for (size_t k = 0; k < classes.size(); ++k)
     for (double t : kJetThresholds) acc[k].emplace_back("_" + classes[k].name + "_" + thresholdName(t), grids);
   for (const auto& path : paths) fillFile(path, profile, classes, grids, centralityWeight, variation, acc);
-  const std::string sources = sourceRecords(paths);  // before the output is opened (sourceRecord)
+  const std::string sources = sourceRecords(paths);  /* before the output is opened (sourceRecord) */
   std::unique_ptr<TFile> out(TFile::Open(output, "CREATE"));
   if (!out || out->IsZombie()) throw std::runtime_error(std::string("cannot create ") + output);
   for (auto& perClass : acc)
@@ -589,14 +601,14 @@ inline int run(const char* inputs, const char* output, const char* profileName, 
   return 0;
 }
 
-}  // namespace response
-}  // namespace photonjet
+}  /* namespace response */
+}  /* namespace photonjet */
 
-// inputs: whitespace-separated eventTree simulation paths. profile: "nominal" (the analysis), a variant of it
-// (EventTreeInput.h namedProfile), or "historical" (the reference reproduction only).
-// Optional axes (whitespace-separated edges; empty keeps the reference axes): reco photon pT, truth photon pT, xJ.
-// centralityWeights: Au+Au only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights).
-// variation: "" (nominal) or the reco energy scale and resolution variation of the systematics (Variation).
+/* inputs: whitespace-separated eventTree simulation paths. profile: "nominal" (the analysis), a variant of it
+   (PhotonJet.h namedProfile), or "historical" (the reference reproduction only).
+   Optional axes (whitespace-separated edges; empty keeps the reference axes): reco photon pT, truth photon pT, xJ.
+   centralityWeights: Au+Au only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights).
+   variation: "" (nominal) or the reco energy scale and resolution variation of the systematics (Variation). */
 int FillPhotonJetResponse(const char* inputs, const char* output, const char* profileName = "nominal",
                           const char* recoPtEdges = "", const char* truthPtEdges = "", const char* xjEdges = "",
                           const char* centralityWeights = "", const char* variation = "", const char* selection = "") {
