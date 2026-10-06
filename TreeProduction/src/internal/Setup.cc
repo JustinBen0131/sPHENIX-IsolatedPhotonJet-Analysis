@@ -1917,6 +1917,8 @@ void RegisterInputs(Fun4AllServer* server, const Plan& plan)
 }
 
 
+// Advance every nonempty source stream to the same zero-based source entry.
+// This positions the input cursors; skipped entries do not run the reconstruction chain.
 void StartAtFirstEntry(Fun4AllServer* server, const Plan& plan)
 {
   if (!server)

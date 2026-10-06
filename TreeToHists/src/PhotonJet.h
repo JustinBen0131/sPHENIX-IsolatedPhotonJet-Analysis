@@ -253,6 +253,9 @@ inline bool photonKinematics(const Profile& p, double vz, double et, double eta,
    identity order does. Photon arrays hold one value per photon; isolation arrays hold two per photon (R = 0.3, then
    R = 0.4). idClass and isoClass (pho_id_class, pho_iso_class) are read only with augmented classes. et may be of
    another indexable type than the other arrays (a varied energy scale). */
+/* One event-local photon index per ABCD region; -1 means no eligible leader.
+   Equal ET keeps the later encounter, matching the established >= rule.
+   All candidate arrays must share the same photon ordering. */
 template <class Energies, class Values, class Ints>
 std::array<long, 4> regionLeaders(const Profile& p, double vz, double centrality, std::size_t n, const Energies& et,
                                   const Values& eta, const Values& phi, const Values& score, const Ints& presel,
@@ -270,6 +273,8 @@ std::array<long, 4> regionLeaders(const Profile& p, double vz, double centrality
   return leader;
 }
 
+/* Kinematics use GeV and radians. The same recoil decision feeds measurement,
+   response and QA, so changing a cut belongs in the resolved Profile. */
 inline bool recoilJet(const Profile& p, double photonEta, double photonPhi, double pt, double eta, double phi) {
   if (!(std::isfinite(pt) && std::isfinite(eta) && std::isfinite(phi))) return false;
   if (pt < p.jetPtMin) return false;

@@ -1,4 +1,6 @@
-/* Plot semantics are compiled from the settings and source packages used by the measurement. */
+/* Save the selection, units, bins and calculation settings used by the measurement.
+   Figures and tables read these values from the result, so their labels describe the saved calculation.
+   The accompanying receipt binds this metadata to its ROOT product. */
 #include "FinalAnalysis.h"
 #include "RenderMetadata.h"
 #include <set>

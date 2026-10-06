@@ -25,6 +25,7 @@ def weighted_auc(y, score, weight):
 
 
 def metrics(y, score, weight):
+    """Weighted discrimination and probability losses for finite scores in [0, 1]."""
     require(np.isfinite(score).all() and ((score >= 0) & (score <= 1)).all(), 'score is outside [0,1]')
     clipped = np.clip(score, 1e-15, 1. - 1e-15)
     return dict(rows=len(y), classes=[int((y == k).sum()) for k in (0, 1)],

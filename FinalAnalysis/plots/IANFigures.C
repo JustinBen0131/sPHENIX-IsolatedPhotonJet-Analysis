@@ -759,7 +759,8 @@ void centralityOverlay(TFile &f, const std::vector<Result> &results, const std::
 
 #include "QAFigures.C"
 
-/* results: the results file (or ""), fig: the output folder, systematics and qa: optional systematics and QA files. */
+/* results: the results file (or ""), fig: the output folder, systematics and qa: optional systematics and QA files.
+   Draw saved quantities with their verified metadata; FIGURES.txt records written and unavailable figures. */
 void IANFigures(const char *results, const char *fig, const char *systematics = "", const char *qa = "") {
   gWritten.clear(); gNotDrawn.clear(); gSystematics.reset(); gQA.reset(); gLegacy = false;
   gResultMetadata = gQAMetadata = PlotJson(); gRenderInputs = gStylePins = PlotJson::object(); gVisibleText.clear();

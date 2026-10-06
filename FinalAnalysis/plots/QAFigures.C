@@ -1275,7 +1275,7 @@ void triggerStudy(const std::string &pkg) {
              [pp] { hline(1, 0, pp ? 20 : 30); });
 }
 
-/* Every QA figure of the QA file. */
+/* Draw the supported QA families from saved quantities. Individual helpers report missing inputs through missing(). */
 void qaFigures() {
   for (const std::string pkg : {"AuAu", "PP"}) triggerStudy(pkg);
   for (const std::string pkg : {"PP", "AuAu"})

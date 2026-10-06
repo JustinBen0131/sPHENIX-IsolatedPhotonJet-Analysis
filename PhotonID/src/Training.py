@@ -17,6 +17,7 @@ from .Models import progress, require, save_json
 
 
 def cells(recipe):
+    """Yield the Cartesian routing cells; an empty axis map gives one global model."""
     axes = list(recipe['axes'])
     bounds = [list(zip(recipe['axes'][a][:-1], recipe['axes'][a][1:])) for a in axes]
     for index, values in enumerate(itertools.product(*bounds) if axes else [()]):
@@ -24,6 +25,7 @@ def cells(recipe):
 
 
 def cell_mask(population, cell):
+    """Select a cell using half-open ET (GeV) and centrality (percent) intervals."""
     mask = np.ones(len(population.y), dtype=bool)
     for axis, (lo, hi) in cell['bounds'].items():
         values = population.et if axis == 'et' else population.centrality
@@ -42,6 +44,11 @@ def sigmoid(values):
 
 
 def numpy_predict(artifact, x):
+    """Evaluate saved preprocessing and layers in recipe feature order.
+
+    Artifact weights are stored output-by-input; the evaluation transposes
+    them for row-wise matrix multiplication and returns one sigmoid per row.
+    """
     preprocessing = artifact['preprocessing']
     values = (np.asarray(x, np.float64) - preprocessing['mean']) / preprocessing['scale']
     if preprocessing['clip'] > 0:
@@ -54,6 +61,7 @@ def numpy_predict(artifact, x):
 
 
 def preprocessing(population, indices, clip):
+    """Fit scaling on the selected training rows, in bounded batches."""
     sums = np.zeros(population.x.shape[1]); squares = sums.copy()
     for start in range(0, len(indices), 65536):
         x = np.asarray(population.x[indices[start:start + 65536]], np.float64)
@@ -66,6 +74,11 @@ def preprocessing(population, indices, clip):
 
 
 def fit_numpy(population, mask, recipe, output, cell_id):
+    """Fit one MLP/logistic cell for fixed epochs and save its portable artifact.
+
+    Only mask AND population.train enters fitting or scaling. The outer
+    holdout is checked later by Validation, without choosing an epoch here.
+    """
     settings = recipe['learner']; seed = recipe['training']['seed']
     indices = np.flatnonzero(mask & population.train)
     transform = preprocessing(population, indices, settings['input_clip'])
@@ -136,6 +149,7 @@ def fit_numpy(population, mask, recipe, output, cell_id):
 
 
 def fit_bdt(population, mask, recipe, output, cell_id):
+    """Fit the configured weighted BDT on training rows and save its booster binding."""
     try:
         from xgboost import XGBClassifier
         from xgboost.callback import TrainingCallback
@@ -169,6 +183,7 @@ def fit_bdt(population, mask, recipe, output, cell_id):
 
 
 def fit(population, mask, recipe, output, cell_id):
+    """Create one cell artifact; retain failure progress instead of overwriting a fit."""
     require(not Path(output).exists(), 'model artifact already exists; validate/reuse its saved release')
     try:
         return (fit_bdt if recipe['algorithm'] == 'bdt' else fit_numpy)(population, mask, recipe, output, cell_id)
@@ -181,6 +196,7 @@ def fit(population, mask, recipe, output, cell_id):
 
 
 def evaluator(path):
+    """Reload an artifact as a feature-matrix → score-vector callable."""
     from .Models import read_json
     path = Path(path); artifact = read_json(path)
     if artifact['schema'] == 'PhotonIDNumpyModelV1':

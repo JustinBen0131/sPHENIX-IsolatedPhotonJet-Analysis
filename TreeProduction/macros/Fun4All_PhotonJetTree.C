@@ -3,8 +3,8 @@
 //
 // Steering macro for the isolated-photon + jet tree production.
 //
-//   root -l -b -q 'Fun4All_PhotonJetTree.C("pp_data", "inputs.list",
-//                                           "out.root", 47123, 0)'
+// produce_trees.sh supplies the resolved interval, synchronized input bundle
+// and full source/payload identity. Use that command for normal production.
 //
 // It loads and resolves the configuration, creates the server, configures
 // conditions and reconstruction, registers the producer and the inputs, runs,
@@ -26,6 +26,9 @@
 
 R__LOAD_LIBRARY(libPhotonJetTree.so)
 
+// Low-level launch contract: source coordinates and hashes describe one
+// reconstruction piece. checkOnly resolves and validates its native plan
+// without creating the Fun4All server or running an event loop.
 int Fun4All_PhotonJetTree(const std::string& profile,
                           const std::string& inputList,
                           const std::string& outputFile,

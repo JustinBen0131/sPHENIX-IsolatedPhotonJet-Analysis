@@ -51,6 +51,7 @@ class PhotonClusterBuilder : public SubsysReco
   int InitRun(PHCompositeNode* topNode) override;
   int process_event(PHCompositeNode* topNode) override;
 
+  // Configure before InitRun. Energy thresholds use GeV; vertex distances use cm.
   void set_input_cluster_node(const std::string& n) { m_input_cluster_node = n; }
   void set_output_photon_node(const std::string& n) { m_output_photon_node = n; }
   void set_ET_threshold(float e) { m_min_cluster_et = e; }
@@ -86,6 +87,7 @@ class PhotonClusterBuilder : public SubsysReco
                               ShowerMembership moments);
   // Current-event witnesses retain double centers and float accumulation
   // results without narrowing centers through RawCluster's float attribute map.
+  // Returned pointers are borrowed and expire when the next event clears the views.
   const std::map<std::string, double>* get_shower_feature_view(
       const RawCluster* photon, const std::string& name) const;
 

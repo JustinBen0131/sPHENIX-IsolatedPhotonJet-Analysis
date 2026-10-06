@@ -75,6 +75,11 @@ def training_baseline(inputs):
 
 
 def train_release(inputs, config, system, name, args):
+    """Prepare once, fit/check every cell, then seal the complete model release.
+
+    --check returns the resolved request and dependency status before fitting.
+    Reuse requires the same request; scoring is a separate phase in main.
+    """
     from src import Inputs, Models, Training, Validation, WorkingPoints
     import numpy as np
     r = Models.recipe(config, system, name)
@@ -170,6 +175,7 @@ def train_release(inputs, config, system, name, args):
 
 
 def main(argv=None):
+    """Dispatch one model request and score complete groups after release validation."""
     args = arguments(argv)
     from src import Inputs, Models, Scoring
     config = Models.load_config(args.config)

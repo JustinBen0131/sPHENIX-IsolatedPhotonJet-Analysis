@@ -3,6 +3,8 @@
 //   root -l -b -q 'quick_start.C("file.eventtree.root")'
 //
 // TTreeReaderArray reads the collection branches (C arrays sized by their group counter, e.g. n_pho).
+// This unweighted example illustrates branch indexing. Use TreeToHists for
+// photon ID/isolation, sample weights and the source-accounted measurement.
 #include <TFile.h>
 #include <TH1D.h>
 #include <TMath.h>

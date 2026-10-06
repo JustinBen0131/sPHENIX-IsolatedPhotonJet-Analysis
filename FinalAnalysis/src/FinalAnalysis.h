@@ -22,6 +22,7 @@
 
 namespace fa {
 
+/* Ascending bin boundaries. Energy axes use GeV; xJ is dimensionless. Rebinning uses exact unions of stored bins. */
 using Edges = std::vector<double>;
 
 /* One result: a collision system and centrality class with its own grids and unfolding settings. */
@@ -132,6 +133,7 @@ Window readWindow(const Settings &s, const SystemSettings &sys);
 struct SourceWindow { Window window; double weight = 1; int sample = 0; std::string identity; };  /* identity: the source's sha256 */
 std::vector<SourceWindow> readSourceWindows(const Settings &s, const SystemSettings &sys);
 Window combine(const std::vector<SourceWindow> &sources, const std::vector<double> &multiplicity);
+/* Rows are target bins, columns are fine bins; entries select whole bins, with no interpolation. */
 std::vector<std::vector<double>> projection(const Edges &fine, const Edges &target);
 
 /* Purity.cc */
@@ -149,9 +151,11 @@ Background combinatoricFromDphi(const std::vector<double> dphi[2], const std::ve
                                 const std::string &shape, const std::string &scope);
 
 /* Unfolding.cc */
+/* Response rows are truth, columns are reco. The returned vector contains truth yields; refolded contains reco yields. */
 TVectorD bayes(const TVectorD &measured, const TMatrixD &responseTruthXReco, const TVectorD &misses, int iterations,
                const TVectorD &prior, const TVectorD &fakes, TVectorD *refolded = nullptr);
 TVectorD unfoldPhotons(const TVectorD &photons, const Window &w, int iterations);
+/* pairCells[photonBin * nXj + xjBin] is summed over photon bins, then divided by total photons and xJ bin width. */
 TVectorD perPhoton(const TVectorD &pairCells, const TVectorD &photons, const Edges &xjEdges);
 
 /* The frozen iteration rule (Unfolding.cc). One problem: the photon yield or the joint (photon pT, xJ) pairs. */

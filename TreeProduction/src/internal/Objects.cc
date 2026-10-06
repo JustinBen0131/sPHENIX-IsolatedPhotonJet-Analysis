@@ -1395,6 +1395,8 @@ photonjet::NominalPhotonRecord photonjet::production::LabelNominalPhoton(const P
   return label;
 }
 
+// Annotate every retained candidate without filtering or reordering it.
+// The score/state/ID/isolation branches let downstream code apply the declared selection.
 void PhotonJetTree::labelNominalPhotons()
 {
   for (PhotonRecord& photon : m_photons)

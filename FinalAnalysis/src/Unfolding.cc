@@ -261,6 +261,8 @@ const double kToySuccessMin = 0.95, kRefoldMax = 1.5, kMcMax = 5.0, kNegativeMax
 Problem photonProblem(const Window &w) { return {w.photonResponse, w.photonMisses, w.photonTruth, w.photonFakes}; }
 Problem pairProblem(const Window &w) { return {w.pairResponse, w.pairMisses, w.pairTruth, w.pairFakes}; }
 
+/* Apply the frozen rule above to accepted toys, retaining the requested totals for success rates.
+   selected=0 means no allowed iteration passed; callers must not silently choose a diagnostic iteration. */
 IterationScan scanIterations(const Problem &p, const TVectorD &measured, const std::vector<TVectorD> &dataToys, int dataRequested,
                              const std::vector<ResponseToy> &responseToys, int responseRequested, const std::vector<bool> &mask) {
   if (responseRequested < 2) throw std::runtime_error("the iteration rule needs at least two response toys");

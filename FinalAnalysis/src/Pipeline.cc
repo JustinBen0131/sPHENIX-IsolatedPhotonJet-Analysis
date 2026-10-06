@@ -112,6 +112,8 @@ Config reduction(const fs::path &path) {
 }
 }  /* namespace */
 
+/* Run the existing package commands in dependency order. Each stage has a log and stops the chain on failure;
+   PIPELINE.json binds the configuration, inputs and products of a completed run. */
 int pipeline(const std::string &file, const std::string &home) {
   const fs::path path = fs::absolute(file), base = path.parent_path(), package = fs::absolute(home), tth = package.parent_path() / "TreeToHists";
   const Config settings = read(path);

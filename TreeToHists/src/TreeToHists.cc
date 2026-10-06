@@ -693,6 +693,9 @@ void check(const std::string &path, const Json &rows, size_t sources) {
 
 }  /* namespace */
 
+/* Sample publication combines histograms AND event/source records from the
+   pinned fill jobs. Source contributions survive this step because
+   FinalAnalysis resamples whole simulated sources, not individual bins. */
 void merge(const Json &plan, const Json &sample, const std::string &work, const std::string &outputDir) {
   checkReductionCode(plan);
   checkVertexFit(sample);
@@ -1152,6 +1155,9 @@ Json stitchingDenominator(const std::string &path, const Json &normalization) {
 
 namespace {
 
+/* Execute one source job from the sealed plan. Each product kind sees the
+   same resolved selection, source ownership and event-weight context.
+   done.json is reusable only while those bindings and input bytes match. */
 void fill(const fs::path &work, int index) {
   const Json p = readJson((work / "plan.json").string());
   checkReductionCode(p);
@@ -1365,6 +1371,8 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
 
 }  /* namespace treetohists */
 
+/* Command dispatch. Settings/plan validation precedes filling; isolation's
+   derivation commands live in Isolation.cc and use the shared definitions. */
 int main(int argc, char **argv) {
   using namespace treetohists;
   gROOT->SetBatch(true);

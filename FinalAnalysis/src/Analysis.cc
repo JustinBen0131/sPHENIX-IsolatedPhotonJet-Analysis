@@ -334,6 +334,8 @@ TH2D *scanHistogram(const char *name, const IterationScan &scan, int selected) {
   return h;
 }
 
+/* One system's ordered calculation: checked inputs, corrections, prior/iteration selection, unfolding and toys.
+   Event and source resampling preserve the correlations needed by the final per-photon uncertainty. */
 void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 &rng) {
   resolveFromQA(s, sys);
   const bool events = s.dataToyModel == "event_bootstrap", dataDriven = s.combinatoricMethod == "data_dphi";

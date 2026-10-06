@@ -384,6 +384,8 @@ int measurementBin(int rootBin, const Edges &native, const Edges &target) {
 
 }  /* namespace */
 
+/* Rebin retained DATA records while preserving event membership. One bootstrap multiplier must move an event's
+   photons and jets together; independently resampling histogram cells would lose their correlations. */
 EventTable readEvents(const Settings &s, const SystemSettings &sys) {
   /* TreeToHists selects the trigger and the sources once: the top-level records are the analysis population */
   auto f = open(s.inputDirectory + "/" + sys.package + "/data.root");
@@ -576,7 +578,7 @@ Window readWindow(const Settings &s, const SystemSettings &sys) {
 }
 
 /* Every source of the result's simulated samples with its own window (records/sources, records/source_contributions)
-   and its sample's cross section per generated event. */
+   and its sample's cross section per generated event. Keep that factor separate here; combine applies it once. */
 std::vector<SourceWindow> readSourceWindows(const Settings &s, const SystemSettings &sys) {
   const std::string base = "response/" + sys.centrality + "/" + s.jet + "/";
   std::vector<std::string> paths;

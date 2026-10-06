@@ -3,6 +3,8 @@
     python3 quick_start.py file.eventtree.root
 
 Works for pp and Au+Au, DATA and simulation.
+This is an unweighted branch-reading example. TreeToHists owns photon ID,
+isolation, sample weights and the source-accounted measurement reduction.
 """
 import json
 import sys

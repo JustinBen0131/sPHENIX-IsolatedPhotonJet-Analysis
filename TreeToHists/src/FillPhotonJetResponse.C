@@ -609,6 +609,9 @@ inline int run(const char* inputs, const char* output, const char* profileName, 
    Optional axes (whitespace-separated edges; empty keeps the reference axes): reco photon pT, truth photon pT, xJ.
    centralityWeights: Au+Au only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights).
    variation: "" (nominal) or the reco energy scale and resolution variation of the systematics (Variation). */
+/* Simulation responses, misses and fake categories use the plan's native
+   grids. FinalAnalysis restricts the measurement window and applies the
+   sample's absolute normalization when it reads the saved package. */
 int FillPhotonJetResponse(const char* inputs, const char* output, const char* profileName = "nominal",
                           const char* recoPtEdges = "", const char* truthPtEdges = "", const char* xjEdges = "",
                           const char* centralityWeights = "", const char* variation = "", const char* selection = "") {

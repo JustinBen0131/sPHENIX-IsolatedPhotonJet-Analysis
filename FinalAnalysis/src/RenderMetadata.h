@@ -1,4 +1,6 @@
-/* Shared scientific-file provenance for the C++ producers and ROOT drawing macros. */
+/* Shared metadata checks for C++ analysis and ROOT rendering.
+   seal/verify bind the JSON description; product receipts separately bind the actual ROOT-file bytes.
+   Renderers use both checks before labeling a figure with the saved selection and binning. */
 #ifndef PHOTONJET_RENDER_METADATA_H
 #define PHOTONJET_RENDER_METADATA_H
 #include <nlohmann/json.hpp>

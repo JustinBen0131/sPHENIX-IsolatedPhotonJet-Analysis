@@ -107,6 +107,8 @@ double systematicOf(TFile *s, const std::string &key, double low, double high) {
 
 }  /* namespace */
 
+/* Export the saved reported-bin values and uncertainties to LaTeX and CSV, using the same input checks as figures.
+   No correction, fit or unfolding is performed during table export. */
 void IANTables(const char *results, const char *out, const char *systematics = "") {
   std::unique_ptr<TFile> f(TFile::Open(results, "READ")), s;
   if (!f || f->IsZombie()) throw std::runtime_error(std::string("IANTables: cannot open ") + results);

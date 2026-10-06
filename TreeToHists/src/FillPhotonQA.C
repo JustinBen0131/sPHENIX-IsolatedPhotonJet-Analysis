@@ -605,6 +605,8 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
 
 /* inputs: whitespace-separated eventTree paths of one family. profile: "nominal" or "historical". centralityWeights:
    Au+Au simulation only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights). */
+/* QA of the same planned source/selection used by measurement fills.
+   Broad generator spectra retain their separate diagnostic population. */
 int FillPhotonQA(const char* inputs, const char* output, const char* profileName = "nominal", const char* centralityWeightText = "", const char* selection = "") {
   using namespace photonjet;
   using namespace photonjet::qa;
@@ -808,6 +810,8 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
 
 }  /* namespace photonjet */
 
+/* Additional retained observables under the same source bindings. Optional
+   fraction availability is checked by the plan, rather than inferred from 0. */
 int FillExtensions(const char* input, const char* output, const char* selection, const char* centralityWeightText = "",
                    bool requireStage3Fractions = false) {
   photonjet::fillExtensions(input, output, selection, centralityWeightText, requireStage3Fractions);

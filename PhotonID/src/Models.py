@@ -81,6 +81,7 @@ def environment():
 
 
 def load_config(path=None):
+    """Read the maintained recipe/deployment configuration and reject unknown structure."""
     path = Path(path or HERE / 'config/training.yaml').resolve()
     config = yaml.safe_load(path.read_text())
     require(config.get('version') == 1, 'unsupported training configuration')
@@ -101,6 +102,7 @@ def load_config(path=None):
 
 
 def recipe(config, system, name):
+    """Resolve one named model's features, domain, routing and learner settings."""
     require(system in SYSTEMS and name in NAMES, 'unknown system/model')
     require(system == 'AuAu' or name == 'nominal_retrained_v1', 'this optional model is AuAu only')
     algorithm, branch, axes = NAMES[name]
@@ -131,6 +133,11 @@ def release_dir(root, system, name):
 
 
 def load_release(folder, *, request=None):
+    """Verify a sealed release and every artifact hash before reuse or scoring.
+
+    When supplied, request must also match the input/recipe/code identity.
+    A directory name or an isolated model file is not a completed release.
+    """
     folder = Path(folder).resolve()
     manifest = read_json(folder / 'manifest.json')
     require(manifest.get('schema') == 'PhotonIDReleaseV1' and manifest.get('status') == 'PASS',
@@ -148,6 +155,7 @@ def load_release(folder, *, request=None):
 
 
 def list_models(root, system=None):
+    """List verified generated releases and the separately pinned nominal snapshots."""
     result = []
     for collision in ([system] if system else SYSTEMS):
         for p in sorted((Path(root) / collision).glob('*/manifest.json')):

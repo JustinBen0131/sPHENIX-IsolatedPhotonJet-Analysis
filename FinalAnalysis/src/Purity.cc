@@ -28,6 +28,8 @@
 
 namespace fa {
 
+/* Both arrays are ordered A, B, C, D; leakage contains signal counts and is normalised to A here.
+   ok=false marks an unphysical or absent root, even if the returned diagnostic estimate is finite. */
 ABCDSolution solveLeakageABCD(const double n[4], const double leakage[4], double r) {
   ABCDSolution out;
   if (leakage[0] <= 0 || !(r > 0)) return out;

@@ -28,6 +28,11 @@ def predictors(folder, manifest):
 
 
 def score_arrays(arrays, meta, recipe, models):
+    """Return photon-aligned jagged scores and the number inside the model domain.
+
+    Outside-domain photons keep NaN. Every inside-domain photon needs valid
+    inputs, exactly one routing cell and a finite prediction, or the file fails.
+    """
     x, counts, et, cent, inside, valid = feature_rows(arrays, meta, recipe)
     require(not np.any(inside & ~valid), 'invalid required features for an in-domain photon')
     scores = np.full(len(x), np.nan, np.float64)
@@ -138,6 +143,12 @@ def augment_file(item, folder, manifest, candidate, *, code_root):
 
 
 def score_groups(inputs, folder, *, code_root):
+    """Augment every file of a resolved group before advancing its CURRENT pointer.
+
+    Candidates preserve the logical-source roster and original payloads.
+    The native publication compare-and-swap catches a changed base version;
+    failed or incomplete candidates remain available for inspection.
+    """
     manifest = load_release(folder)
     groups = {}
     for item in inputs:

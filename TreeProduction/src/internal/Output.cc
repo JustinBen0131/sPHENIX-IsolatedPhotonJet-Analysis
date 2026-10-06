@@ -821,6 +821,8 @@ void fillPhoton(photonjet::DirectEventWriter& d, const photonjet::Config& config
 }
 }  // namespace
 
+// Map one event's records to schema fields after reset. The source-entry check below
+// rejects gaps and duplicates; collection counts are derived from the retained records.
 void PhotonJetTree::fillEventOutput()
 {
   auto& d = *m_directOutput;

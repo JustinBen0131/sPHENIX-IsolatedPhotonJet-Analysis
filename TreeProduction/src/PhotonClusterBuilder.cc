@@ -154,6 +154,7 @@ void PhotonClusterBuilder::add_bdt_model(const std::string& score_name,
   m_bdt_models.push_back(std::move(model));
 }
 
+// Validate the configured recipe and load its models once, before any candidate is built.
 int PhotonClusterBuilder::InitRun(PHCompositeNode* topNode)
 {
   if (m_input_cluster_node == m_output_photon_node || !std::isfinite(m_min_cluster_et) || m_min_cluster_et < 0 ||

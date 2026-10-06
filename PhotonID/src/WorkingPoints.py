@@ -14,6 +14,7 @@ from .Models import require
 
 
 def weighted_quantile(values, weights, q):
+    """Return an observed score at the weighted CDF crossing, without splitting ties."""
     require(len(values) > 0 and np.isfinite(values).all() and np.isfinite(weights).all() and
             (weights > 0).all(), 'invalid working-point signal population')
     order = np.argsort(values, kind='stable')
@@ -24,6 +25,12 @@ def weighted_quantile(values, weights, q):
 
 
 def derive(population, mask, score, cell, recipe):
+    """Calibrate WP70/80/90 on every eligible signal row in this cell.
+
+    Train and holdout both enter calibration. Return the centrality/ET line
+    and its measured efficiencies; insufficient bins or failed strict-cut
+    efficiency/order checks refuse the release.
+    """
     indices = np.flatnonzero(mask)
     signal = population.y[indices] == 1
     values = population.centrality[indices] if recipe['system'] == 'AuAu' else population.et[indices]
@@ -79,6 +86,7 @@ def derive(population, mask, score, cell, recipe):
 
 
 def classify(score, axis_value, working_points):
+    """Return ID codes: -1 unscored, 0 below, 1 non-tight, 2 gap, 3 tight."""
     cuts = working_points['cuts']
     tight = cuts['WP70']['intercept'] + cuts['WP70']['slope'] * axis_value
     high = cuts['WP80']['intercept'] + cuts['WP80']['slope'] * axis_value

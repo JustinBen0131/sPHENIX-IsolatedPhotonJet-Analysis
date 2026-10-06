@@ -112,6 +112,8 @@ class Writer
   /// Rebind every column for the next batch; previous fills have finished.
   void beginBatch(long long entries);
 
+  /// Numeric buffers and offsets are borrowed until fill() finishes; strings() takes its vectors by value.
+  /// Counted columns use offsets[entry+1]-offsets[entry], with offsets sized for entries+1.
   template <class T>
   void scalar(const std::string& name, const std::string& leaf, const T* data, const std::string& title);
   template <class T>
@@ -174,6 +176,7 @@ class Entry
 {
  public:
   explicit Entry(const std::vector<FieldSpec>& specs);
+  /// Clear values and assignment flags; an empty collection must still be declared with empty().
   void reset();
   template <class T>
   void put(const std::string& name, T value) { at(name).append(value); }

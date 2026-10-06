@@ -103,6 +103,7 @@ def tsv_rows(path, columns):
 
 
 def stream_lists(lane):
+    """Declared DST stream names in the order used to align source rows."""
     if lane.endswith('_data'):
         return DATA_STREAMS
     if lane.endswith('_di'):
@@ -416,6 +417,7 @@ def cemc_recovery_map(record):
 
 
 def macro_argument(job, check_only=False):
+    """Serialize one job in the steering macro's declared argument order."""
     # JSON string quoting is also valid for these C++ UTF-8 string literals.
     # subprocess receives an argument vector: no shell, eval or interpolation.
     values = [job[key] for key in (
@@ -460,6 +462,7 @@ def configuration_document(raw):
 
 @contextmanager
 def resolved_configuration(job, directory=None):
+    """Supply parsed configuration to the native plan; physics values remain native-owned."""
     config = Path(job['config'])
     raw = config.read_bytes()
     require(hashlib.sha256(raw).hexdigest() == job['configuration_sha256'],
@@ -519,7 +522,7 @@ def check_mapping(job, root, environment):
 
 
 def execute_piece(job, root, environment, native, library_hash):
-    """The only per-source execution path for every command and restriction."""
+    """Run one bounded reconstruction piece and check its native completion record."""
 
     directory = Path(job["output_file"]).parent
     directory.mkdir()  # Exclusive reservation; partial outputs are never reused.
@@ -571,7 +574,7 @@ def execute_piece(job, root, environment, native, library_hash):
 
 
 def execute_source(job, root, environment, native, library_hash):
-    """Process bounded pieces, then publish exactly one file for this source."""
+    """Process bounded pieces and prove one assembled logical-source file."""
     output = Path(job['output_file'])
     output.parent.mkdir(parents=True, exist_ok=True)
     work = output.parent / '.work' / output.stem
@@ -735,6 +738,7 @@ def publish_groups(native, plan, recipe):
 
 
 def main():
+    """Validate the request, coordinate source jobs, then publish complete groups."""
     global BINDINGS
     parser = argparse.ArgumentParser(prog="produce_trees.sh", add_help=False)
     parser.add_argument("--events", type=int)

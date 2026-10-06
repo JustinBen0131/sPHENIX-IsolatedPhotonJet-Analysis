@@ -125,6 +125,8 @@ TVectorD diagonalSqrt(const TMatrixD &m) {
 
 }  /* namespace */
 
+/* Compare saved nominal and variation results on compatible axes, then build nuisance covariances and ratios.
+   Variation production is a separate step; this command does not reread or reprocess eventTrees. */
 int systematics(const std::string &configPath) {
   TEnv env;
   if (env.ReadFile(configPath.c_str(), kEnvUser) != 0) throw std::runtime_error("cannot read " + configPath);

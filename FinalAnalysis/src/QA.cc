@@ -452,6 +452,8 @@ void purityStudy(TDirectory *out, const SystemSettings &sys, const TH2 *leakage,
 
 }  /* namespace */
 
+/* Save QA quantities from the declared packages for later rendering. Missing QA inputs stay absent;
+   the renderer reports unavailable figures rather than treating an empty plot as a measured zero. */
 void writeQA(const Settings &s, TDirectory *results) {
   std::map<std::string, std::vector<std::string>> photonSamples;
   std::map<std::string, std::vector<std::string>> classes;

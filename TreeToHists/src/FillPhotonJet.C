@@ -302,6 +302,9 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
 
 /* inputs: whitespace-separated eventTree paths. profile: "nominal" (the analysis), a variant of it (PhotonJet.h
    namedProfile), or "historical" (the reference reproduction only). */
+/* Region-leading photons and their recoil jets retain event references
+   alongside histogram cells, preserving correlations when FinalAnalysis
+   draws one bootstrap multiplier per event. */
 int FillPhotonJet(const char* inputs, const char* output, const char* profileName = "nominal", const char* selection = "",
                   const char* centralityWeightText = "") {
   using namespace photonjet;

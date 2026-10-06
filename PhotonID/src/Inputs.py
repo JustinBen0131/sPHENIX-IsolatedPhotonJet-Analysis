@@ -189,6 +189,7 @@ def labels(arrays, role):
 
 
 def source_role(source, recipe):
+    """Resolve a SIM sample to its recipe role; refuse DATA, DI and ambiguous roles."""
     sample = str(source.get('sample', '')).lower()
     matches = [role for role, samples in recipe['sources'].items() if sample in samples]
     require(len(matches) == 1, 'SIM sample not bound to the training recipe: ' + sample)
@@ -223,6 +224,12 @@ def training_rows(item, recipe):
 
 @dataclass
 class Population:
+    """One prepared photon-row population with aligned features and witnesses.
+
+    Row i has the same meaning in x, labels, kinematics, weights and train.
+    Preparation may back these arrays with read-only memory-mapped files;
+    receipt binds their input population and event-grouped split.
+    """
     x: np.ndarray
     y: np.ndarray
     et: np.ndarray
@@ -248,6 +255,11 @@ def inverse_pdf(values, *, fixed_range=None, cap=None):
 
 
 def canonical_weights(x, y, features):
+    """Class balance times per-class eta/ET flattening, before the event split.
+
+    These are training weights; generator normalization and analysis event
+    weights do not enter the learner's objective.
+    """
     weights = np.ones(len(y), np.float64)
     for klass in (0, 1):
         mask = y == klass; n = int(mask.sum())
@@ -336,5 +348,6 @@ def prepare(inputs, recipe, work):
 
 
 def load_population(work, receipt):
+    """Open the prepared arrays without copying the complete photon matrix."""
     return Population(**{n: np.load(Path(work) / (n + '.npy'), mmap_mode='r') for n in
                          ('x', 'y', 'et', 'centrality', 'weights', 'train')}, receipt=receipt)

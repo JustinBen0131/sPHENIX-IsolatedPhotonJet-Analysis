@@ -423,6 +423,9 @@ void write(const std::string &path, const Ordered &doc) {
 }  /* namespace */
 
 /* tree_to_hists isolation population|derive|freeze|check ...: argv from the subcommand on. */
+/* population stores eligible truth-signal witnesses; derive fits cutoffs,
+   freeze binds the chosen line, and check evaluates that fixed definition on
+   a supplied population. Ordinary fills consume the resulting freeze. */
 int isolation(const std::vector<std::string> &args) {
   if (args.size() < 3 || args[1] != "--out") throw std::runtime_error("usage: tree_to_hists isolation population|derive|freeze|check --out FILE INPUTS...");
   const std::string command = args[0], out = args[2];

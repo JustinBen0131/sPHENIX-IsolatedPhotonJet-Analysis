@@ -88,6 +88,8 @@ TVectorD priorWeights(const TVectorD &theta, const Edges &xj, double low, double
   return w;
 }
 
+/* Fit corrected pair cells with their data-toy covariance and photon yields. The fitted xJ weights change the
+   starting truth distribution and the declared fake model, while retaining the detector migration probabilities. */
 PriorFit fitPrior(const Window &win, const TVectorD &cells, const TVectorD &photons, const TMatrixD &covariance,
                   const Settings &s, const SystemSettings &sys) {
   const int nX = s.xjEdges.size() - 1, nCells = cells.GetNrows(), nPar = s.priorForm == "exp2" ? 3 : 2;
