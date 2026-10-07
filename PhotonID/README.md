@@ -5,6 +5,19 @@ PhotonID produces portable model releases, working points and saved training
 diagnostics. TreeToHists evaluates a selected release during its normal tree
 read; FinalAnalysis draws the saved diagnostics and analysis QA.
 
+Use one entry point, `./PhotonID/photon_id.sh`, for every PhotonID stage:
+
+| Stage | Commands | Product passed to the next stage |
+|---|---|---|
+| Select and extract sources | `inspectCampaign`, `projectCampaign`, `verifyProjections` | An input catalogue and verified reusable photon rows |
+| Prepare and train | `prepareCampaign`, `trainCampaign` | Model releases with validation, working points and saved diagnostics |
+| Collect and draw QA | `collectQA`, then FinalAnalysis | A `models.yaml` index and the analysis figures |
+
+Validation and working-point calibration are mandatory phases of `trainCampaign`.
+A failed check stops the release; there is no separate validation command to
+remember after fitting. Source extraction is shared across model variants.
+Preparation and training reuse the extracted rows without reopening the trees.
+
 ## Setup
 
 Use Python with NumPy, SciPy, PyYAML, uproot, awkward and ROOT. BDT fitting
@@ -70,6 +83,8 @@ WP70/80/90; tight uses WP70 and non-tight uses `0.1 < score < WP80`.
 
 ## Run
 
+### 1. Select the source population
+
 Copy [config/training.yaml](config/training.yaml) to an analysis configuration
 and fill `datasets.AuAu` and `datasets.PP` with the completed group paths.
 The supplied configuration leaves these locations unbound. From the repository
@@ -82,7 +97,14 @@ root, inspect the selected groups once:
 ./PhotonID/photon_id.sh inspectCampaign AuAu --config /path/to/training.yaml --models /path/to/analysis/models
 ```
 
-Use the generated `inputs.yaml` in the remaining stages. These commands assume
+The first three commands show help, recipes and the campaign plan without
+starting extraction or fitting. `inspectCampaign` writes the `inputs.yaml`
+catalogue and reports its path; use that generated file in all later commands.
+Keep the configuration, catalogue and model-output root the same across stages.
+
+### 2. Extract once and verify the cache
+
+These commands assume
 an existing physical data-staging directory on the worker; use that worker's
 `_CONDOR_SCRATCH_DIR` instead of `--scratch-root` when available.
 
@@ -91,6 +113,16 @@ an existing physical data-staging directory on the worker; use that worker's
 ./PhotonID/photon_id.sh projectCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --shard-index 0 --scratch-root /path/to/worker/data-staging
 # After every shard in the projection plan has finished:
 ./PhotonID/photon_id.sh verifyProjections AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models
+```
+
+`--check` prints the shard plan. The example executes shard 0 only; submit each
+listed shard once through your batch system, then run `verifyProjections`.
+Extraction is the tree-reading stage. The remaining stages read the verified
+cache on writable analysis storage.
+
+### 3. Prepare, fit, validate and calibrate
+
+```bash
 ./PhotonID/photon_id.sh prepareCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --check
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models
@@ -98,13 +130,23 @@ an existing physical data-staging directory on the worker; use that worker's
 
 Training consumes verified preparation, fits models, validates the saved artifacts,
 derives working points and saves diagnostics. Matching completed work is reused.
+Preparation computes the shared event split, weights and training arrays once.
+For each model cell, training then follows this order:
+
+1. Fit the configured learner.
+2. Check the saved model, ROOT export, score agreement and class/split coverage.
+3. Calibrate that model's working points over its full configured range.
+
+Once every cell passes, save diagnostics and a complete, hash-checked release.
+
+The release includes `validation.json`, `working_points.json` and `selection.json`.
+These checks establish numerical validity; reviewing the resulting physics plots
+remains part of analysis acceptance.
 For bounded batch jobs, select one recipe per invocation after preparation:
 
 ```bash
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model nominal_retrained_v1
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model wideET_v1
-# Run the remaining recipes listed by planCampaign, then collect their saved QA.
-./PhotonID/photon_id.sh collectQA AuAu --models /path/to/analysis/models
 ```
 
 `--model` can be repeated and preserves the campaign's recipe order. Each selected
@@ -114,10 +156,27 @@ Independent `--model` invocations can run in parallel after preparation. They
 reuse the verified arrays on disk and each fit the complete selected recipe.
 Selected invocations seal their own releases; `collectQA` requires the complete
 campaign before writing its comparison index.
+
+### 4. Collect the releases for FinalAnalysis
+
+After all recipes listed by `planCampaign` have finished:
+
+```bash
+./PhotonID/photon_id.sh collectQA AuAu --models /path/to/analysis/models
+```
+
+This verifies the releases and writes `models.yaml`. An unfiltered
+`trainCampaign` also collects them automatically. Set
+`Pipeline.PhotonIDModels` to that index in FinalAnalysis, and use each model's
+`selection.json` when producing its TreeToHists analysis QA; see
+[Outputs and use in TreeToHists](#outputs-and-use-in-treetohists).
+
 `--check` checks the selected runtime before opening input groups and previews
 source and recipe bindings. Training commands leave the tree groups unchanged.
 The separate `score MODEL SYSTEM` command is available when a published tree
 copy with an additional score branch is explicitly needed.
+
+### Source extraction details
 
 `inspectCampaign` verifies the stage-2 source roster and reports a sealed
 `inputs.yaml` under `<models>/.inputs/<identity>/`. Keep its generated
@@ -181,6 +240,8 @@ group bindings. For custom inputs, repeat `--group /path/to/published/group`.
 Use `--models DIR` for a writable release root and `--release-version v2`
 for an explicitly new release.
 
+### pp models and AuAu variants
+
 For pp, use the same inspect → project → prepare → train commands with `PP`
 instead of `AuAu`. Both pp models use the eleven ordered PPG12 features and
 the source-role labels; truth or reconstructed isolation does not enter training.
@@ -229,6 +290,17 @@ flattening weights:
 | `nominal_retrained_v1` | 15–35 GeV | 17–33 GeV | 15–17 / 33–35 GeV |
 | `wideET_v1` | 12–40 GeV | 14–38 GeV | 12–14 / 38–40 GeV |
 
+AuAu and canonical pp ranges include the lower endpoint and exclude the upper
+endpoint. The PPG12 comparison retains its historical closed acceptance and
+does not prescribe measurement or guard bins. The recipe,
+campaign plan and `selection.json` record these ranges as `et_ranges_gev`;
+working-point metadata also records the calibration domain. No interior
+analysis bin edges are prescribed by this range declaration. A comparison on
+the common 15–35 GeV interval is an additional diagnostic and does not restrict
+the wider model's calibration or application.
+
+### Progress and batch execution
+
 Input inspection reports checked files in `<models>/.progress/inputs.json`.
 Before preparation or training, `.progress/verify-projections-auau.json` (or
 `verify-projections-pp.json`) counts verified source caches and reports their
@@ -263,15 +335,6 @@ avoids periodic progress-file rewrites on GPFS. Local interactive work uses
 atomic progress files by default. Keep compiled code, the installed reader and
 compiler temporary files in the declared persistent build workspace. Data
 staging is separate from `TMPDIR` and never changes the compiler environment.
-
-AuAu and canonical pp ranges include the lower endpoint and exclude the upper
-endpoint. The PPG12 comparison retains its historical closed acceptance and
-does not prescribe measurement or guard bins. The recipe,
-campaign plan and `selection.json` record these ranges as `et_ranges_gev`;
-working-point metadata also records the calibration domain. No interior
-analysis bin edges are prescribed by this range declaration. A comparison on
-the common 15–35 GeV interval is an additional diagnostic and does not restrict
-the wider model's calibration or application.
 
 ## Models
 
@@ -347,14 +410,15 @@ auau:
 
 Use `pp.PhotonIDSelection` for a retrained pp model. Omit score, state and
 working-point overrides for that system; the release supplies them.
-Scoring creates a checked group version and advances `CURRENT` only when
+The explicit PhotonID `score` command creates a checked group version and advances `CURRENT` only when
 every source is ready. Partial work leaves the published group unchanged.
 
 ## Source map
 
-The driver follows preparation → fitting → validation → working points →
-scoring. Training labels and weights are defined in `Inputs.py`; histogram
-selection belongs to TreeToHists.
+The driver follows extraction → preparation → fitting → validation →
+working-point calibration → release and QA collection. Optional tree scoring
+is a separate command. Training labels and weights are defined in `Inputs.py`;
+histogram selection belongs to TreeToHists.
 
 | File | Responsibility |
 |---|---|
