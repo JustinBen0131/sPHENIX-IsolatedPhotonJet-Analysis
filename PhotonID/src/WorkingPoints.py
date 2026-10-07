@@ -38,7 +38,7 @@ def derive(population, mask, score, cell, recipe):
     config = recipe['working_points']
     axis = 'cent_value' if recipe['system'] == 'AuAu' else 'pho_et'
     edges = config['centrality_edges' if recipe['system'] == 'AuAu' else 'et_edges']
-    bounds = [0., 80.] if recipe['system'] == 'AuAu' else [15., 35.]
+    bounds = [0., 80.] if recipe['system'] == 'AuAu' else [recipe['domain']['et_min'], recipe['domain']['et_max_exclusive']]
     for key, limits in cell['bounds'].items():
         if (recipe['system'] == 'AuAu' and key.startswith('centrality')) or (recipe['system'] == 'PP' and key == 'et'):
             bounds = limits

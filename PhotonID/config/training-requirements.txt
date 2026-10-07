@@ -1,0 +1,11 @@
+# Numerical packages from the successful reference training environment.
+# Install under the sPHENIX Python 3.13 / ROOT 6.32.06 release environment.
+# PyROOT is supplied by that release, rather than by pip.
+numpy==2.1.3
+scipy==1.15.3
+awkward==2.10.0
+uproot==5.7.5
+pandas==2.3.0
+scikit-learn==1.6.1
+xgboost==3.2.0
+PyYAML==6.0.3

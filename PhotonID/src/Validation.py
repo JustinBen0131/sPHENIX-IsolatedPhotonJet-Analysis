@@ -34,6 +34,31 @@ def metrics(y, score, weight):
                 brier=float(np.average((score - y) ** 2, weights=weight)))
 
 
+def native_export(population, mask, reference, native, recipe):
+    """Check ROOT conversion against XGBoost on every applicable photon row.
+
+    Float32 summation/sigmoid order can differ between the two libraries; the
+    maximum absolute score error must be at most 1e-6. This export check does
+    not change the tighter saved-native reload tolerance. Native scores own
+    calibration and downstream decisions, avoiding mixed evaluator thresholds.
+    """
+    indices = np.flatnonzero(mask); maximum = 0.
+    tolerance = float(recipe['validation'].get('native_score_atol', 1e-6))
+    require(0. < tolerance <= 1e-6, 'native score tolerance must be positive and at most 1e-6')
+    for begin in range(0, len(indices), 65536):
+        part = indices[begin:begin + 65536]
+        original = np.asarray(reference(population.x[part]), np.float64)
+        exported = np.asarray(native(population.x[part]), np.float64)
+        require(original.shape == exported.shape == (len(part),), 'native export score shape differs')
+        require(np.isfinite(original).all() and np.isfinite(exported).all() and
+                ((original >= 0.) & (original <= 1.) & (exported >= 0.) & (exported <= 1.)).all(),
+                'native export has invalid scores')
+        maximum = max(maximum, float(np.max(np.abs(original - exported))) if len(part) else 0.)
+    require(len(indices) > 0 and maximum <= tolerance, 'native ROOT export differs from XGBoost')
+    return dict(status='PASS', rows=len(indices), max_abs_error=maximum, absolute_tolerance=tolerance,
+                feature_dtype='float32', calibration_evaluator='ROOT_RBDT')
+
+
 def check(population, mask, trainer, saved, recipe):
     """Compare every applicable saved score; report train and held-out metrics."""
     indices = np.flatnonzero(mask)
@@ -47,13 +72,16 @@ def check(population, mask, trainer, saved, recipe):
         maximum = max(maximum, float(np.max(np.abs(original - reread))) if len(part) else 0.)
         score[begin:begin + len(part)] = reread
     require(maximum <= recipe['validation']['saved_score_atol'], 'saved model differs from trainer')
-    train = population.train[indices]
+    train = population.train[indices]; holdout = population.holdout[indices]
     reports = {}
-    for name, selected in [('train', train), ('holdout', ~train)]:
+    for name, selected in [('train', train), ('holdout', holdout)]:
         y, weight = population.y[indices[selected]], population.weights[indices[selected]]
         minimum = recipe['validation']['min_rows_per_class_per_split']
         require(all((y == k).sum() >= minimum for k in (0, 1)), name + ' lacks required class population')
         reports[name] = metrics(y, score[selected], weight)
+    if population.partition is not None and np.any(population.partition[indices] == 1):
+        selected = population.partition[indices] == 1
+        reports['validation'] = metrics(population.y[indices[selected]], score[selected], population.weights[indices[selected]])
     require(reports['holdout']['auc'] >= recipe['validation']['min_holdout_auc'], 'held-out discrimination failed')
     require(abs(reports['train']['auc'] - reports['holdout']['auc']) <=
             recipe['validation']['max_train_holdout_auc_gap'], 'train/holdout discrimination gap failed')

@@ -13,14 +13,14 @@ sources:
     signal: [run28_embeddedphoton12, run28_embeddedphoton20]
     background: [run28_embeddedjet12, run28_embeddedjet20, run28_embeddedjet30, run28_embeddedjet40]
   PP:
-    # Bind the approved pp sample identities at deployment; do not infer the
-    # AuAu sample list or silently use every available simulation sample.
-    signal: []
-    background: []
+    # Exact published pp sample names, supplied by the input deployment.
+    signal: [run28_photonjet20, run28_photonjet10, run28_photonjet5]
+    background: [run28_jet40, run28_jet30, run28_jet20, run28_jet12, run28_jet8]
 training:
   train_fraction: 0.9
   seed: 13
   split_identity: centAsFeatBase3x3_pt15to35
+  event_key: lane_sample_run_segment_sequence_sha256_128
   # Same corrected-replay witness as the maintained eventTree training projection.
   minimum_bias_branch: cent_mb_decision
   minimum_bias_pass: 1
@@ -44,7 +44,20 @@ learners:
     grow_policy: lossguide
     max_bin: 256
     tree_method: hist
-    n_jobs: 1
+    n_jobs: 2
+  ppg12:
+    n_estimators: 750
+    max_depth: 5
+    learning_rate: 0.1
+    subsample: 0.5
+    colsample_bytree: 0.6
+    colsample_bylevel: 1.0
+    reg_alpha: 5.0
+    reg_lambda: 0.3
+    grow_policy: lossguide
+    max_bin: 256
+    tree_method: hist
+    n_jobs: 4
   mlp:
     hidden_layers: [48, 24]
     learning_rate: 0.001

@@ -1,7 +1,9 @@
 """Training: one population and split, with three small fitting backends.
 
-BDT uses the established XGBoost settings. The NumPy MLP and linear sigmoid
-backends retain the existing tanh/Adam/weighted-loss numerical conventions.
+BDT uses the established XGBoost settings and exports ROOT RBDT for scoring
+and working-point calibration. The saved XGBoost model remains its checked
+training reference. NumPy MLP and linear sigmoid backends retain the existing
+tanh/Adam/weighted-loss numerical conventions.
 Fixed epochs avoid selecting a model against the outer holdout. Training
 returns portable artifacts; saved-model and working-point checks live elsewhere.
 """
@@ -14,6 +16,37 @@ import time
 import numpy as np
 
 from .Models import progress, require, save_json
+
+
+def runtime_status(algorithm):
+    """Read-only import/API preflight; never install or switch environments.
+
+    ROOT is needed for saved QA and native BDT export. API availability does
+    not prove that another ROOT version can read this runtime's artifacts.
+    """
+    import importlib
+    missing = []; versions = {}
+    modules = ('ROOT', 'xgboost', 'sklearn') if algorithm == 'bdt' else ('ROOT',)
+    for name in modules:
+        try:
+            module = importlib.import_module(name)
+            versions[name] = module.gROOT.GetVersion() if name == 'ROOT' else module.__version__
+            if name == 'xgboost' and module.__version__ != '3.2.0':
+                missing.append('reference BDT fitting requires xgboost==3.2.0; observed ' + module.__version__)
+            if name == 'ROOT':
+                # ROOT can import despite a failed Cling/bootstrap environment.
+                # Prove basic C++ bindings before opening large input groups.
+                vector = module.std.vector('float')()
+                if int(vector.size()) != 0: missing.append('ROOT C++ binding probe failed')
+            if name == 'ROOT' and algorithm == 'bdt':
+                namespace = getattr(getattr(module, 'TMVA', None), 'Experimental', None)
+                for api in ('SaveXGBoost', 'RBDT'):
+                    if not hasattr(namespace, api): missing.append('ROOT.TMVA.Experimental.' + api)
+        except (ImportError, OSError, AttributeError, RuntimeError) as exc:
+            missing.append(name + ': ' + str(exc))
+    return dict(schema='PhotonIDRuntimeCheckV1', status='PASS' if not missing else 'BLOCKED_DEPENDENCY',
+                algorithm=algorithm, versions=versions, missing=missing,
+                qualification='imports/export APIs only; cross-runtime artifact compatibility requires validation')
 
 
 def cells(recipe):
@@ -149,13 +182,21 @@ def fit_numpy(population, mask, recipe, output, cell_id):
 
 
 def fit_bdt(population, mask, recipe, output, cell_id):
-    """Fit the configured weighted BDT on training rows and save its booster binding."""
+    """Fit on training rows, export ROOT RBDT and check all applicable predictions.
+
+    Only the exported native evaluator supplies downstream scores and working
+    points. The XGBoost artifact is kept for training/export provenance.
+    """
     try:
         from xgboost import XGBClassifier
         from xgboost.callback import TrainingCallback
     except ImportError as exc:
         raise ValueError('XGBoost is unavailable in the selected environment; no packages were changed') from exc
     indices = np.flatnonzero(mask & population.train)
+    holdout = np.flatnonzero(mask & population.holdout)
+    if recipe['training'].get('split_method') == 'row_stratified':
+        require(population.split_rank is not None, 'historical training row order is missing')
+        indices = indices[np.argsort(population.split_rank[indices], kind='stable')]
     started = time.monotonic(); total = recipe['learner']['n_estimators']
     class ProgressCallback(TrainingCallback):
         def after_iteration(self, model, epoch, evals_log):
@@ -167,19 +208,61 @@ def fit_bdt(population, mask, recipe, output, cell_id):
     import inspect
     fit_callbacks = 'callbacks' in inspect.signature(XGBClassifier.fit).parameters
     model = XGBClassifier(**recipe['learner'], random_state=recipe['training']['seed'],
-                          objective='binary:logistic', eval_metric='logloss',
+                          objective='binary:logistic', eval_metric=['auc', 'logloss'],
                           **({} if fit_callbacks else {'callbacks':[ProgressCallback()]}))
     progress(Path(output).parent / 'progress.json', 'fit-' + cell_id, 0, recipe['learner']['n_estimators'])
     model.fit(population.x[indices], population.y[indices], sample_weight=population.weights[indices],
+              eval_set=[(population.x[indices], population.y[indices]),
+                        (population.x[holdout], population.y[holdout])],
+              sample_weight_eval_set=[population.weights[indices], population.weights[holdout]], verbose=False,
               **({'callbacks':[ProgressCallback()]} if fit_callbacks else {}))
     booster_path = Path(output).with_suffix('.xgboost.json')
     model.save_model(booster_path)
+    history_path = Path(output).with_suffix('.history.json')
+    save_json(history_path, dict(schema='PhotonIDTrainingHistoryV1',
+              populations=['train', 'holdout'], metrics=model.evals_result(),
+              rounds=total, early_stopping=False))
+    import ROOT
+    ROOT.gROOT.SetBatch(True)
+    require(hasattr(ROOT.TMVA.Experimental, 'SaveXGBoost'), 'ROOT does not provide the XGBoost-to-RBDT exporter')
+    native_path = Path(output).with_suffix('.tmva.root')
+    require(not native_path.exists(), 'native model artifact already exists')
+    export_native_bdt(model, native_path, len(recipe['features']))
+    specification = dict(type='ROOT_RBDT', file=native_path.name, key='myBDT', inputs=len(recipe['features']))
+    native = native_evaluator(native_path, specification)
+    from .Validation import native_export
+    reference = lambda x: model.predict_proba(x)[:, 1].astype(np.float64)
+    agreement = native_export(population, mask, reference, native, recipe)
+    agreement.update(ROOT=ROOT.gROOT.GetVersion())
     artifact = dict(schema='PhotonIDXGBoostModelV1', algorithm='bdt', features=recipe['features'],
-                    booster_file=booster_path.name)
+                    booster_file=booster_path.name, native_evaluator=specification,
+                    training_history=history_path.name,
+                    native_export_validation=agreement)
     save_json(output, artifact)
     progress(Path(output).parent / 'progress.json', 'fit-' + cell_id,
              recipe['learner']['n_estimators'], recipe['learner']['n_estimators'])
-    return artifact, lambda x: model.predict_proba(x)[:, 1].astype(np.float64)
+    return artifact, native
+
+
+def export_native_bdt(model, path, inputs):
+    """Use the established binary XGBoost3-to-ROOT6.32 export adapter.
+
+    ROOT expects scalar base_score syntax and numbered feature names. Only
+    its Python configuration view changes during export; saved booster bytes,
+    fitted parameters and subsequent XGBoost predictions remain unchanged.
+    """
+    import re
+    import ROOT
+    booster = model.get_booster()
+    original_config, original_names = booster.save_config, booster.feature_names
+    try:
+        booster.feature_names = [f'f{i}' for i in range(inputs)]
+        booster.save_config = lambda: re.sub(r'"base_score":"\[([0-9eE+\-.]+)\]"',
+                                             r'"base_score":"\1"', original_config())
+        ROOT.TMVA.Experimental.SaveXGBoost(model, 'myBDT', str(path), num_inputs=inputs)
+    finally:
+        booster.save_config = original_config
+        booster.feature_names = original_names
 
 
 def fit(population, mask, recipe, output, cell_id):
@@ -195,13 +278,43 @@ def fit(population, mask, recipe, output, cell_id):
         raise
 
 
+def native_evaluator(path, specification):
+    """Load one ROOT RBDT cell; accept finite float32 rows in released feature order."""
+    require(specification['type'] == 'ROOT_RBDT', 'unsupported native evaluator')
+    import ROOT
+    ROOT.gROOT.SetBatch(True)
+    model = ROOT.TMVA.Experimental.RBDT(specification['key'], str(path))
+    count = specification['inputs']
+    def predict(x):
+        values = np.ascontiguousarray(x, dtype=np.float32)
+        require(values.ndim == 2 and values.shape[1] == count and np.isfinite(values).all(),
+                'invalid native feature matrix')
+        if not len(values):
+            return np.empty(0, np.float64)
+        result = np.asarray(model.Compute(values), np.float64)
+        require(result.shape == (len(values), 1), 'native score shape differs')
+        return result[:, 0]
+    return predict
+
+
 def evaluator(path):
-    """Reload an artifact as a feature-matrix → score-vector callable."""
+    """Reload a saved artifact: ROOT RBDT for new BDTs, NumPy for other learners.
+
+    Older BDT artifacts without a native export retain their XGBoost reader;
+    they cannot supply the native on-read interface until separately exported.
+    """
     from .Models import read_json
     path = Path(path); artifact = read_json(path)
     if artifact['schema'] == 'PhotonIDNumpyModelV1':
         return lambda x: numpy_predict(artifact, x)
     require(artifact['schema'] == 'PhotonIDXGBoostModelV1', 'unsupported model artifact')
+    if 'native_evaluator' in artifact:
+        specification = artifact['native_evaluator']
+        require(specification['inputs'] == len(artifact['features']), 'native feature count differs')
+        native_path = path.parent / specification['file']
+        require(native_path.resolve().is_relative_to(path.parent.resolve()), 'native model path escapes its artifact folder')
+        require(artifact['native_export_validation']['status'] == 'PASS', 'native export is not validated')
+        return native_evaluator(native_path, specification)
     try:
         from xgboost import XGBClassifier
     except ImportError as exc:
