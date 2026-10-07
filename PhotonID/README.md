@@ -214,6 +214,9 @@ flattening weights:
 | `wideET_v1` | 12–40 GeV | 14–38 GeV | 12–14 / 38–40 GeV |
 
 Input inspection reports checked files in `<models>/.progress/inputs.json`.
+Before preparation or training, `.progress/verify-projections-auau.json` (or
+`verify-projections-pp.json`) counts verified source caches and reports their
+total photon rows. Verification emits progress while hashing packed row files.
 Each projection shard's `progress.json` counts source events, including events
 with no selected photons; verified cache reuse is a deterministic skip with
 separate counters. Each population's `progress.json` counts cached photon
@@ -227,6 +230,8 @@ For a controlled job, supply `--progress-context job.yaml` containing
 `task_id`, `workstream_id`, `campaign_tag` and `executor` as nonempty strings.
 Fitting reports completed boosting rounds for each model cell, with the same
 job identity carried through native-score checks, calibration and saved QA.
+Saved QA uses the counter name `qa-<system>-<model>` and retains the exact
+training request hash in its progress record.
 Photon checks and calibration bins have separate phase counters.
 `collectQA` counts verified model releases in `.progress/collect-auau.json`
 or `.progress/collect-pp.json`; a bound AuAu comparison adds one release to the

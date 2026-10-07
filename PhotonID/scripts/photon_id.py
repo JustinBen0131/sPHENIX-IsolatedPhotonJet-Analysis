@@ -179,7 +179,9 @@ def campaign_projections(simulation, config, args, *, system):
     from src import Inputs, Models, ProjectionCache
     recipe = Models.projection_recipe(config, system)
     root = args.projection_root or args.models / '.projections'
-    return ProjectionCache.load_campaign(simulation, recipe, root)
+    return ProjectionCache.load_campaign(simulation, recipe, root,
+        progress_path=args.models / '.progress' / ('verify-projections-' + system.lower() + '.json'),
+        progress_identity=getattr(args, 'progress_identity', None))
 
 
 def calibration_population(population, recipe):

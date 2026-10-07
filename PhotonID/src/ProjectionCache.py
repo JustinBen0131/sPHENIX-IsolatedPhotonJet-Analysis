@@ -73,29 +73,48 @@ def load_bundle(folder, recipe, *, progress=None):
     return result
 
 
-def load_campaign(inputs, recipe, root):
+def load_campaign(inputs, recipe, root, *, progress_path=None, progress_identity=None):
     """Require complete coverage, admitting either packed or legacy source caches."""
     expected = {item['logical_id']: item for item in inputs}; result = {}
-    for path in sorted((Path(root) / '.bundles').glob('*/*/bundle.json')):
-        header = read_json(path)
-        if header.get('definition') != Inputs.population_definition(recipe):
-            continue
-        ids = {part['projection']['source']['logical_id'] for part in header['parts']}
-        if not ids.intersection(expected):
-            continue
-        for logical_id, part in load_bundle(path.parent, recipe).items():
-            if logical_id not in expected: continue
-            require(part['receipt']['source'] == expected[logical_id], 'bundle source population differs')
-            require(logical_id not in result, 'source appears in multiple projection bundles')
-            result[logical_id] = part
-    for logical_id, item in expected.items():
-        if logical_id not in result:
-            try:
-                result[logical_id] = Inputs.load_projection(item, recipe, root)
-            except FileNotFoundError as error:
-                raise ValueError('projection missing for ' + logical_id +
-                                 '; project the exact source catalogue before preparation') from error
-    return result
+    tracker = WorkProgress(progress_path, len(expected), 'projection sources',
+                           'projection-cache-' + recipe['system'].lower(), progress_identity) if progress_path else None
+    verified_rows = 0
+    if tracker: tracker.write('verify-projections', cached_photon_rows=0)
+    try:
+        for path in sorted((Path(root) / '.bundles').glob('*/*/bundle.json')):
+            if tracker: tracker.beat()
+            header = read_json(path)
+            if header.get('definition') != Inputs.population_definition(recipe):
+                continue
+            ids = {part['projection']['source']['logical_id'] for part in header['parts']}
+            if not ids.intersection(expected):
+                continue
+            for logical_id, part in load_bundle(path.parent, recipe, progress=tracker.beat if tracker else None).items():
+                if logical_id not in expected: continue
+                require(part['receipt']['source'] == expected[logical_id], 'bundle source population differs')
+                require(logical_id not in result, 'source appears in multiple projection bundles')
+                result[logical_id] = part
+                verified_rows += part['receipt']['rows']
+            if tracker:
+                tracker.write('verify-projections', len(result), cached_photon_rows=verified_rows)
+        for logical_id, item in expected.items():
+            if logical_id not in result:
+                try:
+                    result[logical_id] = Inputs.load_projection(item, recipe, root)
+                except FileNotFoundError as error:
+                    raise ValueError('projection missing for ' + logical_id +
+                                     '; project the exact source catalogue before preparation') from error
+                verified_rows += result[logical_id]['receipt']['rows']
+                if tracker:
+                    if len(result) - tracker.processed >= 100:
+                        tracker.write('verify-projections', len(result), cached_photon_rows=verified_rows)
+                    else:
+                        tracker.beat()
+        if tracker: tracker.write('complete', len(result), cached_photon_rows=verified_rows, status='PASS')
+        return result
+    except Exception as error:
+        if tracker: tracker.fail(error)
+        raise
 
 
 def project_shard(inputs, recipe, root, shard, *, scratch_root=None, progress_identity=None):

@@ -298,8 +298,9 @@ def save(folder, population, recipe, scores, cells, config, request_sha256, *, p
         Models.require(Models.file_hash(path) == saved['root_sha256'], 'saved model QA ROOT artifact changed')
         return saved
     Models.require(not path.exists(), 'interrupted QA ROOT product retained: ' + str(path))
-    tracker = Models.WorkProgress(folder / 'progress.json', 1, 'QA products', request_sha256, progress_identity)
-    tracker.write('qa-feature-moments', input_photons=n)
+    tracker = Models.WorkProgress(folder / 'progress.json', 1, 'QA products',
+                                  'qa-' + recipe['system'].lower() + '-' + recipe['name'], progress_identity)
+    tracker.write('qa-feature-moments', input_photons=n, request_sha256=request_sha256)
     gains = gain(folder, recipe, cells)
     features = feature_table(population, recipe, gains, tracker=tracker)
     metrics = [dict(split=index, **performance(population, scores, mask))
