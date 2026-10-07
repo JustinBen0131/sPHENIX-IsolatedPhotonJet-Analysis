@@ -142,7 +142,8 @@ Once every cell passes, save diagnostics and a complete, hash-checked release.
 The release includes `validation.json`, `working_points.json` and `selection.json`.
 These checks establish numerical validity; reviewing the resulting physics plots
 remains part of analysis acceptance.
-For bounded batch jobs, select one recipe per invocation after preparation:
+For bounded batch jobs, replace the unfiltered `trainCampaign` call with one
+recipe per invocation after preparation:
 
 ```bash
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model nominal_retrained_v1
