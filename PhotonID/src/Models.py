@@ -98,10 +98,20 @@ def read_json(path):
 def environment():
     versions = {}
     for name in ('numpy', 'scipy', 'uproot', 'awkward', 'xgboost', 'scikit-learn', 'PyYAML', 'ROOT'):
+        module = sys.modules.get({'scikit-learn': 'sklearn', 'PyYAML': 'yaml'}.get(name, name))
+        if module is not None and hasattr(module, '__version__'):
+            versions[name] = module.__version__
+            continue
+        if name == 'ROOT' and module is not None and hasattr(module, 'gROOT'):
+            versions[name] = module.gROOT.GetVersion()
+            continue
         try:
             versions[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
-            versions[name] = None
+            try:
+                versions[name] = importlib.metadata.version('xgboost-cpu') if name == 'xgboost' else None
+            except importlib.metadata.PackageNotFoundError:
+                versions[name] = None
     return dict(python=sys.version, executable=sys.executable, packages=versions)
 
 

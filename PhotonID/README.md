@@ -32,10 +32,18 @@ create the prefix on writable analysis storage:
 
 ```bash
 source /opt/sphenix/core/bin/sphenix_setup.sh -n ana.562
+mkdir -p /path/to/analysis/pip-staging
+export TMPDIR=/path/to/analysis/pip-staging
+export PIP_NO_CACHE_DIR=1
 python3 -m venv --system-site-packages /path/to/analysis/training-env
-/path/to/analysis/training-env/bin/python -m pip install -r PhotonID/config/training-requirements.txt
+/path/to/analysis/training-env/bin/python -m pip install --no-compile -r PhotonID/config/training-requirements.txt
 export PHOTONID_PYTHON=/path/to/analysis/training-env/bin/python
+export PYTHONPATH="/path/to/analysis/training-env/lib/python3.13/site-packages${PYTHONPATH:+:$PYTHONPATH}"
 ```
+
+The path ordering keeps the pinned numerical packages ahead of the release's
+packages while retaining its ROOT bindings. On Linux the requirements use the
+CPU distribution of XGBoost 3.2.0; the learner settings are the same.
 
 Run fitting on an execute node. The public command never installs packages
 or changes the selected environment itself.

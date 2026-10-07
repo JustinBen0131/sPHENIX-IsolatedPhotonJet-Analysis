@@ -7,5 +7,7 @@ awkward==2.10.0
 uproot==5.7.5
 pandas==2.3.0
 scikit-learn==1.6.1
-xgboost==3.2.0
+# The fixed hist learner uses CPU training. Both distributions supply XGBoost 3.2.0.
+xgboost-cpu==3.2.0; platform_system == "Linux"
+xgboost==3.2.0; platform_system != "Linux"
 PyYAML==6.0.3
