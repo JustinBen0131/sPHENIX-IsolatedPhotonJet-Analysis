@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE))
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description='Train and score named photon models from completed eventTrees.')
     parser.add_argument('command', choices=['reTrainNominal', 'trainNew', 'inspectCampaign', 'projectCampaign', 'verifyProjections',
-                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
+                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
     parser.add_argument('target', nargs='?', help='AuAu/PP/AuAuAndPP, model recipe or saved model name')
     parser.add_argument('system', nargs='?', choices=['AuAu', 'PP'])
     parser.add_argument('--config', type=Path, default=HERE / 'config/training.yaml')
@@ -53,7 +53,7 @@ def arguments(argv=None):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
     if args.command == 'trainNew' and not ((args.target in ('centAndETdepModels', 'routingStudy', 'rangeStudy', 'depthStudy', 'MLP', 'logReg') and args.system == 'AuAu') or (args.target == 'PPG12' and args.system == 'PP')):
         parser.error('trainNew requires an AuAu study or PPG12 PP')
-    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
+    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
         parser.error(args.command + ' requires AuAu or PP')
     if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign') or args.inputs:
         args.no_score = True
@@ -78,8 +78,10 @@ def arguments(argv=None):
         parser.error('projection event bound must be 1..100000 and shard index must be nonnegative')
     if args.auau_reference and (args.command not in ('trainCampaign', 'collectQA') or args.target != 'PP'):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
-    if args.model and args.command not in ('trainCampaign', 'prepareCells'):
-        parser.error('--model applies only to trainCampaign or prepareCells')
+    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign'):
+        parser.error('--model applies only to trainCampaign, prepareCells or diagnoseCampaign')
+    if args.command == 'diagnoseCampaign' and (len(args.model) != 1 or not args.inputs):
+        parser.error('diagnoseCampaign requires one --model and the original --inputs catalogue')
     if (args.cell or args.assemble_only) and args.command != 'trainCampaign':
         parser.error('--cell and --assemble-only apply only to trainCampaign')
     if args.cell and (len(args.model) != 1 or not args.inputs or args.assemble_only):
@@ -395,6 +397,62 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
     return score, validation, wp
 
 
+def diagnose_fit(inputs, config, system, name, args, *, simulation=None, populations=None):
+    """Inspect retained fitted cells without fitting, changing cuts or sealing a release.
+
+    The original request and prepared population must match. A failed working
+    point records its measured bins; the diagnostic itself grants no acceptance.
+    """
+    from src import Models, Training, Validation, WorkingPoints
+    r, folder, request, runtime, plan, simulation = release_request(inputs, config, system, name, args, simulation=simulation)
+    if args.check:
+        return dict(status='CHECKED', **plan)
+    Models.require(runtime['status'] == 'PASS', 'diagnostic runtime is incomplete')
+    Models.require(folder.is_dir() and not (folder / 'manifest.json').exists(),
+                   'diagnoseCampaign requires an existing unsealed fitted release')
+    original = Models.read_json(folder / 'request.json')
+    Models.require(original.get('request_sha256') == request and original.get('recipe') == r,
+                   'retained fit binds another recipe or source population')
+    output = folder / 'validation_diagnosis.json'
+    with (folder / '.training.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        Models.require(not output.exists(), 'retained-fit diagnosis already exists; inspect its saved report')
+        population, _ = prepared_population(simulation, r, config, args, {} if populations is None else populations)
+        tracker = Models.WorkProgress(folder / 'diagnosis.progress.json', 1, 'diagnostic reports',
+                                      'diagnose-' + r['name'], getattr(args, 'progress_identity', None))
+        tracker.write('inspect-retained-fit', 0)
+        reports = []
+        for cell in Training.cells(r):
+            path = folder / 'artifacts' / (cell['id'] + '.json')
+            artifact = Models.read_json(path)
+            products = [path]
+            if r['algorithm'] == 'bdt':
+                products += [path.with_suffix(s) for s in ('.xgboost.json', '.tmva.root', '.history.json')]
+                history = Models.read_json(path.with_suffix('.history.json'))
+                Models.require(history.get('rounds') == r['learner']['n_estimators'] and
+                               artifact.get('native_export_validation', {}).get('status') == 'PASS',
+                               'retained BDT has no complete fit/native-export witness')
+            hashes = {str(p.relative_to(folder)): Models.file_hash(p) for p in products}
+            mask = Training.cell_mask(population, cell)
+            evaluator = Training.evaluator(path)
+            score, metrics = Validation.check(population, mask, evaluator, evaluator, r, progress=tracker.stage)
+            try:
+                wp = WorkingPoints.derive(population, mask, score, cell, r, progress=tracker.stage)
+                result = dict(status='WORKING_POINTS_PASS', working_points=wp)
+            except WorkingPoints.CalibrationError as error:
+                result = dict(status='WORKING_POINTS_FAILED', error=str(error), measured=error.report)
+            Models.require(all(Models.file_hash(folder / relative) == h for relative, h in hashes.items()),
+                           'retained fit changed during diagnosis')
+            reports.append(dict(cell=cell, artifacts=hashes, validation=metrics, **result))
+        report = dict(schema='PhotonIDRetainedFitDiagnosisV1', status='REPORT_WRITTEN',
+                      scientific_acceptance=False, model_fits=0, request_sha256=request,
+                      population_sha256=population.receipt['input_recipe_sha256'], cells=reports)
+        Models.save_json(output, report)
+        tracker.write('complete', 1, status='REPORT_WRITTEN')
+    return dict(status='REPORT_WRITTEN', scientific_acceptance=False, model_fits=0,
+                report=str(output), report_sha256=Models.file_hash(output), **plan)
+
+
 def prepare_cells(inputs, config, system, name, args, *, simulation=None, populations=None):
     """Copy a routed recipe once; give cell workers a small request pointer."""
     from src import CellInputs, Inputs, Models, Training
@@ -540,7 +598,7 @@ def main(argv=None):
     """Dispatch one model request and score complete groups after release validation."""
     args = arguments(argv)
     from src import Models
-    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells') else []
+    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells', 'diagnoseCampaign') else []
     if args.model:
         Models.require(len(args.model) == len(set(args.model)), 'duplicate --model recipe')
         Models.require(set(args.model) <= set(campaign_names),
@@ -577,9 +635,9 @@ def main(argv=None):
     else:
         from src import Diagnostics, Inputs, Scoring, Training
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
-            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign') else args.system]
+            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign') else args.system]
         names = {'reTrainNominal': ['nominal_retrained_v1'], 'prepareCampaign': ['nominal_retrained_v1', 'wideET_v1'],
-                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'prepareCells': campaign_names, 'trainCampaign': campaign_names, 'trainNew': {
+                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'prepareCells': campaign_names, 'trainCampaign': campaign_names, 'diagnoseCampaign': args.model, 'trainNew': {
             'centAndETdepModels': ['centCoarse_v1', 'centFine_v1', 'ET_v1', 'ETcentCoarse_v1', 'ETcentFine_v1'],
             'routingStudy': Models.ROUTING_MODELS,
             'rangeStudy': ['wideET_v1'],
@@ -659,6 +717,10 @@ def main(argv=None):
             if args.command == 'prepareCells':
                 result.extend(prepare_cells(inputs, config, system, name, args,
                                            simulation=simulation, populations=populations) for name in names)
+                continue
+            if args.command == 'diagnoseCampaign':
+                result.extend(diagnose_fit(inputs, config, system, name, args,
+                                          simulation=simulation, populations=populations) for name in names)
                 continue
             for name in names:
                 if args.command == 'score':

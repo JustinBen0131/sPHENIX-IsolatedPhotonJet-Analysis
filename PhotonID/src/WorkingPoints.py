@@ -13,6 +13,14 @@ import numpy as np
 from .Models import require
 
 
+class CalibrationError(ValueError):
+    """Retain measured calibration bins when a working-point gate refuses release."""
+
+    def __init__(self, message, report):
+        super().__init__(message)
+        self.report = report
+
+
 def weighted_quantile(values, weights, q):
     """Return an observed score at the weighted CDF crossing, without splitting ties."""
     require(len(values) > 0 and np.isfinite(values).all() and np.isfinite(weights).all() and
@@ -72,9 +80,18 @@ def derive(population, mask, score, cell, recipe, *, progress=None):
             achieved = float(np.average(passed, weights=weights[selected]))
             row['achieved_efficiency'] = achieved
             errors.append(abs(achieved - efficiency))
-        require(max(errors) <= config['max_efficiency_error'], 'working-point efficiency gate failed')
-        require(float(np.max(np.abs(residual))) <= config['max_fit_residual'], 'working-point fit residual failed')
-        require(float(np.sqrt(np.mean(residual ** 2))) <= config['max_fit_rms'], 'working-point fit RMS failed')
+        report = dict(axis=axis, target=efficiency, bounds=bounds, intercept=intercept,
+                      slope=slope, bins=rows, max_efficiency_error=max(errors),
+                      max_fit_residual=float(np.max(np.abs(residual))),
+                      fit_rms=float(np.sqrt(np.mean(residual ** 2))),
+                      limits={key: config[key] for key in
+                              ('max_efficiency_error', 'max_fit_residual', 'max_fit_rms')})
+        for key, message in (('max_efficiency_error', 'working-point efficiency gate failed'),
+                             ('max_fit_residual', 'working-point fit residual failed'),
+                             ('fit_rms', 'working-point fit RMS failed')):
+            limit = config['max_fit_rms' if key == 'fit_rms' else key]
+            if report[key] > limit:
+                raise CalibrationError(message, dict(report, failed_gate=key))
         working_points['WP' + str(round(efficiency * 100))] = dict(
             intercept=intercept, slope=slope, target=efficiency, bins=rows,
             max_efficiency_error=max(errors), fit_rms=float(np.sqrt(np.mean(residual ** 2))))

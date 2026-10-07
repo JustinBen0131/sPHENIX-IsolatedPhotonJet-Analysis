@@ -190,6 +190,18 @@ original population, revalidates them and restores the original row order for QA
 The sequential command remains available and produces the same model definition.
 Use full-population invocations for nominal, wide-range, depth and pp models.
 
+If a retained fit failed a working-point line check, inspect its measured bins
+without training again:
+
+```bash
+./PhotonID/photon_id.sh diagnoseCampaign PP --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model nominal_retrained_v1
+```
+
+This writes `validation_diagnosis.json` beside the original unsealed fit, with
+held-out metrics, artifact hashes, the fitted threshold line, bin efficiencies
+and the failing limit. It changes no model, working point or release manifest.
+An existing diagnosis is retained; inspect it before considering another run.
+
 ### 4. Collect the releases for FinalAnalysis
 
 After all recipes listed by `planCampaign` have finished:
