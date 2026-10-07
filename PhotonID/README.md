@@ -214,6 +214,22 @@ When the diagnostic was installed after fitting, also supply
 `--fit-code-manifest /path/to/original/CODE_MANIFEST.json`. The original fit
 request and the current diagnostic keep separate code identities.
 
+After that diagnosis has finished, complete calibration and QA using the same
+fitted artifacts:
+
+```bash
+./PhotonID/photon_id.sh finalizeCampaign PP --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model nominal_retrained_v1 --fit-code-manifest /path/to/original/CODE_MANIFEST.json
+```
+
+`finalizeCampaign` never fits a classifier. It verifies the complete original
+fit, diagnosed artifact hashes, population, runtime and unchanged fitting,
+input and evaluation code, then runs the same calibration and QA stage as
+`trainCampaign`. The original `request.json` and fitted files remain unchanged;
+`finalization_request.json` and the release manifest record the separate
+completion identity and original fit provenance. Approximation warnings remain
+visible for review. A missing diagnosis or changed training inputs/fitter is
+an error, rather than an implicit retraining request.
+
 ### 4. Collect the releases for FinalAnalysis
 
 After all recipes listed by `planCampaign` have finished:

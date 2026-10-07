@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE))
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description='Train and score named photon models from completed eventTrees.')
     parser.add_argument('command', choices=['reTrainNominal', 'trainNew', 'inspectCampaign', 'projectCampaign', 'verifyProjections',
-                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
+                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
     parser.add_argument('target', nargs='?', help='AuAu/PP/AuAuAndPP, model recipe or saved model name')
     parser.add_argument('system', nargs='?', choices=['AuAu', 'PP'])
     parser.add_argument('--config', type=Path, default=HERE / 'config/training.yaml')
@@ -54,7 +54,7 @@ def arguments(argv=None):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
     if args.command == 'trainNew' and not ((args.target in ('centAndETdepModels', 'routingStudy', 'rangeStudy', 'depthStudy', 'MLP', 'logReg') and args.system == 'AuAu') or (args.target == 'PPG12' and args.system == 'PP')):
         parser.error('trainNew requires an AuAu study or PPG12 PP')
-    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
+    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
         parser.error(args.command + ' requires AuAu or PP')
     if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign') or args.inputs:
         args.no_score = True
@@ -79,12 +79,12 @@ def arguments(argv=None):
         parser.error('projection event bound must be 1..100000 and shard index must be nonnegative')
     if args.auau_reference and (args.command not in ('trainCampaign', 'collectQA') or args.target != 'PP'):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
-    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign'):
-        parser.error('--model applies only to trainCampaign, prepareCells or diagnoseCampaign')
-    if args.command == 'diagnoseCampaign' and (len(args.model) != 1 or not args.inputs):
-        parser.error('diagnoseCampaign requires one --model and the original --inputs catalogue')
-    if args.fit_code_manifest and args.command != 'diagnoseCampaign':
-        parser.error('--fit-code-manifest applies only to diagnoseCampaign')
+    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign'):
+        parser.error('--model applies only to trainCampaign, prepareCells, diagnoseCampaign or finalizeCampaign')
+    if args.command in ('diagnoseCampaign', 'finalizeCampaign') and (len(args.model) != 1 or not args.inputs):
+        parser.error(args.command + ' requires one --model and the original --inputs catalogue')
+    if args.fit_code_manifest and args.command not in ('diagnoseCampaign', 'finalizeCampaign'):
+        parser.error('--fit-code-manifest applies only to diagnoseCampaign or finalizeCampaign')
     if (args.cell or args.assemble_only) and args.command != 'trainCampaign':
         parser.error('--cell and --assemble-only apply only to trainCampaign')
     if args.cell and (len(args.model) != 1 or not args.inputs or args.assemble_only):
@@ -341,7 +341,8 @@ def release_request(inputs, config, system, name, args, *, simulation=None):
     return r, folder, request, runtime, plan, simulation
 
 
-def validated_cell(population, r, cell, folder, request, identity, *, cell_input_sha=None, allow_fit=True):
+def validated_cell(population, r, cell, folder, request, identity, *, cell_input_sha=None, allow_fit=True,
+                   retained_artifacts=None):
     """Fit or revalidate one complete cell using the established scientific code.
 
     Existing receipts must bind this exact request and input. Assembly sets
@@ -380,10 +381,17 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
             validation['native_export'] = artifact['native_export_validation']
         Models.require(validation == receipt['validation'] and wp == receipt['working_points'], 'cell revalidation differs')
     else:
-        Models.require(allow_fit, 'release assembly requires every validated cell: ' + cell['id'])
-        Models.require(not model_path.exists(), 'interrupted fit lacks a receipt; retain it and use a new release version')
-        artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'], progress_identity=identity,
-                                        progress_path=model_path.with_suffix('.progress.json'))
+        if retained_artifacts is not None:
+            Models.require(not allow_fit, 'retained calibration must disable fitting')
+            Models.require(all(Models.file_hash(folder / p) == h for p, h in retained_artifacts.items()),
+                           'retained fit differs from its diagnostic hashes')
+            artifact = Models.read_json(model_path)
+            trainer = Training.evaluator(model_path)
+        else:
+            Models.require(allow_fit, 'release assembly requires every validated cell: ' + cell['id'])
+            Models.require(not model_path.exists(), 'interrupted fit lacks a receipt; retain it and use a new release version')
+            artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'], progress_identity=identity,
+                                            progress_path=model_path.with_suffix('.progress.json'))
         calibration_mask = mask
         score, validation = Validation.check(population, calibration_mask, trainer, Training.evaluator(model_path), r, progress=tracker.stage)
         wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage,
@@ -402,6 +410,68 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
     return score, validation, wp
 
 
+def verify_retained_request(folder, r, simulation, plan, args, *, finalizing=False):
+    """Bind an original fit independently of later calibration/driver changes."""
+    from src import Models
+    original = Models.read_json(folder / 'request.json')
+    Models.require(original.get('recipe') == r and original.get('inputs') == simulation and
+                   original.get('environment') == Models.environment(),
+                   'retained fit binds another recipe, source population or runtime')
+    fit_code = original.get('code_sha256')
+    Models.require(isinstance(fit_code, dict) and fit_code, 'retained fit lacks its source hashes')
+    current_code = Models.code_identity()
+    if fit_code != current_code:
+        source_manifest = getattr(args, 'fit_code_manifest', None)
+        Models.require(source_manifest is not None, 'changed diagnostic source requires the original --fit-code-manifest')
+        manifest = Models.read_json(source_manifest)
+        Models.require(manifest.get('schema') == 'PhotonIDPublicCodeSnapshotV1', 'original fit code manifest is invalid')
+        source_hashes = {Path(row['path']).name: row['sha256'] for row in manifest['members']
+                         if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
+        Models.require(source_hashes == fit_code, 'original fit code manifest differs from the retained request')
+    if finalizing:
+        Models.require(set(fit_code) == set(current_code) and all(
+            fit_code[key] == current_code[key] for key in fit_code if key not in ('WorkingPoints.py', 'photon_id.py')),
+            'retained completion requires unchanged fitter, evaluator, inputs and numerical validation')
+    fit_request = dict(recipe=r, inputs=simulation, code=fit_code, environment=original['environment'])
+    if plan['split_reference'] is not None:
+        Models.require(original.get('split_reference') == plan['split_reference'], 'retained fit split reference differs')
+        fit_request['split_reference'] = plan['split_reference']
+    Models.require(Models.digest(fit_request) == original.get('request_sha256'), 'retained fit request hash is inconsistent')
+    return original
+
+
+def retained_completion(folder, r, simulation, plan, args):
+    """Require a complete diagnosed fit before calibration-only completion."""
+    from src import Models, Training
+    original = verify_retained_request(folder, r, simulation, plan, args, finalizing=True)
+    diagnosis_path = folder / 'validation_diagnosis.json'
+    diagnosis = Models.read_json(diagnosis_path)
+    Models.require(diagnosis.get('schema') == 'PhotonIDRetainedFitDiagnosisV1' and
+                   diagnosis.get('status') == 'REPORT_WRITTEN' and diagnosis.get('model_fits') == 0 and
+                   diagnosis.get('scientific_acceptance') is False and
+                   diagnosis.get('request_sha256') == original['request_sha256'] and
+                   diagnosis.get('fit_code_sha256') == original['code_sha256'],
+                   'retained completion requires its original completed diagnosis')
+    expected = list(Training.cells(r))
+    cells = diagnosis['cells']
+    Models.require([c['cell'] for c in cells] == expected and r['algorithm'] == 'bdt',
+                   'retained completion requires every expected BDT cell')
+    for row in cells:
+        path = folder / 'artifacts' / (row['cell']['id'] + '.json')
+        products = [path] + [path.with_suffix(s) for s in ('.xgboost.json', '.tmva.root', '.history.json')]
+        Models.require(set(row['artifacts']) == {str(p.relative_to(folder)) for p in products},
+                       'retained diagnosis has missing or unexpected fitted artifacts')
+        Models.require(all(Models.file_hash(folder / p) == h for p, h in row['artifacts'].items()),
+                       'retained artifacts changed after diagnosis')
+        Models.require(Models.read_json(path.with_suffix('.history.json')).get('rounds') == r['learner']['n_estimators'] and
+                       Models.read_json(path).get('native_export_validation', {}).get('status') == 'PASS' and
+                       row.get('validation', {}).get('status') == 'PASS',
+                       'retained fit lacks complete training and numerical-validation evidence')
+    return dict(fit_request_sha256=original['request_sha256'], fit_code_sha256=original['code_sha256'],
+                diagnosis_sha256=Models.file_hash(diagnosis_path), population_sha256=diagnosis['population_sha256'],
+                cells={c['cell']['id']: c for c in cells})
+
+
 def diagnose_fit(inputs, config, system, name, args, *, simulation=None, populations=None):
     """Inspect retained fitted cells without fitting, changing cuts or sealing a release.
 
@@ -415,25 +485,8 @@ def diagnose_fit(inputs, config, system, name, args, *, simulation=None, populat
     Models.require(runtime['status'] == 'PASS', 'diagnostic runtime is incomplete')
     Models.require(folder.is_dir() and not (folder / 'manifest.json').exists(),
                    'diagnoseCampaign requires an existing unsealed fitted release')
-    original = Models.read_json(folder / 'request.json')
-    Models.require(original.get('recipe') == r and original.get('inputs') == simulation and
-                   original.get('environment') == Models.environment(),
-                   'retained fit binds another recipe, source population or runtime')
-    fit_code = original.get('code_sha256')
-    Models.require(isinstance(fit_code, dict) and fit_code, 'retained fit lacks its source hashes')
-    if fit_code != Models.code_identity():
-        source_manifest = getattr(args, 'fit_code_manifest', None)
-        Models.require(source_manifest is not None, 'changed diagnostic source requires the original --fit-code-manifest')
-        manifest = Models.read_json(source_manifest)
-        Models.require(manifest.get('schema') == 'PhotonIDPublicCodeSnapshotV1', 'original fit code manifest is invalid')
-        source_hashes = {Path(row['path']).name: row['sha256'] for row in manifest['members']
-                         if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
-        Models.require(source_hashes == fit_code, 'original fit code manifest differs from the retained request')
-    fit_request = dict(recipe=r, inputs=simulation, code=fit_code, environment=original['environment'])
-    if plan['split_reference'] is not None:
-        Models.require(original.get('split_reference') == plan['split_reference'], 'retained fit split reference differs')
-        fit_request['split_reference'] = plan['split_reference']
-    Models.require(Models.digest(fit_request) == original.get('request_sha256'), 'retained fit request hash is inconsistent')
+    original = verify_retained_request(folder, r, simulation, plan, args)
+    fit_code = original['code_sha256']
     plan.update(diagnostic_request_sha256=request, request_sha256=original['request_sha256'])
     output = folder / 'validation_diagnosis.json'
     with (folder / '.training.lock').open('a') as lock:
@@ -559,8 +612,12 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         if (folder / 'manifest.json').exists():
             Models.load_release(folder, request=request)
             return dict(status='REUSED', **plan)
-        Models.save_json(folder / 'request.json', dict(request_sha256=request, recipe=r, inputs=simulation,
-            split_reference=plan['split_reference'], code_sha256=Models.code_identity(), environment=Models.environment()))
+        completion = retained_completion(folder, r, simulation, plan, args) \
+            if getattr(args, 'command', None) == 'finalizeCampaign' else None
+        current_request = dict(request_sha256=request, recipe=r, inputs=simulation,
+            split_reference=plan['split_reference'], code_sha256=Models.code_identity(), environment=Models.environment())
+        # Preserve the original fitted request when only calibration/QA changes.
+        Models.save_json(folder / ('finalization_request.json' if completion else 'request.json'), current_request)
         expected_cells = list(Training.cells(r))
         observed_receipts = set((folder / 'artifacts').glob('*.validation.json'))
         expected_receipts = {folder / 'artifacts' / (c['id'] + '.validation.json') for c in expected_cells}
@@ -568,6 +625,9 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         if getattr(args, 'assemble_only', False):
             Models.require(observed_receipts == expected_receipts, 'release assembly requires every validated cell')
         population, work = prepared_population(simulation, r, config, args, {} if populations is None else populations)
+        if completion:
+            Models.require(population.receipt['input_recipe_sha256'] == completion['population_sha256'],
+                           'retained diagnosis used another prepared population')
         calibration = calibration_population(population, r)
         qa_scores = np.full(len(calibration.y), np.nan, np.float64)
         qa_coverage = np.zeros(len(calibration.y), np.uint8)
@@ -582,7 +642,12 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
             else:
                 cell_population, original, input_sha = population, np.flatnonzero(Training.cell_mask(population, cell)), None
             score, validation, wp = validated_cell(cell_population, r, cell, folder, request, identity,
-                cell_input_sha=input_sha, allow_fit=not getattr(args, 'assemble_only', False))
+                cell_input_sha=input_sha, allow_fit=not completion and not getattr(args, 'assemble_only', False),
+                retained_artifacts=completion['cells'][cell['id']]['artifacts'] if completion else None)
+            if completion:
+                Models.require({k: v for k, v in validation.items() if k != 'native_export'} ==
+                               completion['cells'][cell['id']]['validation'],
+                               'retained model numerical validation changed since diagnosis')
             cells.append(dict(cell, artifact='artifacts/' + cell['id'] + '.json'))
             all_validation[cell['id']] = validation; all_wp[cell['id']] = wp
             Models.require(not np.any(qa_coverage[original]), 'QA model cells overlap')
@@ -618,6 +683,10 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                         code_sha256=Models.code_identity(), environment=Models.environment(),
                         feature_missing_value_rule='reject invalid/non-finite H70 inputs in model domain; unscored outside domain')
         manifest['split_reference'] = population.receipt['split_reference']
+        if completion:
+            Models.require(all(Models.file_hash(folder / p) == h for row in completion['cells'].values()
+                               for p, h in row['artifacts'].items()), 'fitted artifacts changed during completion')
+            manifest['retained_fit'] = {k: v for k, v in completion.items() if k != 'cells'}
         manifest['release_sha256'] = Models.digest(manifest)
         Models.save_json(folder / 'manifest.json', manifest)
         Models.load_release(folder, request=request)
@@ -628,7 +697,7 @@ def main(argv=None):
     """Dispatch one model request and score complete groups after release validation."""
     args = arguments(argv)
     from src import Models
-    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells', 'diagnoseCampaign') else []
+    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign') else []
     if args.model:
         Models.require(len(args.model) == len(set(args.model)), 'duplicate --model recipe')
         Models.require(set(args.model) <= set(campaign_names),
@@ -665,9 +734,9 @@ def main(argv=None):
     else:
         from src import Diagnostics, Inputs, Scoring, Training
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
-            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign') else args.system]
+            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign') else args.system]
         names = {'reTrainNominal': ['nominal_retrained_v1'], 'prepareCampaign': ['nominal_retrained_v1', 'wideET_v1'],
-                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'prepareCells': campaign_names, 'trainCampaign': campaign_names, 'diagnoseCampaign': args.model, 'trainNew': {
+                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'prepareCells': campaign_names, 'trainCampaign': campaign_names, 'diagnoseCampaign': args.model, 'finalizeCampaign': args.model, 'trainNew': {
             'centAndETdepModels': ['centCoarse_v1', 'centFine_v1', 'ET_v1', 'ETcentCoarse_v1', 'ETcentFine_v1'],
             'routingStudy': Models.ROUTING_MODELS,
             'rangeStudy': ['wideET_v1'],
