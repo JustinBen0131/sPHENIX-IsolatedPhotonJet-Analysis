@@ -152,8 +152,8 @@ recipe per invocation after preparation:
 ```
 
 `--model` can be repeated and preserves the campaign's recipe order. Each selected
-recipe reuses complete preparation and keeps all of its routing cells together;
-it does not change the learner, weights, event split or working points.
+recipe reuses complete preparation; it does not change the learner, weights,
+event split or working points.
 Independent `--model` invocations can run in parallel after preparation. They
 reuse the verified arrays on disk and each fit the complete selected recipe.
 Selected invocations seal their own releases; `collectQA` requires the complete
@@ -167,12 +167,28 @@ For a compact batch-planning preview, use:
 ```
 
 The execution preview lists independent cell fits, shared inputs and the barrier
-before a complete release can be assembled. It preserves the full sample within
-each cell, its global training weights and its frozen split. Memory targets are
-measurement goals; actual requests remain unset. Cell dispatch and assembly
-still require implementation and equivalence qualification. This read-only
-preview cannot submit jobs; the supported execution remains one `--model`
-invocation per recipe.
+before a complete release can be assembled. Memory targets are measurement goals;
+actual requests require counts and runtime measurements. The preview starts no jobs.
+
+For a routed model, a batch scheduler can run its cells independently:
+
+```bash
+# Copy the complete routed inputs once, after prepareCampaign:
+./PhotonID/photon_id.sh prepareCells AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model centCoarse_v1
+# Run each cell listed by planCampaign once; these calls can run in parallel:
+./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model centCoarse_v1 --cell cell_000
+# After every cell passes, assemble its complete release:
+./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model centCoarse_v1 --assemble-only
+```
+
+`prepareCells` copies the globally prepared features, weights, partitions and
+source/event/photon identities in bounded chunks. It computes no new weights or
+splits. A cell worker reads its compact input and performs the ordinary fit,
+saved-model validation and working-point calibration. It seals no partial release.
+Assembly requires exactly the expected cells, checks their bytes against the
+original population, revalidates them and restores the original row order for QA.
+The sequential command remains available and produces the same model definition.
+Use full-population invocations for nominal, wide-range, depth and pp models.
 
 ### 4. Collect the releases for FinalAnalysis
 
@@ -442,6 +458,7 @@ histogram selection belongs to TreeToHists.
 | [photon_id.py](scripts/photon_id.py) | Commands and phase order |
 | [Inputs.py](src/Inputs.py) | Features, labels, weights and event split |
 | [ProjectionCache.py](src/ProjectionCache.py) | Compact source-row storage and verification |
+| [CellInputs.py](src/CellInputs.py) | Exact compact routing cells and original-row verification |
 | [Training.py](src/Training.py) | BDT, MLP and logistic fitting |
 | [Validation.py](src/Validation.py) | Numerical and saved-model checks |
 | [WorkingPoints.py](src/WorkingPoints.py) | Efficiency thresholds |

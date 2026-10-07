@@ -260,7 +260,7 @@ def export_native_bdt(model, path, inputs):
         booster.feature_names = original_names
 
 
-def fit(population, mask, recipe, output, cell_id, *, progress_identity=None):
+def fit(population, mask, recipe, output, cell_id, *, progress_identity=None, progress_path=None):
     """Create one cell artifact; retain failure progress instead of overwriting a fit."""
     require(not Path(output).exists(), 'model artifact already exists; validate/reuse its saved release')
     bdt = recipe['algorithm'] == 'bdt'
@@ -270,11 +270,13 @@ def fit(population, mask, recipe, output, cell_id, *, progress_identity=None):
         rows = int(np.count_nonzero(mask & population.train))
         batch_size = int(recipe['learner']['batch_size'])
         total = recipe['learner']['epochs'] * ((rows + batch_size - 1) // batch_size)
-    tracker = WorkProgress(Path(output).parent / 'progress.json', total,
+    tracker = WorkProgress(progress_path or Path(output).parent / 'progress.json', total,
                            'boosting rounds' if bdt else 'optimizer batches',
                            recipe['name'] + '/' + cell_id, progress_identity)
     try:
-        return (fit_bdt if bdt else fit_numpy)(population, mask, recipe, output, cell_id, tracker)
+        result = (fit_bdt if bdt else fit_numpy)(population, mask, recipe, output, cell_id, tracker)
+        tracker.write('complete', total, status='PASS')
+        return result
     except Exception as exc:
         tracker.fail(exc)
         raise

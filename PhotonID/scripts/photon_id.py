@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE))
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description='Train and score named photon models from completed eventTrees.')
     parser.add_argument('command', choices=['reTrainNominal', 'trainNew', 'inspectCampaign', 'projectCampaign', 'verifyProjections',
-                                         'prepareCampaign', 'trainCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
+                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
     parser.add_argument('target', nargs='?', help='AuAu/PP/AuAuAndPP, model recipe or saved model name')
     parser.add_argument('system', nargs='?', choices=['AuAu', 'PP'])
     parser.add_argument('--config', type=Path, default=HERE / 'config/training.yaml')
@@ -42,7 +42,9 @@ def arguments(argv=None):
     parser.add_argument('--cache-layout', choices=('packed', 'source'), default='packed', help='projection storage; packed is one row bundle per shard')
     parser.add_argument('--scratch-root', type=Path, help='existing physical data-staging directory; otherwise use _CONDOR_SCRATCH_DIR')
     parser.add_argument('--auau-reference', type=Path, help='sealed canonical AuAu release for the pp/AuAu heldout comparison')
-    parser.add_argument('--model', action='append', default=[], help='one trainCampaign recipe; repeat to select several, then run collectQA')
+    parser.add_argument('--model', action='append', default=[], help='trainCampaign/prepareCells recipe; repeat to select several')
+    parser.add_argument('--cell', help='trainCampaign: one exact cell from prepared compact inputs')
+    parser.add_argument('--assemble-only', action='store_true', help='trainCampaign: seal completed cells; refuse any missing fit')
     parser.add_argument('--summary', action='store_true', help='planCampaign: compact human-readable preview')
     parser.add_argument('--execution-plan', action='store_true', help='planCampaign: preview independent cells and release barriers; no dispatch')
     parser.add_argument('--census', type=Path, help='planCampaign --execution-plan: saved preparation_census.json for exact cell counts')
@@ -51,9 +53,9 @@ def arguments(argv=None):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
     if args.command == 'trainNew' and not ((args.target in ('centAndETdepModels', 'routingStudy', 'rangeStudy', 'depthStudy', 'MLP', 'logReg') and args.system == 'AuAu') or (args.target == 'PPG12' and args.system == 'PP')):
         parser.error('trainNew requires an AuAu study or PPG12 PP')
-    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'trainCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
+    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
         parser.error(args.command + ' requires AuAu or PP')
-    if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'trainCampaign') or args.inputs:
+    if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign') or args.inputs:
         args.no_score = True
     # Training produces portable releases. Publishing scored tree copies is a
     # separate explicit command; reduction normally evaluates models in place.
@@ -76,8 +78,12 @@ def arguments(argv=None):
         parser.error('projection event bound must be 1..100000 and shard index must be nonnegative')
     if args.auau_reference and (args.command not in ('trainCampaign', 'collectQA') or args.target != 'PP'):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
-    if args.model and args.command != 'trainCampaign':
-        parser.error('--model applies only to trainCampaign')
+    if args.model and args.command not in ('trainCampaign', 'prepareCells'):
+        parser.error('--model applies only to trainCampaign or prepareCells')
+    if (args.cell or args.assemble_only) and args.command != 'trainCampaign':
+        parser.error('--cell and --assemble-only apply only to trainCampaign')
+    if args.cell and (len(args.model) != 1 or not args.inputs or args.assemble_only):
+        parser.error('--cell requires one --model and --inputs; do not combine with --assemble-only')
     if args.require_roster and args.command != 'inspectCampaign':
         parser.error('--require-roster applies only to inspectCampaign')
     if args.command != 'planCampaign' and (args.summary or args.execution_plan or args.census):
@@ -294,20 +300,22 @@ def calibration_population(population, recipe):
     return population
 
 
-def train_release(inputs, config, system, name, args, *, simulation=None, populations=None):
-    """Prepare once, fit/check every cell, then seal the complete model release.
-
-    --check returns the resolved request and dependency status before fitting.
-    Reuse requires the same request; scoring is a separate phase in main.
-    """
-    from src import Diagnostics, Inputs, Models, Training, Validation, WorkingPoints
-    import numpy as np
+def release_recipe(config, system, name, args):
+    """Resolve the named scientific recipe and explicit output version."""
+    from src import Models
     r = Models.recipe(config, system, name)
     if args.release_version != 'v1':
         import re
         Models.require(re.fullmatch(r'v[1-9][0-9]*', args.release_version) is not None, 'invalid release version')
         r['name'] = r['name'].removesuffix('v1') + args.release_version
         r['score_branch'] = r['score_branch'].removesuffix('v1') + args.release_version
+    return r
+
+
+def release_request(inputs, config, system, name, args, *, simulation=None):
+    """Resolve the one authoritative recipe, input identity and runtime request."""
+    from src import Inputs, Models, Training
+    r = release_recipe(config, system, name, args)
     folder = Models.release_dir(args.models, system, r['name'])
     required = {sample for samples in r['sources'].values() for sample in samples}
     Models.require(all(r['sources'][role] for role in ('signal', 'background')),
@@ -320,16 +328,87 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                    ', unexpected=' + str(sorted(observed - required)))
     reference_pin = Inputs.population_identity(simulation, Models.recipe(config, system, 'nominal_retrained_v1')) \
         if name == 'wideET_v1' else None
-    request = Models.request_identity(r, simulation, split_reference=reference_pin)
     runtime = Training.runtime_status(r['algorithm'])
-    dependency = runtime['status'] == 'PASS'
+    request = Models.request_identity(r, simulation, split_reference=reference_pin)
     plan = dict(model=r['name'], system=system, score_branch=r['score_branch'],
                 request_sha256=request, sources=len(simulation), release=str(folder),
                 split_reference=reference_pin)
-    if args.check:
-        return dict(status='CHECKED' if dependency else 'BLOCKED_DEPENDENCY',
-                    runtime=runtime, **plan)
-    Models.require(dependency, 'training runtime is incomplete: ' + '; '.join(runtime['missing']))
+    return r, folder, request, runtime, plan, simulation
+
+
+def validated_cell(population, r, cell, folder, request, identity, *, cell_input_sha=None, allow_fit=True):
+    """Fit or revalidate one complete cell using the established scientific code.
+
+    Existing receipts must bind this exact request and input. Assembly sets
+    allow_fit=False: a missing cell is an error, never an implicit training job.
+    """
+    from src import Models, Training, Validation, WorkingPoints
+    model_path = folder / 'artifacts' / (cell['id'] + '.json')
+    receipt_path = folder / 'artifacts' / (cell['id'] + '.validation.json')
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    mask = Training.cell_mask(population, cell)
+    tracker = Models.WorkProgress(model_path.with_suffix('.validation.progress.json'), 1,
+                                  'validated cells', r['name'] + '/' + cell['id'] + '/validation', identity)
+    tracker.write('validate-cell', 0)
+    minimum = r['validation']['min_rows_per_class_per_split']
+    Models.require(all(int((mask & (population.train == split) & (population.y == k)).sum()) >= minimum
+                       for split in (True, False) for k in (0, 1)),
+                   'insufficient class/split coverage: ' + cell['id'])
+    if receipt_path.exists():
+        receipt = Models.read_json(receipt_path)
+        Models.require(receipt.get('status') == 'PASS' and receipt['request_sha256'] == request and
+                       receipt.get('cell') == cell and receipt.get('cell_input_sha256') == cell_input_sha,
+                       'cell receipt binds another request, routing cell or compact population')
+        products = [model_path] + ([model_path.with_suffix(s) for s in
+                    ('.xgboost.json', '.tmva.root', '.history.json')] if r['algorithm'] == 'bdt' else [])
+        Models.require(set(receipt['artifacts']) == {str(p.relative_to(folder)) for p in products},
+                       'completed cell has missing or unexpected artifacts')
+        for relative, h in receipt['artifacts'].items():
+            Models.require(Models.file_hash(folder / relative) == h, 'completed cell artifact changed')
+        calibration_mask = mask
+        score, validation = Validation.check(population, calibration_mask, Training.evaluator(model_path),
+                                             Training.evaluator(model_path), r, progress=tracker.stage)
+        wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage)
+        artifact = Models.read_json(model_path)
+        if 'native_export_validation' in artifact:
+            validation['native_export'] = artifact['native_export_validation']
+        Models.require(validation == receipt['validation'] and wp == receipt['working_points'], 'cell revalidation differs')
+    else:
+        Models.require(allow_fit, 'release assembly requires every validated cell: ' + cell['id'])
+        Models.require(not model_path.exists(), 'interrupted fit lacks a receipt; retain it and use a new release version')
+        artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'], progress_identity=identity,
+                                        progress_path=model_path.with_suffix('.progress.json'))
+        calibration_mask = mask
+        score, validation = Validation.check(population, calibration_mask, trainer, Training.evaluator(model_path), r, progress=tracker.stage)
+        wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage)
+        if 'native_export_validation' in artifact:
+            validation['native_export'] = artifact['native_export_validation']
+        files = [model_path]
+        for suffix in ('.xgboost.json', '.tmva.root', '.history.json'):
+            product = model_path.with_suffix(suffix)
+            if product.exists(): files.append(product)
+        receipt = dict(schema='PhotonIDCellValidationV1', status='PASS', request_sha256=request,
+                       cell=cell, cell_input_sha256=cell_input_sha, validation=validation, working_points=wp,
+                       artifacts={str(p.relative_to(folder)): Models.file_hash(p) for p in files})
+        Models.save_json(receipt_path, receipt)
+    tracker.write('complete', 1, status='PASS')
+    return score, validation, wp
+
+
+def prepare_cells(inputs, config, system, name, args, *, simulation=None, populations=None):
+    """Copy a routed recipe once; give cell workers a small request pointer."""
+    from src import CellInputs, Inputs, Models, Training
+    r, folder, request, runtime, plan, simulation = release_request(inputs, config, system, name, args, simulation=simulation)
+    Models.require(len(list(Training.cells(r))) > 1, 'prepareCells requires a routed campaign model')
+    if args.check: return dict(status='CHECKED', **plan)
+    Models.require(runtime['status'] == 'PASS', 'training runtime is incomplete')
+    Models.require(args.inputs is not None, 'prepareCells requires the saved --inputs catalogue')
+    census = Models.read_json(args.models / system / 'preparation_census.json')
+    Models.execution_plan(config, system=system, census=census)
+    Models.require(census['inputs_identity'] == Models.digest(Inputs.catalogue_body(simulation, system)),
+                   'prepared cell census binds another input catalogue')
+    counts = next(c['cells'] for c in census['models'] if c['model'] == name)
+    population, work = prepared_population(simulation, r, config, args, {} if populations is None else populations)
     folder.mkdir(parents=True, exist_ok=True)
     with (folder / '.training.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -337,61 +416,95 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
             Models.load_release(folder, request=request)
             return dict(status='REUSED', **plan)
         Models.save_json(folder / 'request.json', dict(request_sha256=request, recipe=r, inputs=simulation,
-                                                      split_reference=reference_pin, code_sha256=Models.code_identity(),
-                                                      environment=Models.environment()))
-        population_cache = {} if populations is None else populations
-        population, _ = prepared_population(simulation, r, config, args, population_cache)
+            split_reference=plan['split_reference'], code_sha256=Models.code_identity(), environment=Models.environment()))
+        result = CellInputs.prepare(args.models, request, r, population, work, counts,
+                                   progress_identity=getattr(args, 'progress_identity', None))
+        Models.save_json(folder / '.work' / 'cell_inputs.json', dict(schema='PhotonIDCellRequestV1',
+            request_sha256=request, recipe=r, code_sha256=Models.code_identity(), environment=Models.environment(),
+            catalogue_sha256=Models.file_hash(args.inputs), population=CellInputs.population_witness(population.receipt),
+            sources=len(simulation), split_reference=plan['split_reference']))
+    return dict(**result, model=r['name'], request_sha256=request)
+
+
+def train_cell(config, system, name, args):
+    """Fit one prepared cell without loading the full source/population arrays."""
+    from src import CellInputs, Models, Training
+    r = release_recipe(config, system, name, args)
+    cells = list(Training.cells(r)); selected = [c for c in cells if c['id'] == args.cell]
+    Models.require(len(cells) > 1 and len(selected) == 1, 'choose an exact routed cell from planCampaign')
+    runtime = Training.runtime_status(r['algorithm'])
+    Models.require(runtime['status'] == 'PASS', 'training runtime is incomplete')
+    folder = Models.release_dir(args.models, system, r['name'])
+    pin = Models.read_json(folder / '.work' / 'cell_inputs.json')
+    Models.require(pin.get('schema') == 'PhotonIDCellRequestV1' and pin['recipe'] == r and
+                   pin['code_sha256'] == Models.code_identity() and pin['environment'] == Models.environment(),
+                   'prepared cell request has different recipe, source code or runtime')
+    Models.require(args.inputs and Models.file_hash(args.inputs) == pin['catalogue_sha256'],
+                   'cell input catalogue changed')
+    request = pin['request_sha256']; cell = selected[0]
+    plan = dict(model=r['name'], system=system, cell=cell['id'], request_sha256=request, release=str(folder))
+    if args.check: return dict(status='CHECKED', **plan)
+    with (folder / '.training.lock').open('a') as release_lock:
+        # Shared for independent cells, exclusive for sequential training/assembly.
+        fcntl.flock(release_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        if (folder / 'manifest.json').exists():
+            Models.load_release(folder, request=request)
+            return dict(status='REUSED', **plan)
+        with (folder / '.work' / (cell['id'] + '.lock')).open('a') as cell_lock:
+            fcntl.flock(cell_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            population, _, input_sha, _ = CellInputs.load(args.models, request, r, cell,
+                                                        expected_population=pin['population'])
+            validated_cell(population, r, cell, folder, request, getattr(args, 'progress_identity', None),
+                           cell_input_sha=input_sha)
+    return dict(status='CELL_VALIDATED', release_sealed=False, **plan)
+
+
+def train_release(inputs, config, system, name, args, *, simulation=None, populations=None):
+    """Fit/check a whole recipe, or assemble its exact set of completed cells.
+
+    Sequential and independent-cell execution share the fitter, validation and
+    working-point code. A manifest is sealed only after complete QA coverage.
+    """
+    from src import CellInputs, Diagnostics, Models, Training
+    import numpy as np
+    r, folder, request, runtime, plan, simulation = release_request(inputs, config, system, name, args, simulation=simulation)
+    if args.check:
+        return dict(status='CHECKED' if runtime['status'] == 'PASS' else 'BLOCKED_DEPENDENCY', runtime=runtime, **plan)
+    Models.require(runtime['status'] == 'PASS', 'training runtime is incomplete: ' + '; '.join(runtime['missing']))
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / '.training.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if (folder / 'manifest.json').exists():
+            Models.load_release(folder, request=request)
+            return dict(status='REUSED', **plan)
+        Models.save_json(folder / 'request.json', dict(request_sha256=request, recipe=r, inputs=simulation,
+            split_reference=plan['split_reference'], code_sha256=Models.code_identity(), environment=Models.environment()))
+        expected_cells = list(Training.cells(r))
+        observed_receipts = set((folder / 'artifacts').glob('*.validation.json'))
+        expected_receipts = {folder / 'artifacts' / (c['id'] + '.validation.json') for c in expected_cells}
+        Models.require(observed_receipts <= expected_receipts, 'release has unexpected cell receipts')
+        if getattr(args, 'assemble_only', False):
+            Models.require(observed_receipts == expected_receipts, 'release assembly requires every validated cell')
+        population, work = prepared_population(simulation, r, config, args, {} if populations is None else populations)
         calibration = calibration_population(population, r)
         qa_scores = np.full(len(calibration.y), np.nan, np.float64)
         qa_coverage = np.zeros(len(calibration.y), np.uint8)
         cells = []; all_validation = {}; all_wp = {}
         identity = getattr(args, 'progress_identity', None)
-        for cell in Training.cells(r):
-            model_path = folder / 'artifacts' / (cell['id'] + '.json')
-            receipt_path = folder / 'artifacts' / (cell['id'] + '.validation.json')
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            mask = Training.cell_mask(population, cell)
-            tracker = Models.WorkProgress(folder / 'artifacts' / 'progress.json', 1,
-                                          'validated cells', r['name'] + '/' + cell['id'] + '/validation', identity)
-            tracker.write('validate-cell', 0)
-            minimum = r['validation']['min_rows_per_class_per_split']
-            Models.require(all(int((mask & (population.train == split) & (population.y == k)).sum()) >= minimum
-                               for split in (True, False) for k in (0, 1)),
-                           'insufficient class/split coverage: ' + cell['id'])
-            if receipt_path.exists():
-                receipt = Models.read_json(receipt_path)
-                Models.require(receipt['request_sha256'] == request, 'cell receipt binds another request')
-                for relative, h in receipt['artifacts'].items():
-                    Models.require(Models.file_hash(folder / relative) == h, 'completed cell artifact changed')
-                calibration_mask = Training.cell_mask(calibration, cell)
-                score, validation = Validation.check(calibration, calibration_mask, Training.evaluator(model_path),
-                                                     Training.evaluator(model_path), r, progress=tracker.stage)
-                wp = WorkingPoints.derive(calibration, calibration_mask, score, cell, r, progress=tracker.stage)
-                artifact = Models.read_json(model_path)
-                if 'native_export_validation' in artifact:
-                    validation['native_export'] = artifact['native_export_validation']
-                Models.require(validation == receipt['validation'] and wp == receipt['working_points'], 'cell revalidation differs')
+        compact = (folder / '.work' / 'cell_inputs.json').exists()
+        for cell in expected_cells:
+            if compact:
+                cell_population, original, input_sha, data = CellInputs.load(args.models, request, r, cell,
+                    expected_population=CellInputs.population_witness(population.receipt))
+                CellInputs.verify_origin(data, work, population.receipt)
             else:
-                Models.require(not model_path.exists(), 'interrupted fit lacks a receipt; retain it and use a new release version')
-                artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'], progress_identity=identity)
-                calibration_mask = Training.cell_mask(calibration, cell)
-                score, validation = Validation.check(calibration, calibration_mask, trainer, Training.evaluator(model_path), r, progress=tracker.stage)
-                wp = WorkingPoints.derive(calibration, calibration_mask, score, cell, r, progress=tracker.stage)
-                if 'native_export_validation' in artifact:
-                    validation['native_export'] = artifact['native_export_validation']
-                files = [model_path]
-                for suffix in ('.xgboost.json', '.tmva.root', '.history.json'):
-                    product = model_path.with_suffix(suffix)
-                    if product.exists(): files.append(product)
-                receipt = dict(status='PASS', request_sha256=request, validation=validation, working_points=wp,
-                               artifacts={str(p.relative_to(folder)): Models.file_hash(p) for p in files})
-                Models.save_json(receipt_path, receipt)
-            cells.append(dict(cell, artifact=str(model_path.relative_to(folder))))
+                cell_population, original, input_sha = population, np.flatnonzero(Training.cell_mask(population, cell)), None
+            score, validation, wp = validated_cell(cell_population, r, cell, folder, request, identity,
+                cell_input_sha=input_sha, allow_fit=not getattr(args, 'assemble_only', False))
+            cells.append(dict(cell, artifact='artifacts/' + cell['id'] + '.json'))
             all_validation[cell['id']] = validation; all_wp[cell['id']] = wp
-            Models.require(not np.any(qa_coverage[calibration_mask]), 'QA model cells overlap')
-            qa_scores[calibration_mask] = score
-            qa_coverage[calibration_mask] += 1
-            tracker.write('cell-validated', 1)
+            Models.require(not np.any(qa_coverage[original]), 'QA model cells overlap')
+            qa_scores[original] = score; qa_coverage[original] += 1
         Models.require(np.all(qa_coverage == 1), 'QA model cells leave uncovered population rows')
         Diagnostics.save(folder, calibration, r, qa_scores, cells, config, request, progress_identity=identity)
         Models.save_json(folder / 'working_points.json', dict(schema='PhotonIDWorkingPointsV1',
@@ -407,7 +520,8 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                          downstream_adapter='PhotonJetSelectionV1: photon_id_selection'))
         artifacts = {str(p.relative_to(folder)): Models.file_hash(p) for p in folder.rglob('*')
                      if p.is_file() and '.work' not in p.parts and p.name not in
-                     ('manifest.json', '.training.lock', 'progress.json', 'score_progress.json')}
+                     ('manifest.json', '.training.lock', 'progress.json', 'score_progress.json') and
+                     not p.name.endswith('.progress.json')}
         manifest = dict(schema='PhotonIDReleaseV1', status='PASS', name=r['name'], system=system,
                         score_branch=r['score_branch'], request_sha256=request, recipe=r, cells=cells,
                         artifacts=artifacts, split_sha256=population.receipt['split_sha256'],
@@ -426,13 +540,19 @@ def main(argv=None):
     """Dispatch one model request and score complete groups after release validation."""
     args = arguments(argv)
     from src import Models
-    campaign_names = Models.campaign_models(args.target) if args.command == 'trainCampaign' else []
+    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells') else []
     if args.model:
         Models.require(len(args.model) == len(set(args.model)), 'duplicate --model recipe')
         Models.require(set(args.model) <= set(campaign_names),
                        'unknown campaign recipe: ' + ', '.join(sorted(set(args.model) - set(campaign_names))))
         campaign_names = [name for name in campaign_names if name in args.model]
     config = Models.load_config(args.config)
+    if args.command == 'prepareCells':
+        from src import Training
+        routed = [name for name in campaign_names if len(list(Training.cells(Models.recipe(config, args.target, name)))) > 1]
+        Models.require(not args.model or routed == campaign_names, 'prepareCells accepts routed models only')
+        Models.require(routed, 'no routed campaign models for this system')
+        campaign_names = routed
     args.progress_identity = Models.progress_identity(Models.yaml.safe_load(args.progress_context.read_text())) \
         if args.progress_context else None
     if args.command == 'planCampaign':
@@ -441,6 +561,10 @@ def main(argv=None):
             Models.campaign_plan(config, args.group, args.target)
     elif args.command == 'listModels':
         result = Models.list_models(args.models, args.target)
+    elif args.command == 'trainCampaign' and args.cell:
+        # Compact workers stream-check the catalogue hash without parsing its
+        # full roster or opening global population/projection arrays.
+        result = [train_cell(config, args.target, campaign_names[0], args)]
     elif args.command == 'collectQA':
         from src import Diagnostics
         version = args.release_version
@@ -453,9 +577,9 @@ def main(argv=None):
     else:
         from src import Diagnostics, Inputs, Scoring, Training
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
-            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'trainCampaign') else args.system]
+            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign') else args.system]
         names = {'reTrainNominal': ['nominal_retrained_v1'], 'prepareCampaign': ['nominal_retrained_v1', 'wideET_v1'],
-                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'trainCampaign': campaign_names, 'trainNew': {
+                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'prepareCells': campaign_names, 'trainCampaign': campaign_names, 'trainNew': {
             'centAndETdepModels': ['centCoarse_v1', 'centFine_v1', 'ET_v1', 'ETcentCoarse_v1', 'ETcentFine_v1'],
             'routingStudy': Models.ROUTING_MODELS,
             'rangeStudy': ['wideET_v1'],
@@ -531,6 +655,10 @@ def main(argv=None):
             args.use_projection_cache = not args.check and args.command != 'score'
             if args.command == 'prepareCampaign':
                 result.extend(prepare_campaign(simulation, config, args, populations))
+                continue
+            if args.command == 'prepareCells':
+                result.extend(prepare_cells(inputs, config, system, name, args,
+                                           simulation=simulation, populations=populations) for name in names)
                 continue
             for name in names:
                 if args.command == 'score':

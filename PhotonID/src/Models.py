@@ -228,8 +228,8 @@ def execution_plan(config, groups=(), system='AuAu', census=None):
     """Preview exact independent fits and release barriers; never dispatch.
 
     Cell parallelism uses the existing Cartesian cells and frozen population
-    weights/splits. Compact cell inputs and concurrent release assembly still
-    need qualification. Memory targets are measurement goals, never requests.
+    weights/splits. Commands expose compact inputs, independent fitting and
+    complete assembly. Memory targets are measurement goals, never requests.
     A supplied census is hash/recipe/count checked, not an array revalidation.
     """
     from .Training import cells
@@ -278,7 +278,8 @@ def execution_plan(config, groups=(), system='AuAu', census=None):
                     sum(total) == census['populations'][base]['rows'], 'execution census routing coverage differs')
     prepare_id = 'prepare:' + system
     tasks = [dict(id=prepare_id, phase='prepare', depends_on=[], populations=list(populations),
-                  reuse_existing=True, status='CENSUS_CHECKED' if census else 'WAITING_FOR_PREPARATION')]
+                  command=['prepareCampaign', system], reuse_existing=True,
+                  status='CENSUS_CHECKED' if census else 'WAITING_FOR_PREPARATION')]
     for name, r in recipes.items():
         routed = bool(r['axes']); base = name if name in populations else populations[0]
         dependency = prepare_id
@@ -286,37 +287,41 @@ def execution_plan(config, groups=(), system='AuAu', census=None):
             dependency = 'cell-inputs:' + name
             tasks.append(dict(id=dependency, phase='cell_inputs', depends_on=[prepare_id], model=name,
                               population=base, preserve=['row_order', 'global_weights', 'event_split', 'original_row_index'],
-                              scans_per_population=1, qualification='IMPLEMENTATION_AND_EQUIVALENCE_PENDING'))
+                              command=['prepareCells', system, '--model', name],
+                              scans_per_population=1, qualification='SITE_RUNTIME_AND_MEMORY_REQUIRED'))
         fit_ids = []
         for cell in cells(r):
             fit_id = 'fit:' + name + ':' + cell['id']; fit_ids.append(fit_id)
             saved = measured_cells.get((name, cell['id']))
             tasks.append(dict(id=fit_id, phase='fit', depends_on=[dependency], model=name, cell=cell,
+                command=['trainCampaign', system, '--model', name] + (['--cell', cell['id']] if routed else []),
                 recipe_sha256=digest(r), population=base, cpus=r['learner']['n_jobs'],
                 priority=0 if name == 'nominal_retrained_v1' else 1 if name in populations else 2 if routed else 3,
                 rows=saved['rows'] if saved else None,
                 partition_class_counts=saved['partition_class_counts'] if saved else None,
                 memory=dict(request_mb=None, target_mb=4096 if routed else 8192, ceiling_mb=12288,
                             status='MEASUREMENT_REQUIRED', basis='Exact cell input plus measured fit/export/validation peak'),
-                qualification='CELL_EXECUTOR_EQUIVALENCE_REQUIRED' if routed else 'EXISTING_WHOLE_MODEL_PATH',
+                qualification='SITE_RUNTIME_AND_MEMORY_REQUIRED' if routed else 'EXISTING_WHOLE_MODEL_PATH',
                 task_sha256=digest(dict(system=system, recipe=digest(r), cell=cell))))
         tasks.append(dict(id='release:' + name, phase='assemble', depends_on=fit_ids, model=name,
-            expected_cells=list(cells(r)), qualification='ASSEMBLY_EQUIVALENCE_REQUIRED',
+            command=['trainCampaign', system, '--model', name, '--assemble-only'],
+            expected_cells=list(cells(r)), qualification='COMPLETE_VALIDATED_CELL_SET_REQUIRED',
             checks=['exact_recipe_and_population', 'one_receipt_per_cell', 'no_overlap_or_missing_rows',
                     'saved_artifact_hashes', 'canonical_row_order_for_diagnostics', 'working_point_validation']))
     tasks.append(dict(id='collect:' + system, phase='collect', depends_on=['release:' + n for n in names],
+                      command=['collectQA', system],
                       external_dependencies=['accepted_AuAu_nominal_reference'] if system == 'PP' else []))
     fits = [t for t in tasks if t['phase'] == 'fit']
     ids = {t['id'] for t in tasks}
     require(len(ids) == len(tasks) and all(d in ids for t in tasks for d in t['depends_on']),
             'execution plan has duplicate tasks or a missing dependency')
-    return dict(schema='PhotonIDExecutionPlanV1', status='DESIGN_ONLY', submit_ready=False, system=system,
+    return dict(schema='PhotonIDExecutionPlanV1', status='PREVIEW_ONLY', submit_ready=False, system=system,
         campaign=campaign, tasks=tasks, counts=dict(fits=len(fits), routed_fits=sum(bool(t['cell']['bounds']) for t in fits),
             global_fits=sum(not t['cell']['bounds'] for t in fits), releases=len(names),
             cell_input_passes=sum(t['phase'] == 'cell_inputs' for t in tasks)),
         census_sha256=census['census_sha256'] if census else None,
         input_status='CENSUS_HASH_CHECKED_ARRAYS_NOT_REVERIFIED' if census else 'UNMEASURED',
-        supported_execution='One trainCampaign --model invocation per recipe',
+        supported_execution='Whole recipes or prepareCells, trainCampaign --cell, then --assemble-only',
         reuse_existing_preparation=True, independent_release_consumption=True,
         invariants=['sources', 'features', 'row_order', 'weights', 'split', 'seed', 'learner', 'threads', 'working_points'],
         qualification_required=['compact_cell_input_equivalence', 'isolated_cell_fit_equivalence',
@@ -342,10 +347,11 @@ def campaign_summary(plan):
               'Depth and routing variants reuse canonical weights and split. Depth 4 is the nominal model.']
     if execution:
         c = plan['counts']
-        lines += [f"Candidate scheduling: {c['routed_fits']} independent routing-cell fits and "
+        lines += [f"Batch plan: {c['routed_fits']} independent routing-cell fits and "
                   f"{c['global_fits']} full-population fits; {c['releases']} release barriers.",
                   'Small-cell memory target: 4 GiB. Actual requests remain unset until measured.',
-                  'Cell dispatch and assembly await equivalence qualification. This plan cannot submit jobs.']
+                  'Use prepareCells, trainCampaign --cell and --assemble-only for routed models.',
+                  'Choose memory requests from measurements in the selected runtime. This preview starts no jobs.']
     else:
         lines += [f"Supported batch scheduling: {campaign['configurations']} independent recipe invocations."]
     return '\n'.join(lines)
