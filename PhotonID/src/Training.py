@@ -202,11 +202,15 @@ def fit_bdt(population, mask, recipe, output, cell_id, tracker):
                           objective='binary:logistic', eval_metric=['auc', 'logloss'],
                           **({} if fit_callbacks else {'callbacks':[ProgressCallback()]}))
     tracker.write('fit-' + cell_id, 0, training_photons=len(indices), holdout_photons=len(holdout))
-    model.fit(population.x[indices], population.y[indices], sample_weight=population.weights[indices],
-              eval_set=[(population.x[indices], population.y[indices]),
-                        (population.x[holdout], population.y[holdout])],
-              sample_weight_eval_set=[population.weights[indices], population.weights[holdout]], verbose=False,
+    # Reuse the exact training arrays for evaluation. XGBoost recognizes their
+    # identity and reuses its training matrix instead of quantizing a second copy.
+    train_x, train_y, train_weight = population.x[indices], population.y[indices], population.weights[indices]
+    holdout_x, holdout_y, holdout_weight = population.x[holdout], population.y[holdout], population.weights[holdout]
+    model.fit(train_x, train_y, sample_weight=train_weight,
+              eval_set=[(train_x, train_y), (holdout_x, holdout_y)],
+              sample_weight_eval_set=[train_weight, holdout_weight], verbose=False,
               **({'callbacks':[ProgressCallback()]} if fit_callbacks else {}))
+    del train_x, train_y, train_weight, holdout_x, holdout_y, holdout_weight
     booster_path = Path(output).with_suffix('.xgboost.json')
     model.save_model(booster_path)
     history_path = Path(output).with_suffix('.history.json')

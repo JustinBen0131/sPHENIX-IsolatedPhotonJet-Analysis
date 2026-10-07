@@ -110,6 +110,8 @@ For bounded batch jobs, select one recipe per invocation after preparation:
 `--model` can be repeated and preserves the campaign's recipe order. Each selected
 recipe reuses complete preparation and keeps all of its routing cells together;
 it does not change the learner, weights, event split or working points.
+Independent `--model` invocations can run in parallel after preparation. They
+reuse the verified arrays on disk and each fit the complete selected recipe.
 Selected invocations seal their own releases; `collectQA` requires the complete
 campaign before writing its comparison index.
 `--check` checks the selected runtime before opening input groups and previews
