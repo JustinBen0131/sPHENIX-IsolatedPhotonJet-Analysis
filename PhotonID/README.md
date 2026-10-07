@@ -165,7 +165,11 @@ cached rows and catalogue. It does not reopen trees or fit a model. Its `--check
 preview lists the expected source population without verifying cache contents.
 
 `prepareCampaign` requires complete projection coverage and creates the
-two campaign populations. Preparation and fitting then read GPFS products without reading
+two campaign populations and saves `<models>/<system>/preparation_census.json`.
+This report records the prepared array sizes and the actual background/signal
+counts in each model's training, validation and holdout cells. It supports
+resource sizing before batch fitting and performs no fits itself.
+Preparation and fitting then read GPFS products without reading
 or hashing TG trees. A later `trainCampaign` with the same sources, code and
 `--models` root verifies and reuses the populations. Inspection, projection
 and preparation need the eventTree library and ROOT, but not XGBoost.

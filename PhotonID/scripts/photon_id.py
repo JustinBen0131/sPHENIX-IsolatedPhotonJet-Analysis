@@ -159,7 +159,7 @@ def prepare_campaign(simulation, config, args, populations):
     required = {sample for samples in nominal['sources'].values() for sample in samples}
     observed = {str(item['source']['sample']).lower() for item in simulation}
     Models.require(observed == required, 'preparation requires the complete configured training sample population')
-    result = []
+    result = []; prepared = {}
     reference_pin = Inputs.population_identity(simulation, nominal)
     for name in ('nominal_retrained_v1', 'wideET_v1' if args.target == 'AuAu' else 'ppg12_retrained_v1'):
         recipe = Models.recipe(config, args.target, name)
@@ -173,8 +173,67 @@ def prepare_campaign(simulation, config, args, populations):
             record.update(status='PREPARED', population=str(work), rows=population.receipt['rows'],
                           event_split_sha256=population.receipt['event_split_sha256'],
                           cached_photon_visits=population.receipt.get('cached_photon_visits'))
+            prepared[name] = population, work
         result.append(record)
+    if not args.check:
+        preparation_census(simulation, config, args, prepared)
     return result
+
+
+def preparation_census(simulation, config, args, prepared):
+    """Save actual fit-cell sizes from prepared arrays, without fitting a model.
+
+    Count in bounded chunks and reuse identical routing cells across depth
+    variants. The report supports batch sizing and exposes sparse cells before
+    dispatch; the learner still enforces its ordinary class/split requirements.
+    """
+    from types import SimpleNamespace
+    import numpy as np
+    from src import Inputs, Models, Training
+    recipes = [Models.recipe(config, args.target, name) for name in Models.campaign_models(args.target)]
+    total = sum(len(list(Training.cells(recipe))) for recipe in recipes)
+    tracker = Models.WorkProgress(args.models / '.progress' / ('preparation-census-' + args.target.lower() + '.json'),
+        total, 'routing cells', 'preparation-census-' + args.target.lower(), getattr(args, 'progress_identity', None))
+    counts = {}; fit_models = []; populations = {}
+    tracker.write('count-prepared-cells', 0)
+    try:
+        for name, (population, work) in prepared.items():
+            populations[name] = dict(input_recipe_sha256=population.receipt['input_recipe_sha256'],
+                population=str(work), population_receipt_sha256=Models.file_hash(work / 'population.json'),
+                rows=len(population.y), features=population.x.shape[1],
+                array_bytes=sum((work / file).stat().st_size for file in population.receipt['arrays']),
+                partition_counts=population.receipt['partition_counts'])
+        for recipe in recipes:
+            base = recipe['name'] if recipe['name'] in prepared else 'nominal_retrained_v1'
+            population, _ = prepared[base]; cells = []
+            for cell in Training.cells(recipe):
+                key = (base, Models.digest(cell['bounds']))
+                if key not in counts:
+                    tally = np.zeros(6, np.int64)
+                    for begin in range(0, len(population.y), 65536):
+                        end = min(begin + 65536, len(population.y)); section = slice(begin, end)
+                        view = SimpleNamespace(y=population.y[section], et=population.et[section],
+                                               centrality=population.centrality[section])
+                        mask = Training.cell_mask(view, cell)
+                        part = population.partition[section] if population.partition is not None else np.where(
+                            population.train[section], 0, 2)
+                        tally += np.bincount((2 * part + view.y)[mask], minlength=6)
+                        tracker.stage('count-' + base + '-' + cell['id'], end, len(population.y), 'prepared photons')
+                    counts[key] = dict(rows=int(tally.sum()), partition_class_counts=tally.reshape(3, 2).tolist())
+                cells.append(dict(cell, **counts[key]))
+                tracker.write('count-prepared-cells', tracker.processed + 1)
+            fit_models.append(dict(model=recipe['name'], recipe_sha256=Models.digest(recipe),
+                                   population=base, cells=cells))
+        body = dict(schema='PhotonIDPreparationCensusV1', status='PASS_PREPARED_CELL_CENSUS', system=args.target,
+            inputs_identity=Models.digest(Inputs.catalogue_body(simulation, args.target)),
+            source_files=len(simulation), source_events=sum(item['entries'] for item in simulation),
+            populations=populations, models=fit_models, model_fits=0,
+            partition_order=['train', 'validation', 'holdout'], class_order=['background', 'signal'])
+        Models.save_json(args.models / args.target / 'preparation_census.json', dict(body, census_sha256=Models.digest(body)))
+        tracker.write('complete', total, status='PASS')
+    except BaseException as error:
+        tracker.fail(error)
+        raise
 
 
 def campaign_projections(simulation, config, args, *, system):
