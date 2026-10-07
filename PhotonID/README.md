@@ -201,6 +201,9 @@ This writes `validation_diagnosis.json` beside the original unsealed fit, with
 held-out metrics, artifact hashes, the fitted threshold line, bin efficiencies
 and the failing limit. It changes no model, working point or release manifest.
 An existing diagnosis is retained; inspect it before considering another run.
+When the diagnostic was installed after fitting, also supply
+`--fit-code-manifest /path/to/original/CODE_MANIFEST.json`. The original fit
+request and the current diagnostic keep separate code identities.
 
 ### 4. Collect the releases for FinalAnalysis
 

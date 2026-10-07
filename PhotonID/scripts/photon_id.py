@@ -48,6 +48,7 @@ def arguments(argv=None):
     parser.add_argument('--summary', action='store_true', help='planCampaign: compact human-readable preview')
     parser.add_argument('--execution-plan', action='store_true', help='planCampaign: preview independent cells and release barriers; no dispatch')
     parser.add_argument('--census', type=Path, help='planCampaign --execution-plan: saved preparation_census.json for exact cell counts')
+    parser.add_argument('--fit-code-manifest', type=Path, help='diagnoseCampaign: original code manifest when the diagnostic source differs from the fit')
     args = parser.parse_args(argv)
     if args.command == 'reTrainNominal' and args.target not in ('AuAu', 'PP', 'AuAuAndPP'):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
@@ -82,6 +83,8 @@ def arguments(argv=None):
         parser.error('--model applies only to trainCampaign, prepareCells or diagnoseCampaign')
     if args.command == 'diagnoseCampaign' and (len(args.model) != 1 or not args.inputs):
         parser.error('diagnoseCampaign requires one --model and the original --inputs catalogue')
+    if args.fit_code_manifest and args.command != 'diagnoseCampaign':
+        parser.error('--fit-code-manifest applies only to diagnoseCampaign')
     if (args.cell or args.assemble_only) and args.command != 'trainCampaign':
         parser.error('--cell and --assemble-only apply only to trainCampaign')
     if args.cell and (len(args.model) != 1 or not args.inputs or args.assemble_only):
@@ -411,8 +414,25 @@ def diagnose_fit(inputs, config, system, name, args, *, simulation=None, populat
     Models.require(folder.is_dir() and not (folder / 'manifest.json').exists(),
                    'diagnoseCampaign requires an existing unsealed fitted release')
     original = Models.read_json(folder / 'request.json')
-    Models.require(original.get('request_sha256') == request and original.get('recipe') == r,
-                   'retained fit binds another recipe or source population')
+    Models.require(original.get('recipe') == r and original.get('inputs') == simulation and
+                   original.get('environment') == Models.environment(),
+                   'retained fit binds another recipe, source population or runtime')
+    fit_code = original.get('code_sha256')
+    Models.require(isinstance(fit_code, dict) and fit_code, 'retained fit lacks its source hashes')
+    if fit_code != Models.code_identity():
+        source_manifest = getattr(args, 'fit_code_manifest', None)
+        Models.require(source_manifest is not None, 'changed diagnostic source requires the original --fit-code-manifest')
+        manifest = Models.read_json(source_manifest)
+        Models.require(manifest.get('schema') == 'PhotonIDPublicCodeSnapshotV1', 'original fit code manifest is invalid')
+        source_hashes = {Path(row['path']).name: row['sha256'] for row in manifest['members']
+                         if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
+        Models.require(source_hashes == fit_code, 'original fit code manifest differs from the retained request')
+    fit_request = dict(recipe=r, inputs=simulation, code=fit_code, environment=original['environment'])
+    if plan['split_reference'] is not None:
+        Models.require(original.get('split_reference') == plan['split_reference'], 'retained fit split reference differs')
+        fit_request['split_reference'] = plan['split_reference']
+    Models.require(Models.digest(fit_request) == original.get('request_sha256'), 'retained fit request hash is inconsistent')
+    plan.update(diagnostic_request_sha256=request, request_sha256=original['request_sha256'])
     output = folder / 'validation_diagnosis.json'
     with (folder / '.training.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -445,7 +465,9 @@ def diagnose_fit(inputs, config, system, name, args, *, simulation=None, populat
                            'retained fit changed during diagnosis')
             reports.append(dict(cell=cell, artifacts=hashes, validation=metrics, **result))
         report = dict(schema='PhotonIDRetainedFitDiagnosisV1', status='REPORT_WRITTEN',
-                      scientific_acceptance=False, model_fits=0, request_sha256=request,
+                      scientific_acceptance=False, model_fits=0, request_sha256=original['request_sha256'],
+                      diagnostic_request_sha256=request, fit_code_sha256=fit_code,
+                      diagnostic_code_sha256=Models.code_identity(),
                       population_sha256=population.receipt['input_recipe_sha256'], cells=reports)
         Models.save_json(output, report)
         tracker.write('complete', 1, status='REPORT_WRITTEN')
