@@ -128,7 +128,8 @@ def published_population(group, manifest, system):
     return roster, dict(path=str(path.resolve()), sha256=pin)
 
 
-def published_inputs(groups, system, *, progress_path=None, progress_identity=None, verify_payload=True):
+def published_inputs(groups, system, *, progress_path=None, progress_identity=None, verify_payload=True,
+                     require_population=False):
     """Resolve each CURRENT once and verify its exact logical-source roster."""
     require(groups, 'no completed dataset groups configured; use --group or config datasets')
     resolved_groups = []
@@ -145,6 +146,8 @@ def published_inputs(groups, system, *, progress_path=None, progress_identity=No
     try:
         for group, version, manifest in resolved_groups:
             population = None if verify_payload else published_population(group, manifest, system)
+            require(not require_population or population is not None,
+                    'published producer roster required for metadata-only inspection')
             group_path = str(Path(group).resolve())
             for item in manifest['files']:
                 relative = Path(item['relative_path'])

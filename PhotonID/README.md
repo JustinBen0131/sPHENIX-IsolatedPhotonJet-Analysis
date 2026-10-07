@@ -125,7 +125,9 @@ the reader also accepts existing uncompressed `inputs.json` catalogues.
 When the producer's saved `population.json` or `populations/<sample>.sources.tsv`
 is available, inspection checks its hash against the publication, matches every
 logical source and the event total, and uses its identities and counts without
-opening tree headers. Older publications use tree metadata. Projection still
+opening tree headers. Add `--require-roster` to require this metadata-only path;
+missing or incompatible producer rosters then stop before tree access. Without
+that option, older publications use tree metadata. Projection still
 checks each tree's payload hash, source identity, collision system, contiguous
 event coverage and exact entry count before accepting its cached rows.
 

@@ -34,6 +34,7 @@ def arguments(argv=None):
     parser.add_argument('--no-score', action='store_true', help='finish model release without publishing dataset augmentation')
     parser.add_argument('--progress-context', type=Path, help='YAML containing task_id, workstream_id, campaign_tag and executor')
     parser.add_argument('--inputs', type=Path, help='sealed training-input YAML from inspectCampaign')
+    parser.add_argument('--require-roster', action='store_true', help='inspectCampaign must use a saved producer roster; never fall back to tree headers')
     parser.add_argument('--projection-root', type=Path, help='shared source-row cache; defaults to <models>/.projections')
     parser.add_argument('--shard-index', type=int, help='one projectCampaign shard from its --check plan')
     parser.add_argument('--max-events', type=int, default=100000, help='maximum events per projection shard (at most 100000)')
@@ -71,6 +72,8 @@ def arguments(argv=None):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
     if args.model and args.command != 'trainCampaign':
         parser.error('--model applies only to trainCampaign')
+    if args.require_roster and args.command != 'inspectCampaign':
+        parser.error('--require-roster applies only to inspectCampaign')
     return args
 
 
@@ -372,6 +375,7 @@ def main(argv=None):
             # Source hashes are checked by the bounded projection invocation.
             # Subsequent training verifies the GPFS cache, not the TG payload.
             if args.command != 'score': inspection['verify_payload'] = False
+            if args.require_roster: inspection['require_population'] = True
             inputs = Inputs.load_catalogue(args.inputs, system) if args.inputs else Inputs.published_inputs(groups, system, **inspection)
             simulation = None; populations = {}
             if args.command != 'score':
