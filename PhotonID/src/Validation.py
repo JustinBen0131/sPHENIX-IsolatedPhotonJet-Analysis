@@ -34,7 +34,7 @@ def metrics(y, score, weight):
                 brier=float(np.average((score - y) ** 2, weights=weight)))
 
 
-def native_export(population, mask, reference, native, recipe):
+def native_export(population, mask, reference, native, recipe, *, progress=None):
     """Check ROOT conversion against XGBoost on every applicable photon row.
 
     Float32 summation/sigmoid order can differ between the two libraries; the
@@ -43,6 +43,7 @@ def native_export(population, mask, reference, native, recipe):
     calibration and downstream decisions, avoiding mixed evaluator thresholds.
     """
     indices = np.flatnonzero(mask); maximum = 0.
+    if progress: progress('native-export-validation', 0, len(indices), 'photons')
     tolerance = float(recipe['validation'].get('native_score_atol', 1e-6))
     require(0. < tolerance <= 1e-6, 'native score tolerance must be positive and at most 1e-6')
     for begin in range(0, len(indices), 65536):
@@ -54,15 +55,17 @@ def native_export(population, mask, reference, native, recipe):
                 ((original >= 0.) & (original <= 1.) & (exported >= 0.) & (exported <= 1.)).all(),
                 'native export has invalid scores')
         maximum = max(maximum, float(np.max(np.abs(original - exported))) if len(part) else 0.)
+        if progress: progress('native-export-validation', begin + len(part), len(indices), 'photons')
     require(len(indices) > 0 and maximum <= tolerance, 'native ROOT export differs from XGBoost')
     return dict(status='PASS', rows=len(indices), max_abs_error=maximum, absolute_tolerance=tolerance,
                 feature_dtype='float32', calibration_evaluator='ROOT_RBDT')
 
 
-def check(population, mask, trainer, saved, recipe):
+def check(population, mask, trainer, saved, recipe, *, progress=None):
     """Compare every applicable saved score; report train and held-out metrics."""
     indices = np.flatnonzero(mask)
     score = np.empty(len(indices), np.float64); maximum = 0.
+    if progress: progress('saved-score-validation', 0, len(indices), 'photons')
     for begin in range(0, len(indices), 65536):
         part = indices[begin:begin + 65536]
         original = np.asarray(trainer(population.x[part]), np.float64)
@@ -71,14 +74,17 @@ def check(population, mask, trainer, saved, recipe):
         require(np.isfinite(original).all() and np.isfinite(reread).all(), 'saved model has nonfinite scores')
         maximum = max(maximum, float(np.max(np.abs(original - reread))) if len(part) else 0.)
         score[begin:begin + len(part)] = reread
+        if progress: progress('saved-score-validation', begin + len(part), len(indices), 'photons')
     require(maximum <= recipe['validation']['saved_score_atol'], 'saved model differs from trainer')
     train = population.train[indices]; holdout = population.holdout[indices]
     reports = {}
     for name, selected in [('train', train), ('holdout', holdout)]:
+        if progress: progress('metrics-' + name, 0, 1, 'metric products')
         y, weight = population.y[indices[selected]], population.weights[indices[selected]]
         minimum = recipe['validation']['min_rows_per_class_per_split']
         require(all((y == k).sum() >= minimum for k in (0, 1)), name + ' lacks required class population')
         reports[name] = metrics(y, score[selected], weight)
+        if progress: progress('metrics-' + name, 1, 1, 'metric products')
     if population.partition is not None and np.any(population.partition[indices] == 1):
         selected = population.partition[indices] == 1
         reports['validation'] = metrics(population.y[indices[selected]], score[selected], population.weights[indices[selected]])

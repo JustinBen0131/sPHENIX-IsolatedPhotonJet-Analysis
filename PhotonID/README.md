@@ -96,6 +96,20 @@ an existing physical data-staging directory on the worker; use that worker's
 
 Training consumes verified preparation, fits models, validates the saved artifacts,
 derives working points and saves diagnostics. Matching completed work is reused.
+For bounded batch jobs, select one recipe per invocation after preparation:
+
+```bash
+./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model nominal_retrained_v1
+./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model wideET_v1
+# Run the remaining recipes listed by planCampaign, then collect their saved QA.
+./PhotonID/photon_id.sh collectQA AuAu --models /path/to/analysis/models
+```
+
+`--model` can be repeated and preserves the campaign's recipe order. Each selected
+recipe reuses complete preparation and keeps all of its routing cells together;
+it does not change the learner, weights, event split or working points.
+Selected invocations seal their own releases; `collectQA` requires the complete
+campaign before writing its comparison index.
 `--check` checks the selected runtime before opening input groups and previews
 source and recipe bindings. Training commands leave the tree groups unchanged.
 The separate `score MODEL SYSTEM` command is available when a published tree
@@ -207,6 +221,9 @@ the event split, weighting or artifact sealing phases.
 
 For a controlled job, supply `--progress-context job.yaml` containing
 `task_id`, `workstream_id`, `campaign_tag` and `executor` as nonempty strings.
+Fitting reports completed boosting rounds for each model cell, with the same
+job identity carried through native-score checks, calibration and saved QA.
+Photon checks and calibration bins have separate phase counters.
 These labels affect telemetry only. Keep preparation, models and logs on writable
 analysis storage; input trees are read without modification. Work totals and
 measured runtime must fit the execution environment before a full campaign.

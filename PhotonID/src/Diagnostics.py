@@ -252,7 +252,7 @@ def original_comparison(root, folder, population, recipe, scores, tracker):
                 retrained_metrics=Validation.metrics(population.y[rows], scores[rows], population.weights[rows]))
 
 
-def save(folder, population, recipe, scores, cells, config, request_sha256):
+def save(folder, population, recipe, scores, cells, config, request_sha256, *, progress_identity=None):
     """Seal ROOT/JSON QA from the full population and already validated scores.
 
     Existing matching products are hash-verified and reused. An interrupted
@@ -298,7 +298,7 @@ def save(folder, population, recipe, scores, cells, config, request_sha256):
         Models.require(Models.file_hash(path) == saved['root_sha256'], 'saved model QA ROOT artifact changed')
         return saved
     Models.require(not path.exists(), 'interrupted QA ROOT product retained: ' + str(path))
-    tracker = Models.WorkProgress(folder / 'progress.json', 1, 'QA products', request_sha256)
+    tracker = Models.WorkProgress(folder / 'progress.json', 1, 'QA products', request_sha256, progress_identity)
     tracker.write('qa-feature-moments', input_photons=n)
     gains = gain(folder, recipe, cells)
     features = feature_table(population, recipe, gains, tracker=tracker)

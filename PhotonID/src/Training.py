@@ -15,7 +15,7 @@ import time
 
 import numpy as np
 
-from .Models import progress, require, save_json
+from .Models import WorkProgress, require, save_json
 
 
 def runtime_status(algorithm):
@@ -106,7 +106,7 @@ def preprocessing(population, indices, clip):
     return dict(mean=mean.tolist(), scale=scale.tolist(), clip=float(clip))
 
 
-def fit_numpy(population, mask, recipe, output, cell_id):
+def fit_numpy(population, mask, recipe, output, cell_id, tracker):
     """Fit one MLP/logistic cell for fixed epochs and save its portable artifact.
 
     Only mask AND population.train enters fitting or scaling. The outer
@@ -130,10 +130,8 @@ def fit_numpy(population, mask, recipe, output, cell_id):
     squares = [{k: np.zeros_like(layer[k]) for k in ('w', 'b')} for layer in layers]
     mean_weight = float(np.mean(population.weights[indices])); step = 0
     epochs = int(settings['epochs'])
-    batches = (len(indices) + int(settings['batch_size']) - 1) // int(settings['batch_size'])
     started = time.monotonic(); last_update = started
-    progress(Path(output).parent / 'progress.json', 'fit-' + cell_id, 0, epochs * batches,
-             learner=recipe['algorithm'], training_photons=len(indices), latest_error=None)
+    tracker.write('fit-' + cell_id, 0, learner=recipe['algorithm'], training_photons=len(indices))
     for epoch in range(epochs):
         rng.shuffle(indices)
         for start in range(0, len(indices), int(settings['batch_size'])):
@@ -167,11 +165,7 @@ def fit_numpy(population, mask, recipe, output, cell_id):
                     'nonfinite learner parameters')
             now = time.monotonic()
             if now - last_update >= 30. or start + len(idx) == len(indices):
-                elapsed = now - started; rate = step / elapsed if elapsed else 0.
-                progress(Path(output).parent / 'progress.json', 'fit-' + cell_id, step, epochs * batches,
-                         learner=recipe['algorithm'], training_photons=len(indices), epoch=epoch + 1,
-                         unit='optimizer batches', elapsed_seconds=elapsed, rate=rate,
-                         eta_seconds=(epochs * batches - step) / rate if rate else None, latest_error=None)
+                tracker.write('fit-' + cell_id, step, epoch=epoch + 1)
                 last_update = now
     artifact = dict(schema='PhotonIDNumpyModelV1', algorithm=recipe['algorithm'],
                     features=recipe['features'], preprocessing=transform,
@@ -181,7 +175,7 @@ def fit_numpy(population, mask, recipe, output, cell_id):
     return artifact, lambda x: numpy_predict(artifact, x)
 
 
-def fit_bdt(population, mask, recipe, output, cell_id):
+def fit_bdt(population, mask, recipe, output, cell_id, tracker):
     """Fit on training rows, export ROOT RBDT and check all applicable predictions.
 
     Only the exported native evaluator supplies downstream scores and working
@@ -197,20 +191,17 @@ def fit_bdt(population, mask, recipe, output, cell_id):
     if recipe['training'].get('split_method') == 'row_stratified':
         require(population.split_rank is not None, 'historical training row order is missing')
         indices = indices[np.argsort(population.split_rank[indices], kind='stable')]
-    started = time.monotonic(); total = recipe['learner']['n_estimators']
+    total = recipe['learner']['n_estimators']
     class ProgressCallback(TrainingCallback):
         def after_iteration(self, model, epoch, evals_log):
-            elapsed = time.monotonic() - started; rate = (epoch + 1) / elapsed if elapsed else 0.
-            progress(Path(output).parent / 'progress.json', 'fit-' + cell_id, epoch + 1, total,
-                     unit='boosting rounds', elapsed_seconds=elapsed, rate=rate,
-                     eta_seconds=(total - epoch - 1) / rate if rate else None, latest_error=None)
+            tracker.write('fit-' + cell_id, epoch + 1)
             return False
     import inspect
     fit_callbacks = 'callbacks' in inspect.signature(XGBClassifier.fit).parameters
     model = XGBClassifier(**recipe['learner'], random_state=recipe['training']['seed'],
                           objective='binary:logistic', eval_metric=['auc', 'logloss'],
                           **({} if fit_callbacks else {'callbacks':[ProgressCallback()]}))
-    progress(Path(output).parent / 'progress.json', 'fit-' + cell_id, 0, recipe['learner']['n_estimators'])
+    tracker.write('fit-' + cell_id, 0, training_photons=len(indices), holdout_photons=len(holdout))
     model.fit(population.x[indices], population.y[indices], sample_weight=population.weights[indices],
               eval_set=[(population.x[indices], population.y[indices]),
                         (population.x[holdout], population.y[holdout])],
@@ -227,20 +218,20 @@ def fit_bdt(population, mask, recipe, output, cell_id):
     require(hasattr(ROOT.TMVA.Experimental, 'SaveXGBoost'), 'ROOT does not provide the XGBoost-to-RBDT exporter')
     native_path = Path(output).with_suffix('.tmva.root')
     require(not native_path.exists(), 'native model artifact already exists')
+    tracker.write('export-' + cell_id, total)
     export_native_bdt(model, native_path, len(recipe['features']))
     specification = dict(type='ROOT_RBDT', file=native_path.name, key='myBDT', inputs=len(recipe['features']))
     native = native_evaluator(native_path, specification)
     from .Validation import native_export
     reference = lambda x: model.predict_proba(x)[:, 1].astype(np.float64)
-    agreement = native_export(population, mask, reference, native, recipe)
+    agreement = native_export(population, mask, reference, native, recipe, progress=tracker.stage)
     agreement.update(ROOT=ROOT.gROOT.GetVersion())
     artifact = dict(schema='PhotonIDXGBoostModelV1', algorithm='bdt', features=recipe['features'],
                     booster_file=booster_path.name, native_evaluator=specification,
                     training_history=history_path.name,
                     native_export_validation=agreement)
     save_json(output, artifact)
-    progress(Path(output).parent / 'progress.json', 'fit-' + cell_id,
-             recipe['learner']['n_estimators'], recipe['learner']['n_estimators'])
+    tracker.write('fit-complete-' + cell_id, total)
     return artifact, native
 
 
@@ -265,16 +256,23 @@ def export_native_bdt(model, path, inputs):
         booster.feature_names = original_names
 
 
-def fit(population, mask, recipe, output, cell_id):
+def fit(population, mask, recipe, output, cell_id, *, progress_identity=None):
     """Create one cell artifact; retain failure progress instead of overwriting a fit."""
     require(not Path(output).exists(), 'model artifact already exists; validate/reuse its saved release')
+    bdt = recipe['algorithm'] == 'bdt'
+    if bdt:
+        total = recipe['learner']['n_estimators']
+    else:
+        rows = int(np.count_nonzero(mask & population.train))
+        batch_size = int(recipe['learner']['batch_size'])
+        total = recipe['learner']['epochs'] * ((rows + batch_size - 1) // batch_size)
+    tracker = WorkProgress(Path(output).parent / 'progress.json', total,
+                           'boosting rounds' if bdt else 'optimizer batches',
+                           recipe['name'] + '/' + cell_id, progress_identity)
     try:
-        return (fit_bdt if recipe['algorithm'] == 'bdt' else fit_numpy)(population, mask, recipe, output, cell_id)
+        return (fit_bdt if bdt else fit_numpy)(population, mask, recipe, output, cell_id, tracker)
     except Exception as exc:
-        from .Models import read_json
-        path = Path(output).parent / 'progress.json'
-        previous = read_json(path) if path.exists() else {'processed':0,'total':0}
-        progress(path, 'blocked-' + cell_id, previous['processed'], previous['total'], latest_error=str(exc))
+        tracker.fail(exc)
         raise
 
 

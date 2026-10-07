@@ -40,6 +40,7 @@ def arguments(argv=None):
     parser.add_argument('--cache-layout', choices=('packed', 'source'), default='packed', help='projection storage; packed is one row bundle per shard')
     parser.add_argument('--scratch-root', type=Path, help='existing physical data-staging directory; otherwise use _CONDOR_SCRATCH_DIR')
     parser.add_argument('--auau-reference', type=Path, help='sealed canonical AuAu release for the pp/AuAu heldout comparison')
+    parser.add_argument('--model', action='append', default=[], help='one trainCampaign recipe; repeat to select several, then run collectQA')
     args = parser.parse_args(argv)
     if args.command == 'reTrainNominal' and args.target not in ('AuAu', 'PP', 'AuAuAndPP'):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
@@ -68,6 +69,8 @@ def arguments(argv=None):
         parser.error('projection event bound must be 1..100000 and shard index must be nonnegative')
     if args.auau_reference and (args.command not in ('trainCampaign', 'collectQA') or args.target != 'PP'):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
+    if args.model and args.command != 'trainCampaign':
+        parser.error('--model applies only to trainCampaign')
     return args
 
 
@@ -235,11 +238,15 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         qa_scores = np.full(len(calibration.y), np.nan, np.float64)
         qa_coverage = np.zeros(len(calibration.y), np.uint8)
         cells = []; all_validation = {}; all_wp = {}
+        identity = getattr(args, 'progress_identity', None)
         for cell in Training.cells(r):
             model_path = folder / 'artifacts' / (cell['id'] + '.json')
             receipt_path = folder / 'artifacts' / (cell['id'] + '.validation.json')
             model_path.parent.mkdir(parents=True, exist_ok=True)
             mask = Training.cell_mask(population, cell)
+            tracker = Models.WorkProgress(folder / 'artifacts' / 'progress.json', 1,
+                                          'validated cells', r['name'] + '/' + cell['id'] + '/validation', identity)
+            tracker.write('validate-cell', 0)
             minimum = r['validation']['min_rows_per_class_per_split']
             Models.require(all(int((mask & (population.train == split) & (population.y == k)).sum()) >= minimum
                                for split in (True, False) for k in (0, 1)),
@@ -251,18 +258,18 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                     Models.require(Models.file_hash(folder / relative) == h, 'completed cell artifact changed')
                 calibration_mask = Training.cell_mask(calibration, cell)
                 score, validation = Validation.check(calibration, calibration_mask, Training.evaluator(model_path),
-                                                     Training.evaluator(model_path), r)
-                wp = WorkingPoints.derive(calibration, calibration_mask, score, cell, r)
+                                                     Training.evaluator(model_path), r, progress=tracker.stage)
+                wp = WorkingPoints.derive(calibration, calibration_mask, score, cell, r, progress=tracker.stage)
                 artifact = Models.read_json(model_path)
                 if 'native_export_validation' in artifact:
                     validation['native_export'] = artifact['native_export_validation']
                 Models.require(validation == receipt['validation'] and wp == receipt['working_points'], 'cell revalidation differs')
             else:
                 Models.require(not model_path.exists(), 'interrupted fit lacks a receipt; retain it and use a new release version')
-                artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'])
+                artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'], progress_identity=identity)
                 calibration_mask = Training.cell_mask(calibration, cell)
-                score, validation = Validation.check(calibration, calibration_mask, trainer, Training.evaluator(model_path), r)
-                wp = WorkingPoints.derive(calibration, calibration_mask, score, cell, r)
+                score, validation = Validation.check(calibration, calibration_mask, trainer, Training.evaluator(model_path), r, progress=tracker.stage)
+                wp = WorkingPoints.derive(calibration, calibration_mask, score, cell, r, progress=tracker.stage)
                 if 'native_export_validation' in artifact:
                     validation['native_export'] = artifact['native_export_validation']
                 files = [model_path]
@@ -277,8 +284,9 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
             Models.require(not np.any(qa_coverage[calibration_mask]), 'QA model cells overlap')
             qa_scores[calibration_mask] = score
             qa_coverage[calibration_mask] += 1
+            tracker.write('cell-validated', 1)
         Models.require(np.all(qa_coverage == 1), 'QA model cells leave uncovered population rows')
-        Diagnostics.save(folder, calibration, r, qa_scores, cells, config, request)
+        Diagnostics.save(folder, calibration, r, qa_scores, cells, config, request, progress_identity=identity)
         Models.save_json(folder / 'working_points.json', dict(schema='PhotonIDWorkingPointsV1',
                          calibration_domain=r['domain'], cells=all_wp))
         Models.save_json(folder / 'validation.json', dict(schema='PhotonIDValidationV1', status='PASS', cells=all_validation,
@@ -311,6 +319,12 @@ def main(argv=None):
     """Dispatch one model request and score complete groups after release validation."""
     args = arguments(argv)
     from src import Models
+    campaign_names = Models.campaign_models(args.target) if args.command == 'trainCampaign' else []
+    if args.model:
+        Models.require(len(args.model) == len(set(args.model)), 'duplicate --model recipe')
+        Models.require(set(args.model) <= set(campaign_names),
+                       'unknown campaign recipe: ' + ', '.join(sorted(set(args.model) - set(campaign_names))))
+        campaign_names = [name for name in campaign_names if name in args.model]
     config = Models.load_config(args.config)
     args.progress_identity = Models.progress_identity(Models.yaml.safe_load(args.progress_context.read_text())) \
         if args.progress_context else None
@@ -331,7 +345,7 @@ def main(argv=None):
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
             args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'prepareCampaign', 'trainCampaign') else args.system]
         names = {'reTrainNominal': ['nominal_retrained_v1'], 'prepareCampaign': ['nominal_retrained_v1', 'wideET_v1'],
-                 'inspectCampaign': [], 'projectCampaign': [], 'trainCampaign': Models.campaign_models(args.target) if args.command == 'trainCampaign' else [], 'trainNew': {
+                 'inspectCampaign': [], 'projectCampaign': [], 'trainCampaign': campaign_names, 'trainNew': {
             'centAndETdepModels': ['centCoarse_v1', 'centFine_v1', 'ET_v1', 'ETcentCoarse_v1', 'ETcentFine_v1'],
             'routingStudy': Models.ROUTING_MODELS,
             'rangeStudy': ['wideET_v1'],
@@ -418,7 +432,9 @@ def main(argv=None):
                         current = Inputs.published_inputs(groups, system)
                         record['augmentation'] = Scoring.score_groups(current, record['release'], code_root=args.code_root)
                 result.append(record)
-            if args.command == 'trainCampaign' and not args.check:
+            # Individually scheduled recipes leave collection to collectQA,
+            # after every campaign release has been validated and sealed.
+            if args.command == 'trainCampaign' and not args.check and not args.model:
                 collection = Diagnostics.collection(args.models, [record['release'] for record in result], system=system,
                                                     auau_reference=args.auau_reference)
                 for record in result: record['model_qa_collection'] = str(collection)

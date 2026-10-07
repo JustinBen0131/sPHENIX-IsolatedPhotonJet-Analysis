@@ -24,7 +24,7 @@ def weighted_quantile(values, weights, q):
     return float(values[min(index, len(values) - 1)])
 
 
-def derive(population, mask, score, cell, recipe):
+def derive(population, mask, score, cell, recipe, *, progress=None):
     """Calibrate WP70/80/90 on every eligible signal row in this cell.
 
     Train and holdout both enter calibration. Return the centrality/ET line
@@ -46,7 +46,8 @@ def derive(population, mask, score, cell, recipe):
     working_points = {}
     for efficiency in config['efficiencies']:
         rows = []
-        for low, high in zip(edges[:-1], edges[1:]):
+        for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+            if progress: progress('working-point-' + str(efficiency), index, len(edges) - 1, 'calibration bins')
             selected = signal & (values >= low) & (values < high)
             require(int(selected.sum()) >= 20, 'working-point calibration bin has too few signal photons')
             threshold = weighted_quantile(score[selected], weights[selected], 1. - efficiency)
@@ -55,6 +56,7 @@ def derive(population, mask, score, cell, recipe):
                     'strict weighted-quantile efficiency gate failed; score ties cannot be split')
             rows.append(dict(low=low, high=high, center=(low + high) / 2.,
                              threshold=threshold, signal=int(selected.sum()), exact_efficiency=exact_efficiency))
+        if progress: progress('working-point-' + str(efficiency), len(edges) - 1, len(edges) - 1, 'calibration bins')
         centers = np.array([r['center'] for r in rows]); thresholds = np.array([r['threshold'] for r in rows])
         if len(rows) == 1:
             intercept, slope = float(thresholds[0]), 0.
