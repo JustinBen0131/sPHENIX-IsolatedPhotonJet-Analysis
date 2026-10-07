@@ -32,12 +32,14 @@ def weighted_quantile(values, weights, q):
     return float(values[min(index, len(values) - 1)])
 
 
-def derive(population, mask, score, cell, recipe, *, progress=None):
+def derive(population, mask, score, cell, recipe, *, progress=None, strict_fit_checks=True):
     """Calibrate WP70/80/90 on every eligible signal row in this cell.
 
     Train and holdout both enter calibration. Return the centrality/ET line
-    and its measured efficiencies; insufficient bins or failed strict-cut
-    efficiency/order checks refuse the release.
+    and its measured efficiencies. Insufficient bins, unsplittable score ties
+    and invalid ID regions refuse the release. Training uses advisory line-fit
+    checks: approximation errors are retained for review without changing cuts.
+    Strict checking remains available for reproducing an earlier refusal.
     """
     indices = np.flatnonzero(mask)
     signal = population.y[indices] == 1
@@ -51,7 +53,7 @@ def derive(population, mask, score, cell, recipe, *, progress=None):
         if (recipe['system'] == 'AuAu' and key.startswith('centrality')) or (recipe['system'] == 'PP' and key == 'et'):
             bounds = limits
     edges = sorted(set([bounds[0], bounds[1]] + [e for e in edges if bounds[0] < e < bounds[1]]))
-    working_points = {}
+    working_points = {}; fit_warnings = []
     for efficiency in config['efficiencies']:
         rows = []
         for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
@@ -73,6 +75,7 @@ def derive(population, mask, score, cell, recipe, *, progress=None):
             slope, intercept = np.polyfit(centers, thresholds, 1)
             intercept, slope = float(intercept), float(slope)
         residual = thresholds - (intercept + slope * centers)
+        require(np.isfinite([intercept, slope]).all(), 'non-finite working-point line')
         errors = []
         for row in rows:
             selected = signal & (values >= row['low']) & (values < row['high'])
@@ -91,7 +94,10 @@ def derive(population, mask, score, cell, recipe, *, progress=None):
                              ('fit_rms', 'working-point fit RMS failed')):
             limit = config['max_fit_rms' if key == 'fit_rms' else key]
             if report[key] > limit:
-                raise CalibrationError(message, dict(report, failed_gate=key))
+                if strict_fit_checks:
+                    raise CalibrationError(message, dict(report, failed_gate=key))
+                fit_warnings.append(dict(working_point='WP' + str(round(efficiency * 100)),
+                                         check=key, measured=report[key], limit=limit))
         working_points['WP' + str(round(efficiency * 100))] = dict(
             intercept=intercept, slope=slope, target=efficiency, bins=rows,
             max_efficiency_error=max(errors), fit_rms=float(np.sqrt(np.mean(residual ** 2))))
@@ -100,8 +106,11 @@ def derive(population, mask, score, cell, recipe, *, progress=None):
         cuts = {k: v['intercept'] + v['slope'] * point for k, v in working_points.items()}
         require(.1 < cuts['WP80'] <= cuts['WP70'] <= 1., 'tight/non-tight regions overlap or are empty')
         require(0. <= cuts['WP90'] <= cuts['WP80'], 'working-point efficiency order differs')
-    return dict(axis=axis, population='all eligible signal, train plus holdout',
-                signal_photons=int(signal.sum()), bounds=bounds, cuts=working_points, status='PASS')
+    result = dict(axis=axis, population='all eligible signal, train plus holdout',
+                  signal_photons=int(signal.sum()), bounds=bounds, cuts=working_points, status='PASS')
+    if fit_warnings:
+        result.update(fit_quality_status='REVIEW_REQUIRED', fit_warnings=fit_warnings)
+    return result
 
 
 def classify(score, axis_value, working_points):

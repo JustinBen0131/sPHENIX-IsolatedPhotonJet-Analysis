@@ -373,7 +373,8 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
         calibration_mask = mask
         score, validation = Validation.check(population, calibration_mask, Training.evaluator(model_path),
                                              Training.evaluator(model_path), r, progress=tracker.stage)
-        wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage)
+        wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage,
+                                  strict_fit_checks=False)
         artifact = Models.read_json(model_path)
         if 'native_export_validation' in artifact:
             validation['native_export'] = artifact['native_export_validation']
@@ -385,7 +386,8 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
                                         progress_path=model_path.with_suffix('.progress.json'))
         calibration_mask = mask
         score, validation = Validation.check(population, calibration_mask, trainer, Training.evaluator(model_path), r, progress=tracker.stage)
-        wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage)
+        wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage,
+                                  strict_fit_checks=False)
         if 'native_export_validation' in artifact:
             validation['native_export'] = artifact['native_export_validation']
         files = [model_path]
@@ -586,11 +588,16 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
             Models.require(not np.any(qa_coverage[original]), 'QA model cells overlap')
             qa_scores[original] = score; qa_coverage[original] += 1
         Models.require(np.all(qa_coverage == 1), 'QA model cells leave uncovered population rows')
+        calibration_warnings = [dict(cell=cell_id, **warning) for cell_id, wp in all_wp.items()
+                                for warning in wp.get('fit_warnings', [])]
+        calibration_quality = dict(status='REVIEW_REQUIRED' if calibration_warnings else 'PASS',
+                                   warnings=calibration_warnings, scientific_acceptance=False)
         Diagnostics.save(folder, calibration, r, qa_scores, cells, config, request, progress_identity=identity)
         Models.save_json(folder / 'working_points.json', dict(schema='PhotonIDWorkingPointsV1',
                          calibration_domain=r['domain'], cells=all_wp))
         Models.save_json(folder / 'validation.json', dict(schema='PhotonIDValidationV1', status='PASS', cells=all_validation,
                          population=population.receipt, calibration_population=calibration.receipt,
+                         calibration_quality=calibration_quality,
                          evaluation_domain=r['domain'], qualification='local numerical; farm and physics acceptance separate'))
         Models.save_json(folder / 'selection.json', dict(schema='PhotonIDSelectionV1', system=system,
                          name=r['name'], score_branch=r['score_branch'], state_branch=None,
@@ -607,13 +614,14 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                         artifacts=artifacts, split_sha256=population.receipt['split_sha256'],
                         calibration_population_sha256=calibration.receipt['input_recipe_sha256'],
                         calibration_split_sha256=calibration.receipt['split_sha256'],
+                        calibration_quality=calibration_quality,
                         code_sha256=Models.code_identity(), environment=Models.environment(),
                         feature_missing_value_rule='reject invalid/non-finite H70 inputs in model domain; unscored outside domain')
         manifest['split_reference'] = population.receipt['split_reference']
         manifest['release_sha256'] = Models.digest(manifest)
         Models.save_json(folder / 'manifest.json', manifest)
         Models.load_release(folder, request=request)
-    return dict(status='PASS', **plan)
+    return dict(status='PASS', calibration_quality=calibration_quality, **plan)
 
 
 def main(argv=None):

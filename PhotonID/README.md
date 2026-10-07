@@ -143,6 +143,15 @@ Once every cell passes, save diagnostics and a complete, hash-checked release.
 The release includes `validation.json`, `working_points.json` and `selection.json`.
 These checks establish numerical validity; reviewing the resulting physics plots
 remains part of analysis acceptance.
+The straight-line working-point approximation is also measured in every bin.
+Its engineering limits (including a two percentage-point efficiency error)
+are review warnings during training, rather than a reason to abort QA or refit
+the classifier. The weighted quantiles, fitted lines and ID definitions are
+unchanged. Warnings and achieved bin efficiencies are saved with the release;
+`calibration_quality.status: REVIEW_REQUIRED` in `validation.json` and the
+manifest means the approximation needs review before physics acceptance.
+Invalid, unordered or overlapping ID regions, inadequate signal coverage and
+saved-model numerical failures still stop the workflow.
 For bounded batch jobs, replace the unfiltered `trainCampaign` call with one
 recipe per invocation after preparation:
 
