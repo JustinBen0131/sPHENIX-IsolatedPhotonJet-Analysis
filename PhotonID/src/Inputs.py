@@ -27,6 +27,12 @@ from .Models import SYSTEMS, WorkProgress, digest, file_hash, read_json, require
 
 _EVENTTREE = None
 
+# Bound SQLite's page cache and group small sources into durable transactions.
+# Row order, uniqueness checks and split assignment are independent of these
+# I/O settings; an incomplete population is never reused.
+PREPARATION_CACHE_KIB = 64 * 1024
+PREPARATION_COMMIT_ROWS = 65536
+
 
 def eventtree():
     """TreeProduction's installed eventTree library, bound through PyROOT.
@@ -881,6 +887,7 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
     total = 0; counts = [0, 0]
     try:
         db = sqlite3.connect(work / 'events.sqlite', uri=True)
+        db.execute(f'PRAGMA cache_size=-{PREPARATION_CACHE_KIB}')
         db.set_progress_handler(lambda: (tracker.beat(), 0)[1], 100000)
         db.execute('CREATE TABLE events(source TEXT,entry INTEGER,event_key TEXT NOT NULL UNIQUE,hash TEXT,holdout INTEGER DEFAULT 0,PRIMARY KEY(source,entry))')
         db.execute('CREATE TABLE photons(source TEXT,entry INTEGER,photon INTEGER,PRIMARY KEY(source,entry,photon))')
@@ -889,6 +896,7 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                 return cached_rows(item, recipe, projections[item['logical_id']], tracker, phase)
             require(file_hash(item['path']) == item['sha256'], 'training input changed')
             return tracked_rows(item, recipe, tracker, phase)
+        committed_rows = 0
         for item in counted_inputs:
             for x, y, et, cent, entries, photons, keys in rows(item, 'prepare-count'):
                 for entry, photon, key in zip(entries, photons, keys):
@@ -906,7 +914,10 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                     db.execute('INSERT INTO photons VALUES(?,?,?)', (item['logical_id'], int(entry), int(photon)))
                 total += len(y)
                 for klass in (0, 1): counts[klass] += int((y == klass).sum())
-            db.commit()
+            if total - committed_rows >= PREPARATION_COMMIT_ROWS:
+                db.commit()
+                committed_rows = total
+        db.commit()
         require(total > 0 and min(counts) >= 20, 'nominal training population is empty or missing a class')
         require(tracker.extra['eligible_photons'] == total, 'eligible photon telemetry differs from counted rows')
         tracker.write('prepare-event-split', phase_unit='eligible events')
