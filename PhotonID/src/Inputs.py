@@ -100,7 +100,10 @@ def published_population(group, manifest, system):
                 source[key] = int(source[key])
     else:
         population = read_json(path)
-        require(population.get('schema_version') == 2 and isinstance(population.get('sources'), list),
+        # TreeProduction schema 1 keeps input lists in separate files; schema 2
+        # embeds them. Both retain the same source identities and event counts.
+        require(type(population.get('schema_version')) is int and
+                population['schema_version'] in (1, 2) and isinstance(population.get('sources'), list),
                 'unsupported saved producer population')
         sources = population['sources']
     sources = [source for source in sources if source.get('sample') == group.name]
