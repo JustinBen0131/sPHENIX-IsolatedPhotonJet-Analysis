@@ -10,6 +10,7 @@ reproduce the existing class balance and spline ET/eta flattening.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import csv
 import fcntl
 import hashlib
 import json
@@ -66,6 +67,66 @@ def feature_branches():
     return {str(name): str(branch) for name, branch in eventtree().featureBranches()}
 
 
+def published_population(group, manifest, system):
+    """Read the producer's pinned SIM roster without opening any eventTree.
+
+    Older publications without a saved roster retain metadata inspection.
+    Actual payload, metadata and event counts are checked during projection.
+    """
+    pin = manifest.get('recipe', {}).get('population_manifest_sha256')
+    if manifest['stage'] != 2 or not pin:
+        return None
+    group = Path(group)
+    candidates = [group.parent / 'population.json',
+                  group.parent / 'populations' / (group.name + '.sources.tsv')]
+    available = [path for path in candidates if path.is_file()]
+    if not available:
+        return None
+    matches = [path for path in available if file_hash(path) == pin]
+    require(len(matches) == 1, 'saved producer population hash is missing or ambiguous')
+    path = matches[0]
+    identity_keys = ('logical_source_id', 'sample', 'period', 'si_di_role',
+                     'run', 'segment', 'source_file_ordinal')
+    if path.suffix == '.tsv':
+        with path.open(newline='') as stream:
+            table = csv.DictReader(stream, delimiter='\t')
+            require(table.fieldnames and len(table.fieldnames) == len(set(table.fieldnames)) and
+                    set(identity_keys + ('event_count',)) <= set(table.fieldnames),
+                    'producer source table identity columns are incomplete')
+            sources = list(table)
+        for source in sources:
+            for key in ('run', 'segment', 'source_file_ordinal', 'event_count'):
+                source[key] = int(source[key])
+    else:
+        population = read_json(path)
+        require(population.get('schema_version') == 2 and isinstance(population.get('sources'), list),
+                'unsupported saved producer population')
+        sources = population['sources']
+    sources = [source for source in sources if source.get('sample') == group.name]
+    if not sources:
+        return None
+    expected_role = 'EMBEDDED' if system == 'AuAu' else 'SI'
+    if any(source.get('si_di_role') != expected_role for source in sources):
+        return None
+    roster = {}
+    for source in sources:
+        require(set(identity_keys) <= set(source) and
+                all(type(source[key]) is int and source[key] >= 0
+                    for key in ('run', 'segment', 'source_file_ordinal', 'event_count')),
+                'producer population identity or event count is invalid')
+        identity = source['logical_source_id']
+        require(identity not in roster, 'duplicate producer population source')
+        roster[identity] = dict(source={key: source[key] for key in identity_keys},
+                                entries=source['event_count'])
+    require(set(roster) == {item['logical_id'] for item in manifest['files']} and
+            len(roster) == len(manifest['files']) and
+            manifest['population']['status'] == 'PASS' and
+            sum(item['entries'] for item in roster.values()) == manifest['population']['entries'],
+            'producer population differs from published sources or event total')
+    require(file_hash(path) == pin, 'producer population changed during inspection')
+    return roster, dict(path=str(path.resolve()), sha256=pin)
+
+
 def published_inputs(groups, system, *, progress_path=None, progress_identity=None, verify_payload=True):
     """Resolve each CURRENT once and verify its exact logical-source roster."""
     require(groups, 'no completed dataset groups configured; use --group or config datasets')
@@ -81,20 +142,30 @@ def published_inputs(groups, system, *, progress_path=None, progress_identity=No
     if tracker: tracker.write('inspect-inputs', input_events=0)
     try:
         for group, version, manifest in resolved_groups:
+            population = None if verify_payload else published_population(group, manifest, system)
+            group_path = str(Path(group).resolve())
             for item in manifest['files']:
-                path = (version / item['relative_path']).resolve()
-                require(path.is_relative_to(version) and path.is_file(), 'invalid group file path')
+                relative = Path(item['relative_path'])
+                require(not relative.is_absolute() and '..' not in relative.parts, 'invalid group file path')
+                path = version / relative
+                if population is None:
+                    path = path.resolve()
+                    require(path.is_relative_to(version) and path.is_file(), 'invalid group file path')
                 if verify_payload:
                     require(file_hash(path) == item['sha256'], 'published input hash differs: ' + str(path))
                 require(item['logical_id'] not in seen, 'duplicate logical source across selected groups')
                 seen.add(item['logical_id'])
-                meta = metadata(path)
-                require(meta['schema']['system'] == SYSTEMS[system], 'mixed collision systems')
-                require(meta['source']['logical_source_id'] == item['logical_id'], 'logical identity mismatch')
+                if population is None:
+                    meta = metadata(path)
+                    require(meta['schema']['system'] == SYSTEMS[system], 'mixed collision systems')
+                    require(meta['source']['logical_source_id'] == item['logical_id'], 'logical identity mismatch')
+                    record = dict(source=meta['source'], entries=source_entries(meta))
+                else:
+                    record = dict(population[0][item['logical_id']], producer_population=population[1])
                 inputs.append(dict(path=str(path), sha256=item['sha256'], logical_id=item['logical_id'],
-                                   relative_path=item['relative_path'], group=str(Path(group).resolve()),
+                                   relative_path=item['relative_path'], group=group_path,
                                    group_id=manifest['group_id'], version=manifest['version'],
-                                   source=meta['source'], entries=source_entries(meta)))
+                                   **record))
                 if tracker:
                     tracker.write('inspect-inputs', len(inputs), source_logical_id=item['logical_id'],
                                   input_events=tracker.extra['input_events'] + inputs[-1]['entries'])
@@ -408,7 +479,9 @@ def project_source(item, recipe, root, *, progress_identity=None, event_progress
             original = witness()
             require(file_hash(item['path']) == item['sha256'], 'projection input changed')
             meta = metadata(item['path'])
-            require(meta['source'] == item['source'] and meta['schema']['system'] == SYSTEMS[recipe['system']] and
+            source_matches = (all(meta['source'].get(key) == value for key, value in item['source'].items())
+                              if 'producer_population' in item else meta['source'] == item['source'])
+            require(source_matches and meta['schema']['system'] == SYSTEMS[recipe['system']] and
                     meta['source']['logical_source_id'] == item['logical_id'] and source_entries(meta) == item['entries'],
                     'projection source metadata differs')
             dtype = projection_dtype(recipe); rows = 0; classes = [0, 0]

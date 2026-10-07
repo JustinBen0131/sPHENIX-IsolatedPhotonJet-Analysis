@@ -101,11 +101,17 @@ source and recipe bindings. Training commands leave the tree groups unchanged.
 The separate `score MODEL SYSTEM` command is available when a published tree
 copy with an additional score branch is explicitly needed.
 
-`inspectCampaign` verifies the stage-2 manifest/metadata roster and reports a sealed
+`inspectCampaign` verifies the stage-2 source roster and reports a sealed
 `inputs.yaml` under `<models>/.inputs/<identity>/`. Keep its generated
 `inputs.json` alongside it; YAML indexes the larger source/provenance record.
 `--inputs` reuses that exact roster without inspecting TG again and implies
 `--no-score`.
+When the producer's saved `population.json` or `populations/<sample>.sources.tsv`
+is available, inspection checks its hash against the publication, matches every
+logical source and the event total, and uses its identities and counts without
+opening tree headers. Older publications use tree metadata. Projection still
+checks each tree's payload hash, source identity, collision system, contiguous
+event coverage and exact entry count before accepting its cached rows.
 
 `projectCampaign --check` plans contiguous whole-source shards, each with at
 most 100,000 events. `--max-events` can lower that bound. Run each planned
