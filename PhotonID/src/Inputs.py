@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import csv
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -139,6 +140,7 @@ def published_inputs(groups, system, *, progress_path=None, progress_identity=No
     total = sum(len(m['files']) for _, _, m in resolved_groups)
     tracker = WorkProgress(progress_path, total, 'input files', 'input-inspection', progress_identity) if progress_path else None
     inputs, seen = [], set()
+    input_events = 0
     if tracker: tracker.write('inspect-inputs', input_events=0)
     try:
         for group, version, manifest in resolved_groups:
@@ -166,10 +168,11 @@ def published_inputs(groups, system, *, progress_path=None, progress_identity=No
                                    relative_path=item['relative_path'], group=group_path,
                                    group_id=manifest['group_id'], version=manifest['version'],
                                    **record))
-                if tracker:
+                input_events += inputs[-1]['entries']
+                if tracker and len(inputs) % 100 == 0:
                     tracker.write('inspect-inputs', len(inputs), source_logical_id=item['logical_id'],
-                                  input_events=tracker.extra['input_events'] + inputs[-1]['entries'])
-        if tracker: tracker.write('complete', total, status='PASS')
+                                  input_events=input_events)
+        if tracker: tracker.write('complete', total, status='PASS', input_events=input_events)
     except BaseException as error:
         if tracker: tracker.fail(error)
         raise
@@ -371,14 +374,23 @@ def save_catalogue(inputs, system, root):
     body = catalogue_body(inputs, system); pin = digest(body)
     path = Path(root) / '.inputs' / pin / 'inputs.yaml'
     path.parent.mkdir(parents=True, exist_ok=True)
-    records = path.with_name('inputs.json')
-    save_json(records, body)
+    if path.exists():
+        require(load_catalogue(path, system) == body['sources'], 'training catalogue changed')
+        return path
+    records = path.with_name('inputs.json.gz')
+    raw = (json.dumps(body, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+    if records.exists():
+        with gzip.open(records, 'rb') as stream:
+            require(stream.read() == raw, 'training catalogue records changed')
+    else:
+        # Explicit empty filename and timestamp make byte-identical catalogues
+        # across hosts without repeating long source prefixes on shared storage.
+        with records.open('xb') as output:
+            with gzip.GzipFile(filename='', fileobj=output, mode='wb', compresslevel=6, mtime=0) as stream:
+                stream.write(raw)
     value = dict(schema=body['schema'], system=system, stage=2, files=body['files'], input_events=body['input_events'],
                  inputs_sha256=pin, sources_file=records.name, sources_sha256=file_hash(records))
-    if path.exists():
-        require(yaml.safe_load(path.read_text()) == value, 'training catalogue changed')
-    else:
-        with path.open('x') as stream: stream.write(yaml.safe_dump(value, sort_keys=False))
+    with path.open('x') as stream: stream.write(yaml.safe_dump(value, sort_keys=False))
     return path
 
 
@@ -388,10 +400,13 @@ def load_catalogue(path, system):
     value = yaml.safe_load(path.read_text())
     require(isinstance(value, dict) and value.get('schema') == 'PhotonIDTrainingInputsV1' and
             value.get('system') == system and value.get('stage') == 2, 'unsupported training catalogue')
-    require(value.get('sources_file') == 'inputs.json', 'catalogue source record path differs')
-    records = path.with_name('inputs.json')
+    require(value.get('sources_file') in ('inputs.json', 'inputs.json.gz'), 'catalogue source record path differs')
+    records = path.with_name(value['sources_file'])
     require(file_hash(records) == value['sources_sha256'], 'catalogue source records changed')
-    record_body = read_json(records)
+    if records.name.endswith('.gz'):
+        with gzip.open(records, 'rt', encoding='utf-8') as stream: record_body = json.load(stream)
+    else:
+        record_body = read_json(records)
     body = catalogue_body(record_body['sources'], system)
     require(record_body == body and value == dict(schema=body['schema'], system=system, stage=2,
             files=body['files'], input_events=body['input_events'], inputs_sha256=digest(body),

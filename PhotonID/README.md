@@ -117,7 +117,9 @@ copy with an additional score branch is explicitly needed.
 
 `inspectCampaign` verifies the stage-2 source roster and reports a sealed
 `inputs.yaml` under `<models>/.inputs/<identity>/`. Keep its generated
-`inputs.json` alongside it; YAML indexes the larger source/provenance record.
+`inputs.json.gz` alongside it; YAML indexes the compressed source/provenance
+record. Compression preserves the source identities and content digest, and
+the reader also accepts existing uncompressed `inputs.json` catalogues.
 `--inputs` reuses that exact roster without inspecting TG again and implies
 `--no-score`.
 When the producer's saved `population.json` or `populations/<sample>.sources.tsv`
