@@ -89,6 +89,8 @@ an existing physical data-staging directory on the worker; use that worker's
 ```bash
 ./PhotonID/photon_id.sh projectCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --check
 ./PhotonID/photon_id.sh projectCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --shard-index 0 --scratch-root /path/to/worker/data-staging
+# After every shard in the projection plan has finished:
+./PhotonID/photon_id.sh verifyProjections AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models
 ./PhotonID/photon_id.sh prepareCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --check
 ./PhotonID/photon_id.sh trainCampaign AuAu --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models
@@ -153,6 +155,14 @@ Each source payload is hashed before projection; inspection does not repeat
 that full-file read.
 Use `--projection-root DIR` to choose another shared cache. Verified parts are
 reused; incomplete or changed parts are refused.
+
+`verifyProjections` runs the same complete-cache verification used by
+preparation and writes `<models>/<system>/projection_census.json`. The report
+binds the input catalogue, source and photon counts, record bytes, and verified
+source receipts. Missing sources, duplicate bundles or changed bytes fail
+before writing the report. This command requires `--inputs` and reads only the
+cached rows and catalogue. It does not reopen trees or fit a model. Its `--check`
+preview lists the expected source population without verifying cache contents.
 
 `prepareCampaign` requires complete projection coverage and creates the
 two campaign populations. Preparation and fitting then read GPFS products without reading

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public PhotonID command driver: prepare, fit, validate, calibrate, score.
+"""Public PhotonID driver: project, verify caches, prepare, fit and score.
 
 All algorithms share one eventTree input contract and saved split. Existing
 validated releases are reused; an interrupted candidate is never promoted by
@@ -10,6 +10,7 @@ configured Python environment.
 from __future__ import annotations
 
 import argparse
+import datetime
 import fcntl
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ sys.path.insert(0, str(HERE))
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description='Train and score named photon models from completed eventTrees.')
-    parser.add_argument('command', choices=['reTrainNominal', 'trainNew', 'inspectCampaign', 'projectCampaign',
+    parser.add_argument('command', choices=['reTrainNominal', 'trainNew', 'inspectCampaign', 'projectCampaign', 'verifyProjections',
                                          'prepareCampaign', 'trainCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
     parser.add_argument('target', nargs='?', help='AuAu/PP/AuAuAndPP, model recipe or saved model name')
     parser.add_argument('system', nargs='?', choices=['AuAu', 'PP'])
@@ -47,9 +48,9 @@ def arguments(argv=None):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
     if args.command == 'trainNew' and not ((args.target in ('centAndETdepModels', 'routingStudy', 'rangeStudy', 'depthStudy', 'MLP', 'logReg') and args.system == 'AuAu') or (args.target == 'PPG12' and args.system == 'PP')):
         parser.error('trainNew requires an AuAu study or PPG12 PP')
-    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'prepareCampaign', 'trainCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
+    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'trainCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
         parser.error(args.command + ' requires AuAu or PP')
-    if args.command in ('inspectCampaign', 'projectCampaign', 'prepareCampaign', 'trainCampaign') or args.inputs:
+    if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'trainCampaign') or args.inputs:
         args.no_score = True
     # Training produces portable releases. Publishing scored tree copies is a
     # separate explicit command; reduction normally evaluates models in place.
@@ -60,6 +61,8 @@ def arguments(argv=None):
         parser.error('listModels accepts AuAu or PP')
     if args.inputs and (args.group or args.target == 'AuAuAndPP' or args.command in ('score', 'listModels', 'planCampaign')):
         parser.error('--inputs is a training catalogue; do not combine it with --group, paired systems or scoring')
+    if args.command == 'verifyProjections' and not args.inputs:
+        parser.error('verifyProjections requires --inputs from inspectCampaign')
     if args.command != 'projectCampaign' and (args.shard_index is not None or args.max_events != 100000):
         parser.error('--shard-index and --max-events apply only to projectCampaign')
     if args.command != 'projectCampaign' and (args.scratch_root is not None or args.cache_layout != 'packed'):
@@ -182,6 +185,39 @@ def campaign_projections(simulation, config, args, *, system):
     return ProjectionCache.load_campaign(simulation, recipe, root,
         progress_path=args.models / '.progress' / ('verify-projections-' + system.lower() + '.json'),
         progress_identity=getattr(args, 'progress_identity', None))
+
+
+def verify_projections(simulation, config, args, *, system):
+    """Verify complete cached rows and save their census without opening trees.
+
+    This uses the preparation verifier, including member hashes and exact source
+    coverage. The resulting photon count describes the raw campaign support;
+    individual model populations still apply their own domain and weights.
+    """
+    from src import Inputs, Models
+    recipe = Models.projection_recipe(config, system)
+    body = dict(schema='PhotonIDProjectionCensusV1', status='CHECKED', system=system,
+                inputs_identity=Models.digest(Inputs.catalogue_body(simulation, system)),
+                source_files=len(simulation), source_events=sum(i['entries'] for i in simulation),
+                projection_definition_sha256=Models.digest(Inputs.population_definition(recipe)),
+                et_ranges_gev=recipe['et_ranges_gev'])
+    if args.check:
+        return body
+    projections = campaign_projections(simulation, config, args, system=system)
+    receipts = [(key, part['receipt']) for key, part in sorted(projections.items())]
+    rows = sum(receipt['rows'] for _, receipt in receipts)
+    folders = {(str(part['folder']), part.get('index_file', 'projection.json'))
+               for part in projections.values()}
+    body.update(status='PASS_VERIFIED_PROJECTION_CENSUS', photon_rows=rows,
+                row_bytes=rows * Inputs.projection_dtype(recipe).itemsize,
+                packed_bundles=sum(index == 'bundle.json' for _, index in folders),
+                source_caches=sum(index == 'projection.json' for _, index in folders),
+                projection_receipts_sha256=Models.digest(
+                    [(key, receipt['projection_sha256']) for key, receipt in receipts]),
+                verified_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    report = args.models / system / 'projection_census.json'
+    Models.save_json(report, dict(body, census_sha256=Models.digest(body)))
+    return dict(body, census=str(report), census_file_sha256=Models.file_hash(report))
 
 
 def calibration_population(population, recipe):
@@ -349,9 +385,9 @@ def main(argv=None):
     else:
         from src import Diagnostics, Inputs, Scoring, Training
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
-            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'prepareCampaign', 'trainCampaign') else args.system]
+            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'trainCampaign') else args.system]
         names = {'reTrainNominal': ['nominal_retrained_v1'], 'prepareCampaign': ['nominal_retrained_v1', 'wideET_v1'],
-                 'inspectCampaign': [], 'projectCampaign': [], 'trainCampaign': campaign_names, 'trainNew': {
+                 'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'trainCampaign': campaign_names, 'trainNew': {
             'centAndETdepModels': ['centCoarse_v1', 'centFine_v1', 'ET_v1', 'ETcentCoarse_v1', 'ETcentFine_v1'],
             'routingStudy': Models.ROUTING_MODELS,
             'rangeStudy': ['wideET_v1'],
@@ -360,7 +396,7 @@ def main(argv=None):
         result = []
         for system in systems:
             if args.command != 'score':
-                algorithms = {'prepare'} if args.command in ('inspectCampaign', 'projectCampaign', 'prepareCampaign') else {
+                algorithms = {'prepare'} if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign') else {
                     Models.recipe(config, system, name)['algorithm'] for name in names}
                 runtime = [Training.runtime_status(algorithm) for algorithm in sorted(algorithms)]
                 unavailable = [report for report in runtime if report['status'] != 'PASS']
@@ -419,6 +455,9 @@ def main(argv=None):
                     else:
                         result.append(Inputs.project_shard(simulation, recipe, root, selected_shards[0],
                                                           progress_identity=args.progress_identity))
+                continue
+            if args.command == 'verifyProjections':
+                result.append(verify_projections(simulation, config, args, system=system))
                 continue
             args.projections = None
             args.use_projection_cache = not args.check and args.command != 'score'
