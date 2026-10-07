@@ -228,6 +228,9 @@ For a controlled job, supply `--progress-context job.yaml` containing
 Fitting reports completed boosting rounds for each model cell, with the same
 job identity carried through native-score checks, calibration and saved QA.
 Photon checks and calibration bins have separate phase counters.
+`collectQA` counts verified model releases in `.progress/collect-auau.json`
+or `.progress/collect-pp.json`; a bound AuAu comparison adds one release to the
+pp total. Its `--check` preview remains read-only.
 These labels affect telemetry only. Keep preparation, models and logs on writable
 analysis storage; input trees are read without modification. Work totals and
 measured runtime must fit the execution environment before a full campaign.

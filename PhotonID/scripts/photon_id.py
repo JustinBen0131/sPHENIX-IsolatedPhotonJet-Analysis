@@ -342,7 +342,8 @@ def main(argv=None):
                     for name in Models.campaign_models(args.target)]
         result = dict(status='CHECKED' if args.check else 'INDEXED',
                       model_qa_collection=str(Diagnostics.collection(args.models, releases, system=args.target,
-                                                                   auau_reference=args.auau_reference, check_only=args.check)))
+                                                                   auau_reference=args.auau_reference, check_only=args.check,
+                                                                   progress_identity=args.progress_identity)))
     else:
         from src import Diagnostics, Inputs, Scoring, Training
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
@@ -440,7 +441,7 @@ def main(argv=None):
             # after every campaign release has been validated and sealed.
             if args.command == 'trainCampaign' and not args.check and not args.model:
                 collection = Diagnostics.collection(args.models, [record['release'] for record in result], system=system,
-                                                    auau_reference=args.auau_reference)
+                                                    auau_reference=args.auau_reference, progress_identity=args.progress_identity)
                 for record in result: record['model_qa_collection'] = str(collection)
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0

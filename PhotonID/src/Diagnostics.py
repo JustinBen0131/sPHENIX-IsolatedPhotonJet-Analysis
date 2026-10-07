@@ -358,7 +358,8 @@ def save(folder, population, recipe, scores, cells, config, request_sha256, *, p
     return report
 
 
-def collection(root, releases, *, system='AuAu', auau_reference=None, check_only=False):
+def collection(root, releases, *, system='AuAu', auau_reference=None, check_only=False,
+               progress_identity=None):
     """Create an immutable, portable YAML index of sealed model releases.
 
     FinalAnalysis reads this index for its selector and saved routing/depth QA.
@@ -366,6 +367,24 @@ def collection(root, releases, *, system='AuAu', auau_reference=None, check_only
     pins. The wider model is indexed with its own support and calibration; it
     is never admitted to a same-population routing or depth comparison.
     """
+    releases = tuple(releases)
+    if check_only:
+        return _collection(root, releases, system, auau_reference, True, None)
+    total = len(releases) + int(system == 'PP' and auau_reference is not None)
+    tracker = Models.WorkProgress(Path(root) / '.progress' / ('collect-' + system.lower() + '.json'),
+                                  total, 'model releases', 'qa-collection-' + system.lower(), progress_identity)
+    tracker.write('check-releases', 0)
+    try:
+        path = _collection(root, releases, system, auau_reference, False, tracker)
+        tracker.write('complete', total, status='PASS')
+        return path
+    except Exception as exc:
+        tracker.fail(exc)
+        raise
+
+
+def _collection(root, releases, system, auau_reference, check_only, tracker):
+    """Validate each release and comparison before creating or reusing the index."""
     import os
     import yaml
     root = Path(root).resolve(); entries = []; recipes = {}
@@ -396,6 +415,7 @@ def collection(root, releases, *, system='AuAu', auau_reference=None, check_only
                             diagnostics_root_sha256=diagnostics['root_sha256'],
                             axes=manifest['recipe']['axes'], max_depth=manifest['recipe']['learner']['max_depth']))
         recipes[manifest['name']] = manifest['recipe']
+        if tracker: tracker.write('check-releases', len(entries))
     Models.require(entries and len({entry['name'] for entry in entries}) == len(entries), 'empty or duplicate model collection')
     nominal = [entry for entry in entries if entry['name'].startswith('nominal_retrained_')]
     Models.require(len(nominal) == 1, 'QA collection needs exactly one nominal reference')
@@ -456,6 +476,7 @@ def collection(root, releases, *, system='AuAu', auau_reference=None, check_only
             body['comparisons']['auau_settings'].update(status='BOUND', auau_reference=dict(
                 path=str(reference_path.relative_to(root)), name=reference['name'], release_sha256=reference['release_sha256'],
                 diagnostics_json_sha256=Models.file_hash(reference_path / 'diagnostics.json'), diagnostics_root_sha256=qa['root_sha256']))
+            if tracker: tracker.write('check-auau-reference', len(entries) + 1)
     pin = Models.digest(body); folder = root / '.campaigns' / pin
     path = folder / 'models.yaml'
     # Paths resolve against the YAML file, so copying the models root preserves the collection.
