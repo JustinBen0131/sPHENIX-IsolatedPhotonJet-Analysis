@@ -224,6 +224,133 @@ def campaign_plan(config, groups=(), system='AuAu'):
                              gap='WP80(C) <= score <= WP70(C), excluded'))
 
 
+def execution_plan(config, groups=(), system='AuAu', census=None):
+    """Preview exact independent fits and release barriers; never dispatch.
+
+    Cell parallelism uses the existing Cartesian cells and frozen population
+    weights/splits. Compact cell inputs and concurrent release assembly still
+    need qualification. Memory targets are measurement goals, never requests.
+    A supplied census is hash/recipe/count checked, not an array revalidation.
+    """
+    from .Training import cells
+    campaign = campaign_plan(config, groups, system)
+    names = campaign_models(system)
+    recipes = {name: recipe(config, system, name) for name in names}
+    populations = ('nominal_retrained_v1', 'wideET_v1' if system == 'AuAu' else 'ppg12_retrained_v1')
+    measured_cells = {}
+    if census is not None:
+        require(isinstance(census, dict), 'execution census must be a JSON object')
+        body = {k: v for k, v in census.items() if k != 'census_sha256'}
+        require(census.get('schema') == 'PhotonIDPreparationCensusV1' and
+                census.get('status') == 'PASS_PREPARED_CELL_CENSUS' and
+                census.get('system') == system and census.get('census_sha256') == digest(body),
+                'execution census hash, system or status differs')
+        require(isinstance(census.get('populations'), dict) and isinstance(census.get('models'), list) and
+                all(isinstance(m, dict) and {'model', 'recipe_sha256', 'population', 'cells'} <= set(m)
+                    for m in census['models']), 'malformed execution census populations or models')
+        require(set(census['populations']) == set(populations) and
+                [m['model'] for m in census['models']] == list(names), 'execution census population/model set differs')
+        require(all(isinstance(p, dict) and type(p.get('rows')) is int and p['rows'] > 0 and
+                isinstance(p.get('partition_counts'), list) and len(p['partition_counts']) == 3 and
+                all(type(n) is int and n >= 0 for n in p['partition_counts'])
+                for p in census['populations'].values()), 'malformed execution census population totals')
+        for model in census['models']:
+            r = recipes[model['model']]
+            base = model['model'] if model['model'] in populations else populations[0]
+            expected = list(cells(r)); observed = model['cells']; total = [0, 0, 0]
+            require(isinstance(observed, list) and model['recipe_sha256'] == digest(r) and model['population'] == base and
+                    len(observed) == len(expected), 'execution census recipe or cell count differs')
+            for saved, cell in zip(observed, expected):
+                require(isinstance(saved, dict) and {'id', 'bounds', 'rows', 'partition_class_counts'} <= set(saved),
+                        'malformed execution census cell')
+                counts = saved['partition_class_counts']
+                require(saved['id'] == cell['id'] and saved['bounds'] == cell['bounds'] and
+                        isinstance(counts, list) and len(counts) == 3 and all(isinstance(pair, list) and len(pair) == 2 and
+                        all(type(n) is int and n >= 0 for n in pair) for pair in counts),
+                        'execution census cell identity or class counts differ')
+                require(type(saved['rows']) is int and saved['rows'] == sum(map(sum, counts)), 'execution census cell total differs')
+                minimum = r['validation']['min_rows_per_class_per_split']
+                require(all(counts[0][k] >= minimum and counts[1][k] + counts[2][k] >= minimum and
+                            counts[2][k] > 0 for k in (0, 1)), 'execution census cell has insufficient split coverage')
+                measured_cells[(model['model'], cell['id'])] = saved
+                total = [a + sum(b) for a, b in zip(total, counts)]
+            require(total == census['populations'][base]['partition_counts'] and
+                    sum(total) == census['populations'][base]['rows'], 'execution census routing coverage differs')
+    prepare_id = 'prepare:' + system
+    tasks = [dict(id=prepare_id, phase='prepare', depends_on=[], populations=list(populations),
+                  reuse_existing=True, status='CENSUS_CHECKED' if census else 'WAITING_FOR_PREPARATION')]
+    for name, r in recipes.items():
+        routed = bool(r['axes']); base = name if name in populations else populations[0]
+        dependency = prepare_id
+        if routed:
+            dependency = 'cell-inputs:' + name
+            tasks.append(dict(id=dependency, phase='cell_inputs', depends_on=[prepare_id], model=name,
+                              population=base, preserve=['row_order', 'global_weights', 'event_split', 'original_row_index'],
+                              scans_per_population=1, qualification='IMPLEMENTATION_AND_EQUIVALENCE_PENDING'))
+        fit_ids = []
+        for cell in cells(r):
+            fit_id = 'fit:' + name + ':' + cell['id']; fit_ids.append(fit_id)
+            saved = measured_cells.get((name, cell['id']))
+            tasks.append(dict(id=fit_id, phase='fit', depends_on=[dependency], model=name, cell=cell,
+                recipe_sha256=digest(r), population=base, cpus=r['learner']['n_jobs'],
+                priority=0 if name == 'nominal_retrained_v1' else 1 if name in populations else 2 if routed else 3,
+                rows=saved['rows'] if saved else None,
+                partition_class_counts=saved['partition_class_counts'] if saved else None,
+                memory=dict(request_mb=None, target_mb=4096 if routed else 8192, ceiling_mb=12288,
+                            status='MEASUREMENT_REQUIRED', basis='Exact cell input plus measured fit/export/validation peak'),
+                qualification='CELL_EXECUTOR_EQUIVALENCE_REQUIRED' if routed else 'EXISTING_WHOLE_MODEL_PATH',
+                task_sha256=digest(dict(system=system, recipe=digest(r), cell=cell))))
+        tasks.append(dict(id='release:' + name, phase='assemble', depends_on=fit_ids, model=name,
+            expected_cells=list(cells(r)), qualification='ASSEMBLY_EQUIVALENCE_REQUIRED',
+            checks=['exact_recipe_and_population', 'one_receipt_per_cell', 'no_overlap_or_missing_rows',
+                    'saved_artifact_hashes', 'canonical_row_order_for_diagnostics', 'working_point_validation']))
+    tasks.append(dict(id='collect:' + system, phase='collect', depends_on=['release:' + n for n in names],
+                      external_dependencies=['accepted_AuAu_nominal_reference'] if system == 'PP' else []))
+    fits = [t for t in tasks if t['phase'] == 'fit']
+    ids = {t['id'] for t in tasks}
+    require(len(ids) == len(tasks) and all(d in ids for t in tasks for d in t['depends_on']),
+            'execution plan has duplicate tasks or a missing dependency')
+    return dict(schema='PhotonIDExecutionPlanV1', status='DESIGN_ONLY', submit_ready=False, system=system,
+        campaign=campaign, tasks=tasks, counts=dict(fits=len(fits), routed_fits=sum(bool(t['cell']['bounds']) for t in fits),
+            global_fits=sum(not t['cell']['bounds'] for t in fits), releases=len(names),
+            cell_input_passes=sum(t['phase'] == 'cell_inputs' for t in tasks)),
+        census_sha256=census['census_sha256'] if census else None,
+        input_status='CENSUS_HASH_CHECKED_ARRAYS_NOT_REVERIFIED' if census else 'UNMEASURED',
+        supported_execution='One trainCampaign --model invocation per recipe',
+        reuse_existing_preparation=True, independent_release_consumption=True,
+        invariants=['sources', 'features', 'row_order', 'weights', 'split', 'seed', 'learner', 'threads', 'working_points'],
+        qualification_required=['compact_cell_input_equivalence', 'isolated_cell_fit_equivalence',
+                                'release_assembly_equivalence', 'full_scale_memory_and_walltime'])
+
+
+def campaign_summary(plan):
+    """Small collaborator preview; planned tasks never imply execution readiness."""
+    execution = plan.get('schema') == 'PhotonIDExecutionPlanV1'
+    campaign = plan['campaign'] if execution else plan
+    labels = dict(nominal_retrained_v1='Canonical', wideET_v1='Wide range',
+        centCoarse_v1='Coarse centrality', centFine_v1='Fine centrality',
+        ETcentCoarse_v1='ET x coarse centrality', ETcentFine_v1='ET x fine centrality',
+        ppg12_retrained_v1='Historical PPG12')
+    lines = [f"PhotonID {campaign['system']}: {campaign['configurations']} model recipes, "
+             f"{campaign['component_models']} BDT fits", "", 'Model                         Range (GeV)    Fits    CPUs']
+    for model in campaign['models']:
+        lo, hi = model['training_et_gev']
+        label = labels.get(model['name'], 'Depth ' + str(model['max_depth']))
+        lines.append(f"{label:<29} {lo:g}-{hi:g}".ljust(46) +
+                     f"{model['component_models']:>4}    {model['learner']['n_jobs']:>4}")
+    lines += ['', 'Extract once; prepare two populations; fit, validate and calibrate; collect QA.',
+              'Depth and routing variants reuse canonical weights and split. Depth 4 is the nominal model.']
+    if execution:
+        c = plan['counts']
+        lines += [f"Candidate scheduling: {c['routed_fits']} independent routing-cell fits and "
+                  f"{c['global_fits']} full-population fits; {c['releases']} release barriers.",
+                  'Small-cell memory target: 4 GiB. Actual requests remain unset until measured.',
+                  'Cell dispatch and assembly await equivalence qualification. This plan cannot submit jobs.']
+    else:
+        lines += [f"Supported batch scheduling: {campaign['configurations']} independent recipe invocations."]
+    return '\n'.join(lines)
+
+
 def code_identity():
     """Source hashes for the fitting, evaluator and command implementations."""
     code = {p.name: file_hash(p) for p in sorted((HERE / 'src').glob('*.py'))}

@@ -94,10 +94,11 @@ root, inspect the selected groups once:
 ./PhotonID/photon_id.sh --help
 ./PhotonID/photon_id.sh listModels AuAu
 ./PhotonID/photon_id.sh planCampaign AuAu
+./PhotonID/photon_id.sh planCampaign AuAu --summary
 ./PhotonID/photon_id.sh inspectCampaign AuAu --config /path/to/training.yaml --models /path/to/analysis/models
 ```
 
-The first three commands show help, recipes and the campaign plan without
+The first four commands show help, recipes and the campaign plan without
 starting extraction or fitting. `inspectCampaign` writes the `inputs.yaml`
 catalogue and reports its path; use that generated file in all later commands.
 Keep the configuration, catalogue and model-output root the same across stages.
@@ -157,6 +158,21 @@ Independent `--model` invocations can run in parallel after preparation. They
 reuse the verified arrays on disk and each fit the complete selected recipe.
 Selected invocations seal their own releases; `collectQA` requires the complete
 campaign before writing its comparison index.
+
+For a compact batch-planning preview, use:
+
+```bash
+./PhotonID/photon_id.sh planCampaign AuAu --execution-plan --summary
+./PhotonID/photon_id.sh planCampaign AuAu --execution-plan --census /path/to/analysis/models/AuAu/preparation_census.json
+```
+
+The execution preview lists independent cell fits, shared inputs and the barrier
+before a complete release can be assembled. It preserves the full sample within
+each cell, its global training weights and its frozen split. Memory targets are
+measurement goals; actual requests remain unset. Cell dispatch and assembly
+still require implementation and equivalence qualification. This read-only
+preview cannot submit jobs; the supported execution remains one `--model`
+invocation per recipe.
 
 ### 4. Collect the releases for FinalAnalysis
 

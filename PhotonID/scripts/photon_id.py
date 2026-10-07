@@ -43,6 +43,9 @@ def arguments(argv=None):
     parser.add_argument('--scratch-root', type=Path, help='existing physical data-staging directory; otherwise use _CONDOR_SCRATCH_DIR')
     parser.add_argument('--auau-reference', type=Path, help='sealed canonical AuAu release for the pp/AuAu heldout comparison')
     parser.add_argument('--model', action='append', default=[], help='one trainCampaign recipe; repeat to select several, then run collectQA')
+    parser.add_argument('--summary', action='store_true', help='planCampaign: compact human-readable preview')
+    parser.add_argument('--execution-plan', action='store_true', help='planCampaign: preview independent cells and release barriers; no dispatch')
+    parser.add_argument('--census', type=Path, help='planCampaign --execution-plan: saved preparation_census.json for exact cell counts')
     args = parser.parse_args(argv)
     if args.command == 'reTrainNominal' and args.target not in ('AuAu', 'PP', 'AuAuAndPP'):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
@@ -77,6 +80,10 @@ def arguments(argv=None):
         parser.error('--model applies only to trainCampaign')
     if args.require_roster and args.command != 'inspectCampaign':
         parser.error('--require-roster applies only to inspectCampaign')
+    if args.command != 'planCampaign' and (args.summary or args.execution_plan or args.census):
+        parser.error('--summary, --execution-plan and --census apply only to planCampaign')
+    if args.census and not args.execution_plan:
+        parser.error('--census requires --execution-plan')
     return args
 
 
@@ -429,7 +436,9 @@ def main(argv=None):
     args.progress_identity = Models.progress_identity(Models.yaml.safe_load(args.progress_context.read_text())) \
         if args.progress_context else None
     if args.command == 'planCampaign':
-        result = Models.campaign_plan(config, args.group, args.target)
+        result = Models.execution_plan(config, args.group, args.target,
+            census=Models.read_json(args.census) if args.census else None) if args.execution_plan else \
+            Models.campaign_plan(config, args.group, args.target)
     elif args.command == 'listModels':
         result = Models.list_models(args.models, args.target)
     elif args.command == 'collectQA':
@@ -543,7 +552,7 @@ def main(argv=None):
                 collection = Diagnostics.collection(args.models, [record['release'] for record in result], system=system,
                                                     auau_reference=args.auau_reference, progress_identity=args.progress_identity)
                 for record in result: record['model_qa_collection'] = str(collection)
-    print(json.dumps(result, indent=2, allow_nan=False))
+    print(Models.campaign_summary(result) if args.summary else json.dumps(result, indent=2, allow_nan=False))
     return 0
 
 
