@@ -291,8 +291,17 @@ campaign index separate. A subset cannot supply comparisons for missing models.
 
 `--check` checks the selected runtime before opening input groups and previews
 source and recipe bindings. Training commands leave the tree groups unchanged.
-The separate `score MODEL SYSTEM` command is available when a published tree
-copy with an additional score branch is explicitly needed.
+Add every applicable released model in one augmentation pass:
+
+```bash
+./PhotonID/photon_id.sh scoreCampaign AuAu --models models --group /path/to/group
+./PhotonID/photon_id.sh scoreCampaign PP --models models --group /path/to/group
+```
+
+Use `--check` to inspect the selected releases and inputs. Repeating `--model`
+selects a subset; `score MODEL SYSTEM` remains available for one model.
+Existing score receipts must bind the same model and domain. Already present
+scores and all other branches remain unchanged; only missing scores are added.
 
 ### Source extraction details
 
@@ -523,17 +532,37 @@ Histogram readers can evaluate that same model on the H70 float32 feature
 vector during their normal tree read. Reader integration and runtime
 compatibility must be qualified before production use.
 
-Select an optional model in a copy of TreeToHists' `treetohists.yaml`:
+Select a released model in a copy of TreeToHists' `treetohists.yaml`:
 
 ```yaml
+Selection:
+  PhotonIDModels: /path/to/models
+pp:
+  Model: ppg12_original
 auau:
-  PhotonIDSelection: /path/to/models/AuAu/ETcentFine_v1/selection.json
+  Model: ETcentFine_v1
+  TightWP: WP70
+  NonTightWP: WP80
+  NonTightMinimum: 0.1
 ```
 
-Use `pp.PhotonIDSelection` for a retrained pp model. Omit score, state and
-working-point overrides for that system; the release supplies them.
-The explicit PhotonID `score` command creates a checked group version and advances `CURRENT` only when
+The normal reader requires the selected stored score and its validated receipt.
+Choose `ScoreMode: native` explicitly to evaluate the same ROOT model from
+stored H70 features during reduction. Existing `PhotonIDSelection` path-based
+native recipes remain supported. Both routes use identical model precision,
+routing and cuts; downstream ID does not use historical tight/non-tight labels.
+WP70/80/90 select saved calibration lines rather than deriving new ones.
+
+The scorer creates a checked group version and advances `CURRENT` only when
 every source is ready. Partial work leaves the published group unchanged.
+Use `scoreCampaign AuAu --candidate-root /path/to/work` to stage checked
+copies without publication; repeat with `PP` for pp groups. `--model NAME`
+can select a release subset. A batch controller calls `Scoring.augment_file`
+for each pinned source, putting every applicable model in that same candidate.
+Jobs share the released models and remain independent until one publisher
+commits the complete group. Use stdout progress mode on shared storage.
+A changed publication base is refused; reconcile the current additions before
+retrying, so another augmentation's scores or fractions cannot be dropped.
 
 ## Source map
 

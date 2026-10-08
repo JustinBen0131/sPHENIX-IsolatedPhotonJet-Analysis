@@ -187,7 +187,7 @@ PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centr
           selected = &cell;
         }
         if (!selected) throw std::runtime_error("finite optional score lies outside its routed domain");
-        low = 0.1; high = selected->nonTightHigh.at(x); tight = selected->tight.at(x);
+        high = selected->nonTightHigh.at(x); tight = selected->tight.at(x);
       }
       c.idCode = score[i] > tight ? kIdTight : low < score[i] && score[i] < high ? kIdNonTight
                                : score[i] >= high ? 2 : kIdBelowNonTight;
@@ -698,7 +698,7 @@ inline Profile configuredProfile(const char* legacyName, System system, const ch
     throw std::runtime_error("invalid isolation sideband gap");
   p.isolationCentMin = iso.at("centrality_min").get<double>();
   p.isolationCentMax = iso.at("centrality_max").get<double>();
-  for (double x : (system==System::pp ? std::vector<double>{15,35} : std::vector<double>{0,80}))
+  if (!p.optionalID) for (double x : (system==System::pp ? std::vector<double>{15,35} : std::vector<double>{0,80}))
     if (!(p.nonTightLow.at(x) < p.nonTightHigh.at(x) && p.nonTightHigh.at(x) <= p.tight.at(x)))
       throw std::runtime_error("selection bands overlap or are empty");
   return p;
@@ -709,10 +709,20 @@ inline Profile validateSelectionInput(TFile& file, Profile p) {
   const auto resolved = SelectionJson::parse(p.selectionJson);
   const auto& s = resolved.at("systems").at(p.system==System::pp ? "pp" : "auau");
   const std::string key = s.at("score_metadata").get<std::string>();
+  if (p.optionalID && !p.nativeID) {
+    auto *tree=dynamic_cast<TTree*>(file.Get("eventTree"));
+    if (!tree || !tree->GetBranch(p.scoreBranch.c_str()))
+      throw std::runtime_error("selected PhotonID score is unavailable: "+p.scoreBranch+
+        "; augment the input group with PhotonID scoreCampaign before stored-score reduction");
+    if (!file.Get(key.c_str()))
+      throw std::runtime_error("selected PhotonID score has no model receipt; use the validated PhotonID augmentation");
+  }
   const auto id = p.nativeID ? SelectionJson::object() : SelectionJson::parse(metaText(file,key));
   if (p.optionalID && !p.nativeID) {
     const auto& requested = s.at("optional_model");
-    const auto& receipt = id.at(requested.at("model_name").get<std::string>());
+    const std::string name=requested.at("model_name");
+    if (!id.contains(name)) throw std::runtime_error("selected PhotonID model receipt is unavailable: "+name);
+    const auto& receipt = id.at(name);
     if (receipt.value("status", std::string()) != "PASS" ||
         receipt.at("release_sha256") != requested.at("release_sha256") ||
         receipt.at("score_branch") != requested.at("score_branch") || receipt.at("domain") != requested.at("domain"))
@@ -756,6 +766,7 @@ class PhotonScores {
   SelectionJson domain_;
   size_t view_=0,stride_=0;
   bool auau_=false;
+  std::function<bool(size_t)> nativeCandidate_;
   mutable Long64_t entry_=-2;
   mutable std::vector<double> values_;
 
@@ -770,6 +781,7 @@ class PhotonScores {
     const bool event=**record_==0 && **ready_==1 && **vertexValid_==1 && **terminal_==0;
     std::vector<float> input(stride_);
     for (size_t i=0;i<n;++i) {
+      if (nativeCandidate_ && !nativeCandidate_(i)) continue;
       const double et=(*et_)[i],eta=(*eta_)[i];
       if (!event || !(et>=domain_.at("et_min").get<double>() && et<domain_.at("et_max_exclusive").get<double>() &&
           std::abs(eta)<domain_.at("eta_abs_max").get<double>() && std::abs(z)<domain_.at("vertex_abs_max_cm").get<double>()) ||
@@ -791,7 +803,10 @@ class PhotonScores {
     }
   }
  public:
-  PhotonScores(TFile &file,TTreeReader &reader,const Profile &profile) : reader_(reader) {
+  // A diagnostic may restrict evaluation to its plotted population. Ordinary
+  // fills keep the default and evaluate every candidate in the model domain.
+  PhotonScores(TFile &file,TTreeReader &reader,const Profile &profile,
+               std::function<bool(size_t)> nativeCandidate={}) : reader_(reader),nativeCandidate_(std::move(nativeCandidate)) {
     if (!profile.nativeID) {saved_=std::make_unique<TTreeReaderArray<double>>(reader,profile.scoreBranch.c_str());return;}
     const auto selection=SelectionJson::parse(profile.selectionJson);
     const auto &native=selection.at("systems").at(profile.system==System::pp ? "pp" : "auau").at("optional_model").at("native_evaluation");

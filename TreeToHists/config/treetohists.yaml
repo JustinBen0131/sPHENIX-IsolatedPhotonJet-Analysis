@@ -7,10 +7,16 @@ Selection:
 
 pp:
   DataTrigger: photon4
+  Model: ppg12_original
   # PhotonIDSelection: /path/to/optional_model/selection.json
   # SimulationPeriods: all  # all (nominal): the PPG12 sum over the crossing-angle periods; source: each file's own period
 auau:
   DataTrigger: photon12
+  Model: nominal_retrained_v1
+  TightWP: WP70
+  NonTightWP: WP80
+  NonTightMinimum: 0.1
+  # ScoreMode: native  # explicit evaluation from saved H70 features; stored is the default
   # PhotonIDSelection: /path/to/optional_model/selection.json
 
 # Optional per-system overrides:

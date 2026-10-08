@@ -2306,7 +2306,7 @@ struct BranchAddition::State
   std::unique_ptr<TFile> source, output;
   TTree* input = nullptr;
   TTree* tree = nullptr;
-  std::unique_ptr<Columns> columns;
+  TLeaf* photonCount = nullptr;
   struct Added
   {
     std::string name, type;
@@ -2359,14 +2359,20 @@ void BranchAddition::open(const std::string& requestJson)
   std::set<std::string> after = payload;
   for (const auto& added : s.added) after.insert(added.name);
   require(after == declared, "update schema has missing or undeclared payloads");
-  s.columns = std::make_unique<Columns>(s.input);
-  s.output = createFile(s.candidate);
+  // Keep every old basket and metadata key at its original byte offset. The
+  // candidate is a create-once copy; UPDATE appends only the new score data.
+  // Re-filling old branches would change basket packing and duplicate work.
+  const fs::path candidate(s.candidate);
+  if (candidate.has_parent_path()) fs::create_directories(candidate.parent_path());
+  require(fs::copy_file(s.original, candidate, fs::copy_options::none), "cannot copy augmentation input");
+  fs::permissions(candidate, fs::perms::owner_write, fs::perm_options::add);
+  s.output.reset(TFile::Open(s.candidate.c_str(), "UPDATE"));
+  require(s.output && !s.output->IsZombie(), "cannot open copied augmentation candidate");
   s.output->cd();
-  s.tree = s.input->CloneTree(0);
-  require(s.tree != nullptr, "cannot book the candidate eventTree");
-  s.tree->SetDirectory(s.output.get());
-  s.tree->SetAutoFlush(-16 * 1024 * 1024);
-  s.columns->attach(s.tree);
+  s.tree = eventTree(*s.output);
+  TLeaf* photons = s.input->GetLeaf("pho_et");
+  require(photons && photons->GetLeafCount(), "photon collection counter missing");
+  s.photonCount = photons->GetLeafCount();
   for (auto& added : s.added)
   {
     added.buffer.assign(1, 0.);
@@ -2419,10 +2425,12 @@ void BranchAddition::commit(long long events)
             "every added branch needs values for the batch: " + added.name);
   for (long long i = 0; i < events; ++i)
   {
-    s.columns->read(s.next + i);
+    require(s.photonCount->GetBranch()->GetEntry(s.next + i) >= 0, "cannot read photon count");
+    const auto photonCount = static_cast<long long>(s.photonCount->GetValue());
     for (auto& added : s.added)
     {
       const long long count = added.counts[static_cast<std::size_t>(i)];
+      require(count == photonCount, "score collection is not photon-aligned: " + added.name);
       require(count <= std::numeric_limits<Int_t>::max(), "collection exceeds ROOT counter range: " + added.name);
       if (static_cast<std::size_t>(count) > added.buffer.size())
       {
@@ -2433,9 +2441,10 @@ void BranchAddition::commit(long long events)
       std::copy(added.values.begin() + static_cast<std::ptrdiff_t>(added.valueOffset),
                 added.values.begin() + static_cast<std::ptrdiff_t>(added.valueOffset + count), added.buffer.begin());
       added.valueOffset += static_cast<std::size_t>(count);
+      s.output->cd();
+      require(s.tree->GetBranch(("n_" + added.name).c_str())->Fill() >= 0 &&
+              s.tree->GetBranch(added.name.c_str())->Fill() >= 0, "added branch fill failed");
     }
-    s.output->cd();
-    require(s.tree->Fill() >= 0, "TTree::Fill failed");
   }
   for (auto& added : s.added)
   {
@@ -2468,16 +2477,13 @@ std::string BranchAddition::finish()
     NoHistogramDirectory guard;
     s.output->cd();
     require(s.tree->Write("", TObject::kOverwrite) > 0, "TTree::Write failed");
-    for (const auto& [name, key] : carriedObjects(*s.source, false))
-    {
-      auto object = readObject(key);
-      writeObject(*s.output, name, *object);
-    }
-    for (const auto& [key, value] : metadata.items()) writeText(*s.output, "meta/" + key, dumps(value));
+    const json originalMetadata = readMetadata(*s.source);
+    for (const auto& [key, value] : metadata.items())
+      if (!originalMetadata.contains(key) || originalMetadata.at(key) != value)
+        writeText(*s.output, "meta/" + key, dumps(value));
     require(!s.output->TestBit(TFile::kWriteError), "ROOT file write error");
     s.output->Close();
   }
-  s.columns.reset();
   s.source->Close();
   json added = json::array();
   for (const auto& a : s.added) added.push_back(a.name);

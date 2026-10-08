@@ -1,10 +1,12 @@
-"""Diagnostics: saved model-training QA for offline FinalAnalysis rendering.
+"""Diagnostics: saved internal model-training and calibration QA.
 
 Use the prepared population, its training weights and already validated cell
 scores. ROOT owns histogram accumulation and exact feature moments; Validation
 owns the weighted performance definitions. No eventTree reading, fitting,
 score publication or plotting occurs here. Each model's full support supplies
 its distributions and global metrics; a narrower QA slice is labelled explicitly.
+Training-weighted quantities retain their origin and cannot become plotted
+physics distributions. Their numerical definitions remain learner QA.
 """
 from __future__ import annotations
 
@@ -15,6 +17,138 @@ from pathlib import Path
 import numpy as np
 
 from . import Models, Validation
+
+
+def training_weight_provenance(weights):
+    """Record the actual learner weights; this origin is forbidden for figures."""
+    return dict(schema='PhotonJetPlotWeightProvenanceV1', role='training',
+                definition='class balance times per-class eta/ET flattening',
+                complete_weights_sha256=hashlib.sha256(
+                    np.ascontiguousarray(weights, dtype=np.float64).view(np.uint8)).hexdigest())
+
+
+WORKING_POINT_ET_EDGES = (15, 17, 19, 21, 23, 26, 30, 35)
+
+
+def working_point_centrality_comparison(directory, population, scores, provenance):
+    """Save pooled signal calibration parameters below an application QA directory.
+
+    The 0-10% and 75-80% views use exact weighted score quantiles per ET bin;
+    their dashed references are medians of the finite bin thresholds. They
+    describe calibration only and never change released cuts or emit score
+    histograms. Call this on an offline derived product, not a sealed release.
+    """
+    import ROOT
+    import json
+    from .WorkingPoints import weighted_quantile
+    scores = np.asarray(scores, dtype=np.float64)
+    n = len(scores)
+    Models.require(all(len(getattr(population, k)) == n for k in ('et', 'centrality', 'y', 'weights')),
+                   'calibration comparison arrays differ in length')
+    Models.require(np.isfinite(scores).all() and ((scores >= 0) & (scores <= 1)).all(), 'invalid scores')
+    Models.require(np.isfinite(population.weights).all() and (population.weights > 0).all(), 'invalid weights')
+    Models.require((np.isfinite(population.et) & (population.centrality >= 0) &
+                    (population.centrality < 80)).all(), 'centrality comparison requires finite ET and0-80percent rows')
+    support = (population.et >= 15) & (population.et < 35)
+    target = directory.GetDirectory('centrality_comparison') or directory.mkdir('centrality_comparison')
+    target.cd()
+    edges = array('d', WORKING_POINT_ET_EDGES)
+    slices = ((0, 10, '0-10%'), (75, 80, '75-80%'))
+    counts = []
+    for low, high, label in slices:
+        counts.append(dict(low=low, high_exclusive=high, label=label,
+                           signal_rows=int((support & (population.y == 1) & (population.centrality >= low) &
+                                            (population.centrality < high)).sum())))
+    for level in (70, 80, 90):
+        grid = ROOT.TH2D(f'thresholds_{level}', '', 2, 0, 2, len(edges)-1, edges)
+        median = ROOT.TH1D(f'median_{level}', '', 2, 0, 2)
+        for c, (low, high, label) in enumerate(slices):
+            grid.GetXaxis().SetBinLabel(c+1, label); median.GetXaxis().SetBinLabel(c+1, label)
+            central = support & (population.y == 1) & (population.centrality >= low) & (population.centrality < high)
+            values = []
+            for j, (et_low, et_high) in enumerate(zip(edges[:-1], edges[1:])):
+                selected = central & (population.et >= et_low) & (population.et < et_high)
+                value = weighted_quantile(scores[selected], population.weights[selected], 1-level/100.) \
+                    if selected.any() else float('nan')
+                grid.SetBinContent(c+1, j+1, value)
+                if np.isfinite(value): values.append(value)
+            median.SetBinContent(c+1, float(np.median(values)) if values else float('nan'))
+        grid.Write(); median.Write()
+    info = dict(schema='PhotonIDCentralityCalibrationComparisonV1', status='PASS',
+                origin='calibration-only parameters from pooled prepared signal rows; no released-cut change',
+                et_edges_gev=list(WORKING_POINT_ET_EDGES), centrality_slices=counts,
+                thresholds='exact pooled signal weighted_quantile(score,weight,1-efficiency); no average of5percent cuts',
+                reference='median of finite ET-bin thresholds in each slice',
+                weight_provenance=training_weight_provenance(population.weights), provenance=provenance)
+    ROOT.TObjString(json.dumps(info, sort_keys=True)).Write('derivation')
+    directory.cd()
+    return info
+
+
+def working_point_review(directory, population, scores, working_points, provenance):
+    """Save calibration QA from a released model's complete population.
+
+    The fine centrality/ET grid describes score quantiles; it never replaces
+    the released working points. Region counts use the released cuts at each
+    candidate's own centrality, not the centrality midpoint drawn on the plot.
+    Score histograms use learner weights and are not physics plot inputs;
+    caller provenance cannot override that measured weight origin.
+    ``directory`` is a writable ROOT directory in an offline QA product.
+    """
+    import ROOT
+    import json
+    from .WorkingPoints import weighted_quantile, classify
+    Models.require(len(working_points['cells']) == 1, 'review requires one nominal model cell')
+    cell = next(iter(working_points['cells'].values()))
+    n = len(scores)
+    Models.require(all(len(getattr(population, k)) == n for k in ('et', 'centrality', 'y', 'weights')),
+                   'review arrays differ in length')
+    Models.require(np.isfinite(scores).all() and ((scores >= 0) & (scores <= 1)).all(), 'invalid scores')
+    Models.require(np.isfinite(population.weights).all() and (population.weights > 0).all(), 'invalid weights')
+    domain = working_points['calibration_domain']
+    eligible = ((population.et >= domain['et_min']) & (population.et < domain['et_max_exclusive']) &
+                (population.centrality >= 0) & (population.centrality < 80))
+    Models.require(eligible.all(), 'review must use the complete nominal calibration population')
+    directory.cd()
+    edges = array('d', WORKING_POINT_ET_EDGES)
+    for level in (70, 80, 90):
+        grid = ROOT.TH2D(f'thresholds_{level}', '', 16, 0, 80, len(edges)-1, edges)
+        median = ROOT.TH1D(f'median_{level}', '', 16, 0, 80)
+        for c in range(16):
+            values = []
+            central = ((population.y == 1) & (population.centrality >= c*5) & (population.centrality < (c+1)*5))
+            for j, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+                selected = central & (population.et >= low) & (population.et < high)
+                value = weighted_quantile(scores[selected], population.weights[selected], 1-level/100.) if selected.any() else float('nan')
+                grid.SetBinContent(c+1, j+1, value)
+                if np.isfinite(value): values.append(value)
+            median.SetBinContent(c+1, float(np.median(values)) if values else float('nan'))
+        grid.Write(); median.Write()
+    regions = classify(scores, population.centrality, cell)
+    counts = []
+    for i, (low, high) in enumerate(((0, 20), (20, 50), (50, 80))):
+        central = (population.centrality >= low) & (population.centrality < high)
+        row = dict(low=low, high=high, rows=int(central.sum()), regions={})
+        for label, code in (('non_tight', 1), ('gap', 2), ('tight', 3), ('below', 0)):
+            row['regions'][label] = int((central & (regions == code)).sum())
+        for label, klass in (('signal', 1), ('background', 0)):
+            selected = central & (population.y == klass)
+            # ROOT's last bin is half-open; include exactly-one scores in it.
+            values = np.minimum(scores[selected], np.nextafter(1., 0.))
+            hist = histogram(f'score_{i}_{label}', values, population.weights[selected], 50, 0, 1)
+            hist.Write()
+            row[label] = int(selected.sum())
+        counts.append(row)
+    info = dict(schema='PhotonIDWorkingPointReviewV1', status='PASS', rows=n,
+                population='all eligible prepared rows, train plus holdout',
+                weighting='released training weights; forbidden for plotted score distributions',
+                weight_provenance=training_weight_provenance(population.weights),
+                grid='weighted signal quantiles in 5-percent centrality and ET bins; dashed lines are slice medians',
+                cuts='unchanged released working points evaluated at each candidate centrality',
+                classes=counts, working_points=working_points, provenance=provenance)
+    ROOT.TObjString(json.dumps(info, sort_keys=True)).Write('review')
+    working_point_centrality_comparison(directory, population, scores, provenance)
+    return info
 
 
 FEATURE_FIELDS = {
@@ -314,6 +448,8 @@ def save(folder, population, recipe, scores, cells, config, request_sha256, *, p
                     et_ranges_gev=recipe['et_ranges_gev'], features=recipe['features'],
                     feature_order=recipe['features'], max_depth=recipe['learner'].get('max_depth'),
                     weight_definition='class balance times per-class eta/ET flattening; no analysis event weights',
+                    weight_provenance=dict(schema='PhotonJetPlotWeightProvenanceV1', role='training',
+                                           complete_weights_sha256=identity['training_weights_sha256']),
                     score_origin='validated saved ROOT_RBDT cell scores' if recipe['algorithm'] == 'bdt' else 'validated saved model scores',
                     feature_separation='(signal_mean-background_mean)/sqrt((signal_variance+background_variance)/2), population variances',
                     gain_definition='sum of saved XGBoost total_gain across cells; fraction normalized over all features',

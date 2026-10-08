@@ -31,8 +31,9 @@ samples:
     groups: [/path/to/published_pp_group]
 ```
 
-The selection defaults to the frozen photon-ID and isolation definitions,
-pp Photon4, and AuAu Photon12 with minimum-bias selection. Simulation families
+The selection defaults to the new AuAu 15–35 GeV nominal model, the original
+PPG12 model for pp, the frozen isolation definitions, pp Photon4, and AuAu
+Photon12 with minimum-bias selection. Simulation families
 are `photonjet` and `inclusivejet`; keep each named SI or DI population separate.
 
 DATA produces `<system>/run_<run>.root` for every input run, followed by
@@ -49,9 +50,31 @@ and simulation packages are reused only when their inputs, code, selection and
 corrections match. Changed runs are rebuilt; combined DATA is rebuilt from the
 validated run files.
 
-An optional `PhotonIDSelection` selects a sealed model and its working points.
-Native BDT releases evaluate the stored H70 feature vector while reading each
-tree; they do not require a separate scored-tree production.
+Choose the model and its working points in `treetohists.yaml`:
+
+```yaml
+Selection:
+  PhotonIDModels: /path/to/models  # defaults to PhotonID/models
+pp:
+  Model: ppg12_original
+auau:
+  Model: nominal_retrained_v1     # wideET_v1 or any other released AuAu model
+  TightWP: WP70
+  NonTightWP: WP80
+  NonTightMinimum: 0.1
+```
+
+Normal reduction reads the selected stored score. Add missing scores with
+PhotonID's `scoreCampaign` first; an unavailable score or mismatched release
+receipt fails clearly. ID, candidate ranking and regions are derived from
+that score and its own cuts, independently of historical tight/non-tight labels.
+The pp original model retains its established cuts; released models provide
+WP70, WP80 and WP90. Overlapping working-point bands are rejected.
+
+`ScoreMode: native` explicitly evaluates a released BDT from saved H70 features
+during reduction. It uses the same evaluator, routing and cuts as stored
+scoring. Existing `PhotonIDSelection: /path/to/selection.json` recipes retain
+this native route; choose a named `Model` or an explicit path, once per system.
 
 p+p simulation weights sum the 0 and 1.5 mrad periods using their luminosity
 shares, interaction fractions and truth-vertex fits from TreeProduction's

@@ -321,7 +321,14 @@ const std::regex kBranch("[A-Za-z][A-Za-z0-9_]*"), kSha("[0-9a-f]{64}");
 
 /* A sealed PhotonID release (PhotonIDSelectionV1 + PhotonIDReleaseV1 + PhotonIDWorkingPointsV1) as the selection's
    score: its single score branch, applicability domain and routed WP70/WP80 lines. */
-Json optionalSelection(const std::filesystem::path &path, const std::string &system, const Json &features) {
+Json optionalSelection(const std::filesystem::path &path, const std::string &system, const Json &features,
+                       const std::string &tightWP="WP70", const std::string &nonTightWP="WP80",
+                       double nonTightMinimum=0.1) {
+  for (const auto &name : {tightWP, nonTightWP})
+    if (name!="WP70" && name!="WP80" && name!="WP90")
+      throw std::runtime_error("choose a released working point: WP70, WP80 or WP90");
+  if (!std::isfinite(nonTightMinimum) || nonTightMinimum<0 || nonTightMinimum>=1)
+    throw std::runtime_error("NonTightMinimum must be finite in [0,1)");
   const auto folder = path.parent_path();
   const Json spec = package(path.string(), "PhotonIDSelectionV1");
   const Json release = package((folder / "manifest.json").string(), "PhotonIDReleaseV1");
@@ -369,11 +376,17 @@ Json optionalSelection(const std::filesystem::path &path, const std::string &sys
     const Json &w = wp.at("cells").at(id);
     if (w.value("status", "") != "PASS" || w.at("axis") != (system == "pp" ? "pho_et" : "cent_value"))
       throw std::runtime_error("model cell has no applicable working-point validation");
-    const Json tight = line(w.at("cuts").at("WP70"), "WP70"), high = line(w.at("cuts").at("WP80"), "WP80");
+    // Released cuts also retain calibration bins and efficiency diagnostics.
+    // The selection consumes only the sealed affine coefficients.
+    const auto coefficients=[&](const std::string &name) {
+      const auto &cut=w.at("cuts").at(name);
+      return line(Json{{"intercept",cut.at("intercept")},{"slope",cut.at("slope")}},name);
+    };
+    const Json tight=coefficients(tightWP), high=coefficients(nonTightWP);
     for (const auto &x : system == "pp" ? et : cent) {
       const double t = tight["intercept"].get<double>() + tight["slope"].get<double>() * x.get<double>();
       const double hh = high["intercept"].get<double>() + high["slope"].get<double>() * x.get<double>();
-      if (!(0.1 < hh && hh <= t && t <= 1.0)) throw std::runtime_error("optional working-point bands overlap or are invalid");
+      if (!(nonTightMinimum < hh && hh <= t && t <= 1.0)) throw std::runtime_error("selected working-point bands overlap or are invalid");
     }
     if (!ids.insert(id).second) throw std::runtime_error("duplicate working-point cells");
     ets.insert(ets.end(), {et[0].get<double>(), et[1].get<double>()});
@@ -395,7 +408,8 @@ Json optionalSelection(const std::filesystem::path &path, const std::string &sys
     }
   Json result={{"score_branch", score}, {"state_branch", nullptr}, {"score_metadata", "meta/photon_models"},
               {"model_name", release.at("name")}, {"release_sha256", release.at("release_sha256")}, {"domain", d},
-              {"cells", cells}, {"selection_sha256", sha256File(path.string())}, {"working_points_sha256", sha256File(wpPath.string())}};
+              {"cells", cells}, {"selection_sha256", sha256File(path.string())}, {"working_points_sha256", sha256File(wpPath.string())},
+              {"working_point_choice", {{"tight",tightWP},{"non_tight_upper",nonTightWP},{"non_tight_lower",nonTightMinimum}}}};
   if (spec.contains("et_ranges_gev")) result["et_ranges_gev"]=spec.at("et_ranges_gev");
   if (wp.contains("calibration_domain") && wp.at("calibration_domain")!=d) throw std::runtime_error("working points were calibrated on another model domain");
   if (release.at("recipe").at("algorithm")=="bdt") {
@@ -503,7 +517,7 @@ Settings Settings::read(const std::string &path, const std::string &home) {
   Settings s;
   s.path = std::filesystem::absolute(path).string();
   s.home = root.string();
-  std::set<std::string> known = {"Selection.Name", "Selection.PhotonIDPackage", "Selection.AuAuIsolationPackage", "Axes.XjEdges",
+  std::set<std::string> known = {"Selection.Name", "Selection.PhotonIDPackage", "Selection.AuAuIsolationPackage", "Selection.PhotonIDModels", "Axes.XjEdges",
                                  "Axes.RecoResponseEdges", "Axes.TruthResponseEdges", "Fill.RequireStage3Fractions", "Fill.ResponseVariation"};
 
   /* the frozen packages */
@@ -520,7 +534,8 @@ Settings Settings::read(const std::string &path, const std::string &home) {
   for (const std::string system : {"pp", "auau"}) {
     const std::string prefix = system + ".";
     for (const char *k : {"ScoreBranch", "StateBranch", "ScoreMetadata", "Tight", "NonTightLow", "NonTightHigh", "IsolationRadius",
-                          "IsolationThreshold", "IsolationSidebandGap", "PhotonIDSelection", "DataTrigger", "SimulationPeriods"})
+                          "IsolationThreshold", "IsolationSidebandGap", "PhotonIDSelection", "Model", "ScoreMode",
+                          "TightWP", "NonTightWP", "NonTightMinimum", "DataTrigger", "SimulationPeriods"})
       known.insert(prefix + k);
     auto has = [&](const char *k) { return !value(env, prefix + k).empty(); };
     const Json &spec = pid.at(system);
@@ -596,13 +611,54 @@ Settings Settings::read(const std::string &path, const std::string &home) {
                         {"data_run_periods", system == "auau" ? Json::object() : Json{{"0mrad", {47289, 51274}}, {"1p5mrad", {51274, 54000}}}}}},
                       {"verify_nominal_id", nominalScore && cuts == originalCuts && pidSha == sha256File(canonicalId.string())},
                       {"verify_nominal_isolation", isolation == originalIsolation && (system == "pp" || isoSha == sha256File(canonicalIso.string()))}});
-    if (has("PhotonIDSelection")) {
+    if (has("Model") && has("PhotonIDSelection"))
+      throw std::runtime_error("choose Model or the explicit PhotonIDSelection path, not both");
+    std::filesystem::path modelSelection;
+    if (has("PhotonIDSelection")) modelSelection=relative(value(env,prefix+"PhotonIDSelection"));
+    const std::string modelName=has("Model") ? value(env,prefix+"Model") : std::string();
+    const bool originalModel=(system=="pp" && modelName=="ppg12_original") ||
+                             (system=="auau" && modelName=="schema10_original");
+    if (has("Model") && !originalModel) {
+      if (!std::regex_match(modelName,kBranch)) throw std::runtime_error("invalid PhotonID model name");
+      const auto models=value(env,"Selection.PhotonIDModels").empty() ? (root/"../PhotonID/models").lexically_normal()
+                       : relative(value(env,"Selection.PhotonIDModels"));
+      modelSelection=models/(system=="pp" ? "PP" : "AuAu")/modelName/"selection.json";
+      if (!std::filesystem::is_regular_file(modelSelection))
+        throw std::runtime_error("selected model release is unavailable: "+modelSelection.string());
+    }
+    if (!modelSelection.empty()) {
       for (const char *k : {"ScoreBranch", "StateBranch", "ScoreMetadata", "Tight", "NonTightLow", "NonTightHigh"})
         if (has(k)) throw std::runtime_error("an optional release owns its score and working points; do not override " + prefix + k);
-      const Json optional = optionalSelection(relative(value(env, prefix + "PhotonIDSelection")), system,spec.at("features"));
+      const std::string tight=has("TightWP") ? value(env,prefix+"TightWP") : "WP70";
+      const std::string high=has("NonTightWP") ? value(env,prefix+"NonTightWP") : "WP80";
+      double low=0.1;
+      if (has("NonTightMinimum")) {
+        const auto values=numbers(prefix+"NonTightMinimum",value(env,prefix+"NonTightMinimum"));
+        if (values.size()!=1) throw std::runtime_error("NonTightMinimum needs one numeric score");
+        low=values[0];
+      }
+      Json optional = optionalSelection(modelSelection, system,spec.at("features"),tight,high,low);
+      // Named models use stored scores normally. The explicit selection-path
+      // interface retains native evaluation for pinned production recipes.
+      const std::string mode=has("ScoreMode") ? value(env,prefix+"ScoreMode") : (has("Model") ? "stored" : "native");
+      if (mode!="stored" && mode!="native") throw std::runtime_error("ScoreMode must be stored or native");
+      if (mode=="native" && !optional.contains("native_evaluation"))
+        throw std::runtime_error("selected model has no qualified native evaluator");
+      if (mode=="stored") optional.erase("native_evaluation");
+      optional["score_mode"]=mode;
       for (const char *k : {"score_branch", "state_branch", "score_metadata"}) entry[k] = optional.at(k);
+      entry["non_tight_low"]={{"intercept",low},{"slope",0.0}};
       entry["optional_model"] = optional;
       entry["verify_nominal_id"] = false;
+    } else if (originalModel) {
+      if (has("ScoreMode") && value(env,prefix+"ScoreMode")!="stored")
+        throw std::runtime_error("the original frozen model uses its verified stored score");
+      if (has("TightWP") || has("NonTightWP") || has("NonTightMinimum"))
+        throw std::runtime_error("the original frozen model uses its established cuts; use explicit line overrides for a variation");
+      entry["model_choice"]=modelName;
+      entry["verify_nominal_id"]=false;
+    } else if (has("ScoreMode") || has("TightWP") || has("NonTightWP") || has("NonTightMinimum")) {
+      throw std::runtime_error("model/working-point options require a selected Model or PhotonIDSelection");
     }
     /* p+p simulation: the PPG12 sum over crossing-angle periods (photonjet::configurePpPeriods) */
     if (system == "pp") entry["simulation_periods"] = ppSimulationPeriods(root, has("SimulationPeriods") ? value(env, prefix + "SimulationPeriods") : "all");

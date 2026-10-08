@@ -24,12 +24,13 @@ sys.path.insert(0, str(HERE))
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description='Train and score named photon models from completed eventTrees.')
     parser.add_argument('command', choices=['reTrainNominal', 'trainNew', 'inspectCampaign', 'projectCampaign', 'verifyProjections',
-                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA', 'score', 'listModels', 'planCampaign'])
+                                         'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA', 'score', 'scoreCampaign', 'listModels', 'planCampaign'])
     parser.add_argument('target', nargs='?', help='AuAu/PP/AuAuAndPP, model recipe or saved model name')
     parser.add_argument('system', nargs='?', choices=['AuAu', 'PP'])
     parser.add_argument('--config', type=Path, default=HERE / 'config/training.yaml')
     parser.add_argument('--models', type=Path, default=HERE / 'models', help='model release root')
     parser.add_argument('--group', type=Path, action='append', default=[], help='complete published group; repeat as needed')
+    parser.add_argument('--candidate-root', type=Path, help='scoring: stage checked copies here without advancing published groups')
     parser.add_argument('--code-root', type=Path, default=HERE.parent, help='repository containing TreeProduction and its eventTree schema')
     parser.add_argument('--release-version', default='v1', help='explicit version for a new training recipe/input population')
     parser.add_argument('--check', action='store_true', help='read-only input, recipe and dependency preview')
@@ -57,18 +58,20 @@ def arguments(argv=None):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
     if args.command == 'trainNew' and not ((args.target in ('centAndETdepModels', 'routingStudy', 'rangeStudy', 'depthStudy', 'MLP', 'logReg') and args.system == 'AuAu') or (args.target == 'PPG12' and args.system == 'PP')):
         parser.error('trainNew requires an AuAu study or PPG12 PP')
-    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA') and (args.target not in ('AuAu', 'PP') or args.system):
+    if args.command in ('planCampaign', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA', 'scoreCampaign') and (args.target not in ('AuAu', 'PP') or args.system):
         parser.error(args.command + ' requires AuAu or PP')
     if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign') or args.inputs:
         args.no_score = True
     # Training produces portable releases. Publishing scored tree copies is a
-    # separate explicit command; reduction normally evaluates models in place.
+    # separate explicit command; normal reduction reads the named saved scores.
     if args.command in ('reTrainNominal', 'trainNew'): args.no_score = True
     if args.command == 'score' and (not args.target or not args.system):
         parser.error('score requires a saved model name and AuAu/PP')
     if args.command == 'listModels' and args.target not in (None, 'AuAu', 'PP'):
         parser.error('listModels accepts AuAu or PP')
-    if args.inputs and (args.group or args.target == 'AuAuAndPP' or args.command in ('score', 'listModels', 'planCampaign')):
+    if args.candidate_root and args.command not in ('score', 'scoreCampaign'):
+        parser.error('--candidate-root applies only to scoring')
+    if args.inputs and (args.group or args.target == 'AuAuAndPP' or args.command in ('score', 'scoreCampaign', 'listModels', 'planCampaign')):
         parser.error('--inputs is a training catalogue; do not combine it with --group, paired systems or scoring')
     if args.command == 'verifyProjections' and not args.inputs:
         parser.error('verifyProjections requires --inputs from inspectCampaign')
@@ -86,8 +89,8 @@ def arguments(argv=None):
         parser.error('projection event bound must be 1..100000 and shard index must be nonnegative')
     if args.auau_reference and (args.command not in ('trainCampaign', 'collectQA') or args.target != 'PP'):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
-    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA'):
-        parser.error('--model applies only to trainCampaign, prepareCells, diagnoseCampaign, finalizeCampaign or collectQA')
+    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA', 'scoreCampaign'):
+        parser.error('--model applies only to campaign fitting, diagnostics, collection or scoring')
     if args.command in ('diagnoseCampaign', 'finalizeCampaign') and (len(args.model) != 1 or not args.inputs):
         parser.error(args.command + ' requires one --model and the original --inputs catalogue')
     if args.fit_code_manifest and args.command not in ('diagnoseCampaign', 'finalizeCampaign'):
@@ -791,7 +794,7 @@ def main(argv=None):
     args = arguments(argv)
     from src import Models
     campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA') else []
-    if args.model:
+    if args.model and args.command != 'scoreCampaign':
         Models.require(len(args.model) == len(set(args.model)), 'duplicate --model recipe')
         Models.require(set(args.model) <= set(campaign_names),
                        'unknown campaign recipe: ' + ', '.join(sorted(set(args.model) - set(campaign_names))))
@@ -831,17 +834,17 @@ def main(argv=None):
     else:
         from src import Diagnostics, Inputs, Scoring, Training
         systems = ['AuAu', 'PP'] if args.target == 'AuAuAndPP' else [
-            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign') else args.system]
+            args.target if args.command in ('reTrainNominal', 'inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'diagnoseCampaign', 'finalizeCampaign', 'scoreCampaign') else args.system]
         names = {'reTrainNominal': ['nominal_retrained_v1'], 'prepareCampaign': ['nominal_retrained_v1', 'wideET_v1'],
                  'inspectCampaign': [], 'projectCampaign': [], 'verifyProjections': [], 'prepareCells': campaign_names, 'trainCampaign': campaign_names, 'diagnoseCampaign': args.model, 'finalizeCampaign': args.model, 'trainNew': {
             'centAndETdepModels': ['centCoarse_v1', 'centFine_v1', 'ET_v1', 'ETcentCoarse_v1', 'ETcentFine_v1'],
             'routingStudy': Models.ROUTING_MODELS,
             'rangeStudy': ['wideET_v1'],
             'depthStudy': Models.DEPTH_STUDY,
-            'MLP': ['MLP_v1'], 'logReg': ['logReg_v1'], 'PPG12': ['ppg12_retrained_v1']}.get(args.target, []), 'score': [args.target]}[args.command]
+            'MLP': ['MLP_v1'], 'logReg': ['logReg_v1'], 'PPG12': ['ppg12_retrained_v1']}.get(args.target, []), 'score': [args.target], 'scoreCampaign': []}[args.command]
         result = []
         for system in systems:
-            if args.command != 'score':
+            if args.command not in ('score', 'scoreCampaign'):
                 algorithms = {'prepare'} if args.command in ('inspectCampaign', 'projectCampaign', 'verifyProjections', 'prepareCampaign') else {
                     Models.recipe(config, system, name)['algorithm'] for name in names}
                 runtime = [Training.runtime_status(algorithm) for algorithm in sorted(algorithms)]
@@ -855,15 +858,15 @@ def main(argv=None):
             groups = args.group or [Path(p) for p in config['datasets'][system]]
             # For a paired command, configuration owns the separate system collections.
             Models.require(not (len(systems) > 1 and args.group), 'paired systems use separate config dataset groups')
-            inspection = {} if args.check or args.command == 'score' else dict(
+            inspection = {} if args.check or args.command in ('score', 'scoreCampaign') else dict(
                 progress_path=args.models / '.progress' / 'inputs.json', progress_identity=args.progress_identity)
             # Source hashes are checked by the bounded projection invocation.
             # Subsequent training verifies the GPFS cache, not the TG payload.
-            if args.command != 'score': inspection['verify_payload'] = False
+            if args.command not in ('score', 'scoreCampaign'): inspection['verify_payload'] = False
             if args.require_roster: inspection['require_population'] = True
             inputs = Inputs.load_catalogue(args.inputs, system) if args.inputs else Inputs.published_inputs(groups, system, **inspection)
             simulation = None; populations = {}
-            if args.command != 'score':
+            if args.command not in ('score', 'scoreCampaign'):
                 required = {s for samples in config['sources'][system].values() for s in samples}
                 selected = [i for i in inputs if
                     i['source']['si_di_role'] in ('EMBEDDED', 'SI') and
@@ -871,6 +874,21 @@ def main(argv=None):
                 simulation = selected if args.inputs else training_baseline(selected, verify_payload=False)
                 Models.require({str(i['source']['sample']).lower() for i in simulation} == required,
                                'campaign requires the complete configured training sample population')
+            if args.command == 'scoreCampaign':
+                # Every requested release is verified before the first source
+                # candidate is opened; no model is trained by this command.
+                folders = [Models.release_dir(args.models, system, name) for name in args.model] if args.model else [
+                    path.parent for path in sorted((args.models / system).glob('*/manifest.json'))
+                    if Models.read_json(path)['schema'] == 'PhotonIDReleaseV1']
+                # Validate each release once for this scoring invocation,
+                # rather than rehashing saved diagnostics during discovery.
+                selected = Scoring.selected_releases(folders) if args.check else None
+                scored = len(groups) if args.check else Scoring.score_groups(inputs, folders, code_root=args.code_root,
+                    candidate_root=args.candidate_root, progress_identity=args.progress_identity)
+                result.append(dict(status='CHECKED' if args.check else 'CANDIDATES_READY' if args.candidate_root else 'PASS', system=system,
+                                   models=[m['name'] for _, m in selected] if args.check else [p.name for p in folders],
+                                   groups=scored))
+                continue
             if args.command == 'inspectCampaign':
                 body = Inputs.catalogue_body(simulation, system)
                 record = dict(status='CHECKED' if args.check else 'INSPECTED',
@@ -906,7 +924,7 @@ def main(argv=None):
                 result.append(verify_projections(simulation, config, args, system=system))
                 continue
             args.projections = None
-            args.use_projection_cache = not args.check and args.command != 'score'
+            args.use_projection_cache = not args.check and args.command not in ('score', 'scoreCampaign')
             if args.command == 'prepareCampaign':
                 result.extend(prepare_campaign(simulation, config, args, populations))
                 continue
@@ -923,7 +941,9 @@ def main(argv=None):
                     folder = Models.release_dir(args.models, system, name)
                     manifest = Models.load_release(folder)
                     record = dict(status='CHECKED', model=name, groups=len(groups)) if args.check else dict(
-                        status='PASS', model=name, groups=Scoring.score_groups(inputs, folder, code_root=args.code_root))
+                        status='CANDIDATES_READY' if args.candidate_root else 'PASS', model=name,
+                        groups=Scoring.score_groups(inputs, folder, code_root=args.code_root,
+                            candidate_root=args.candidate_root, progress_identity=args.progress_identity))
                 else:
                     record = train_release(inputs, config, system, name, args,
                                            simulation=simulation, populations=populations)

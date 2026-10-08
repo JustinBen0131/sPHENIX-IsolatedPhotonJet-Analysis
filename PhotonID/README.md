@@ -100,8 +100,22 @@ Training leaves the input trees unchanged.
 [Follow the run guide](docs/run-guide.md#run) for the exact commands, shard execution
 and worker scratch setup.
 
-For analysis QA, give TreeToHists the release's `selection.json`; give FinalAnalysis
-the collected `models.yaml`. Drawing saved model diagnostics does not refit.
+Before the usual histogram pass, add all released scores together:
+
+```bash
+./PhotonID/photon_id.sh scoreCampaign AuAu --group /path/to/group
+./PhotonID/photon_id.sh scoreCampaign PP --group /path/to/group
+```
+
+Each source is copied once for all missing scores. Earlier scores, fractions
+and original fields are preserved; matching completed groups are reused.
+For parallel production, `--candidate-root /path/to/work` stages the checked
+copies and receipts without changing the published group. Its publisher commits
+the complete group against the same input version.
+TreeToHists selects one `Model` and its working points in its YAML. The default
+is the new AuAu nominal model and the original PPG12 model for pp.
+
+For saved analysis QA, give FinalAnalysis the collected `models.yaml`. Drawing saved model diagnostics does not refit.
 Working-point/score histogram QA requires applying the model through TreeToHists
 and rendering those histograms through FinalAnalysis.
 
