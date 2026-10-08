@@ -50,6 +50,7 @@ def arguments(argv=None):
     parser.add_argument('--execution-plan', action='store_true', help='planCampaign: preview independent cells and release barriers; no dispatch')
     parser.add_argument('--census', type=Path, help='planCampaign --execution-plan: saved preparation_census.json for exact cell counts')
     parser.add_argument('--fit-code-manifest', type=Path, help='diagnoseCampaign: original code manifest when the diagnostic source differs from the fit')
+    parser.add_argument('--prepared-population', type=Path, help='finalizeCampaign: reuse the original completed numeric population after a preparation-code update')
     args = parser.parse_args(argv)
     if args.command == 'reTrainNominal' and args.target not in ('AuAu', 'PP', 'AuAuAndPP'):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
@@ -90,6 +91,8 @@ def arguments(argv=None):
         parser.error(args.command + ' requires one --model and the original --inputs catalogue')
     if args.fit_code_manifest and args.command not in ('diagnoseCampaign', 'finalizeCampaign'):
         parser.error('--fit-code-manifest applies only to diagnoseCampaign or finalizeCampaign')
+    if args.prepared_population and (args.command != 'finalizeCampaign' or not args.fit_code_manifest):
+        parser.error('--prepared-population requires finalizeCampaign and the original --fit-code-manifest')
     if (args.cell or args.assemble_only) and args.command != 'trainCampaign':
         parser.error('--cell and --assemble-only apply only to trainCampaign')
     if args.cell and (len(args.model) != 1 or not args.inputs or args.assemble_only):
@@ -142,6 +145,55 @@ def file_snapshot(paths):
     return result
 
 
+def retained_population(simulation, recipe, args):
+    """Verify the original numeric arrays once; require no retired event store.
+
+    This recovery path preserves the original preparation identity. It opens
+    only its receipt and twelve arrays, and is available only for completion
+    of an already fitted model whose original source manifest is supplied.
+    """
+    from src import Inputs, Models
+    Models.require(args.command == 'finalizeCampaign' and args.fit_code_manifest,
+                   'retained population requires calibration-only completion')
+    work = Path(args.prepared_population).absolute()
+    Models.require(work.resolve() == work and work.is_dir(), 'retained population directory is aliased or missing')
+    path = work / 'population.json'
+    Models.require(path.is_file() and not path.is_symlink(), 'original population receipt is missing or aliased')
+    receipt_hash = Models.file_hash(path)
+    receipt = Models.read_json(path)
+    definition = Inputs.population_definition(recipe)
+    Models.require(receipt.get('schema') == 'PhotonIDPopulationV1' and receipt.get('sources') == simulation and
+                   receipt.get('definition') == definition and receipt.get('split_reference') is None,
+                   'retained population differs from the original sources, recipe or split reference')
+    manifest = Models.read_json(args.fit_code_manifest)
+    Models.require(manifest.get('schema') == 'PhotonIDPublicCodeSnapshotV1', 'original fit code manifest is invalid')
+    original = {Path(row['path']).name: row['sha256'] for row in manifest['members']
+                if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
+    expected = Models.digest(dict(inputs=simulation, **definition, preparation_code=original['Inputs.py']))
+    Models.require(receipt['input_recipe_sha256'] == expected,
+                   'retained population does not bind the original preparation code')
+    names = {'x', 'y', 'et', 'centrality', 'weights', 'train', 'partition',
+             'split_rank', 'source_index', 'entry', 'photon', 'event_key'}
+    files = receipt['array_files']
+    Models.require(set(files) == names and set(files.values()) == set(receipt['arrays']) and
+                   len(set(files.values())) == len(names), 'retained population array roster is incomplete')
+    for filename, checksum in receipt['arrays'].items():
+        array = work / filename
+        Models.require(Path(filename).name == filename and array.is_file() and not array.is_symlink() and
+                       Models.file_hash(array) == checksum, 'retained population array changed: ' + filename)
+    population = Inputs.load_population(work, receipt)
+    Models.require(population.x.shape == (receipt['rows'], len(recipe['features'])) and
+                   all(len(getattr(population, key)) == receipt['rows'] for key in
+                       ('y', 'et', 'centrality', 'weights', 'train', 'partition', 'split_rank')),
+                   'retained population array dimensions differ')
+    Models.require(Models.file_hash(path) == receipt_hash, 'original population receipt changed during reuse')
+    args.population_reuse = dict(population_receipt_sha256=receipt_hash,
+                                original_population_sha256=expected,
+                                numeric_split_sha256=Inputs.split_witness(receipt),
+                                arrays=receipt['arrays'])
+    return population, work
+
+
 def prepared_population(simulation, recipe, config, args, cache):
     """Reuse verified matrices within one invocation; widen a frozen nominal split.
 
@@ -149,6 +201,8 @@ def prepared_population(simulation, recipe, config, args, cache):
     ROOT bytes for every learner. A later invocation performs full hash checks.
     """
     from src import Inputs, Models
+    if getattr(args, 'prepared_population', None) is not None:
+        return retained_population(simulation, recipe, args)
     projections = getattr(args, 'projections', None)
     if projections is None and getattr(args, 'use_projection_cache', False):
         projections = args.projections = campaign_projections(simulation, config, args, system=recipe['system'])
@@ -435,8 +489,13 @@ def verify_retained_request(folder, r, simulation, plan, args, *, finalizing=Fal
                          if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
         Models.require(source_hashes == fit_code, 'original fit code manifest differs from the retained request')
     if finalizing:
+        changed_coordination = {'WorkingPoints.py', 'photon_id.py'}
+        if getattr(args, 'prepared_population', None) is not None:
+            # The original arrays bypass preparation. Recipe/runtime, original
+            # request, diagnosed models and every array are still checked.
+            changed_coordination.update(('Inputs.py', 'Models.py'))
         Models.require(set(fit_code) == set(current_code) and all(
-            fit_code[key] == current_code[key] for key in fit_code if key not in ('WorkingPoints.py', 'photon_id.py')),
+            fit_code[key] == current_code[key] for key in fit_code if key not in changed_coordination),
             'retained completion requires unchanged fitter, evaluator, inputs and numerical validation')
     fit_request = dict(recipe=r, inputs=simulation, code=fit_code, environment=original['environment'])
     if plan['split_reference'] is not None:
@@ -634,6 +693,8 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         if completion:
             Models.require(population.receipt['input_recipe_sha256'] == completion['population_sha256'],
                            'retained diagnosis used another prepared population')
+            if getattr(args, 'population_reuse', None) is not None:
+                completion['population_reuse'] = args.population_reuse
         calibration = calibration_population(population, r)
         qa_scores = np.full(len(calibration.y), np.nan, np.float64)
         qa_coverage = np.zeros(len(calibration.y), np.uint8)

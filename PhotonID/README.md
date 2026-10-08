@@ -241,6 +241,17 @@ completion identity and original fit provenance. Approximation warnings remain
 visible for review. A missing diagnosis or changed training inputs/fitter is
 an error, rather than an implicit retraining request.
 
+If preparation code has since changed but the original twelve numeric arrays
+are intact, add `--prepared-population /path/to/original/population` to that
+completion command. The directory must contain the original `population.json`
+and every array it lists. Completion checks the original input catalogue,
+preparation recipe and code identity, all array hashes, and unchanged fitter,
+evaluation and validation code. It records the array witness in the release
+manifest, preserves the original receipt and fitted artifacts, and creates no
+event database or replacement population. This recovery option applies to
+populations with their own split; borrowed split references require their
+original preparation workflow.
+
 ### 4. Collect the releases for FinalAnalysis
 
 After all recipes listed by `planCampaign` have finished:
