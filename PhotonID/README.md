@@ -16,7 +16,9 @@ Use one entry point, `./PhotonID/photon_id.sh`, for every PhotonID stage:
 Validation and working-point calibration are mandatory phases of `trainCampaign`.
 A failed check stops the release; there is no separate validation command to
 remember after fitting. Source extraction is shared across model variants.
-Preparation and training reuse the extracted rows without reopening the trees.
+Finalized analysis TTrees, including those on SDCC TG storage, are the normal
+source input. Reading them again is valid; the pipeline does not rebuild DSTs.
+The staged campaign can reuse extracted rows across its model variants.
 
 ## Setup
 
