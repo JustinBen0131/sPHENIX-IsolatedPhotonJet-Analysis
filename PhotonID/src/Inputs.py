@@ -1088,19 +1088,26 @@ def prepare_on_scratch(inputs, recipe, work, scratch_root, **options):
         population = prepare(inputs, recipe, local, **options)
         receipt = population.receipt
         total = sum((local / filename).stat().st_size for filename in receipt['arrays'])
-        tracker = WorkProgress(local / 'publication-progress.json', total, 'bytes',
+        # Publication continues the same population counter. Its photon/event
+        # visits are complete; copied bytes belong to the auxiliary phase.
+        visits = receipt['cached_photon_visits'] or receipt['event_visits']
+        unit = 'cached photon visits' if receipt['cached_photon_visits'] else 'event visits'
+        tracker = WorkProgress(local / 'publication-progress.json', visits, unit,
                                receipt['input_recipe_sha256'], options.get('progress_identity'))
-        tracker.write('prepare-publish', 0)
+        tracker.write('prepare-publish', visits)
+        copied = 0
+        tracker.stage('prepare-publish', copied, total, 'bytes')
         for filename in receipt['arrays']:
             checksum = hashlib.sha256()
             with (local / filename).open('rb') as source, (work / filename).open('xb') as destination:
                 while block := source.read(8 * 1024 * 1024):
                     destination.write(block)
                     checksum.update(block)
-                    tracker.write('prepare-publish', tracker.processed + len(block))
+                    copied += len(block)
+                    tracker.stage('prepare-publish', copied, total, 'bytes')
             require(checksum.hexdigest() == receipt['arrays'][filename], 'prepared array changed during publication')
         save_json(work / 'population.json', receipt)
-        tracker.write('complete', total, status='PASS')
+        tracker.write('complete', visits, status='PASS')
     return load_population(work, receipt)
 
 
