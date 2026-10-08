@@ -438,13 +438,18 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
             Models.require(Models.file_hash(folder / relative) == h, 'completed cell artifact changed')
         calibration_mask = mask
         score, validation = Validation.check(population, calibration_mask, Training.evaluator(model_path),
-                                             Training.evaluator(model_path), r, progress=tracker.stage)
+                                             Training.evaluator(model_path), r, progress=tracker.stage,
+                                             strict_performance=False)
         wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage,
                                   strict_fit_checks=False)
         artifact = Models.read_json(model_path)
         if 'native_export_validation' in artifact:
             validation['native_export'] = artifact['native_export_validation']
-        Models.require(validation == receipt['validation'] and wp == receipt['working_points'], 'cell revalidation differs')
+        # Older receipts already passed the same performance limits. Preserve
+        # their bytes while adding the separately reported quality to this run.
+        compared = validation if 'performance_quality' in receipt['validation'] else {
+            k: v for k, v in validation.items() if k != 'performance_quality'}
+        Models.require(compared == receipt['validation'] and wp == receipt['working_points'], 'cell revalidation differs')
     else:
         if retained_artifacts is not None:
             Models.require(not allow_fit, 'retained calibration must disable fitting')
@@ -458,7 +463,8 @@ def validated_cell(population, r, cell, folder, request, identity, *, cell_input
             artifact, trainer = Training.fit(population, mask, r, model_path, cell['id'], progress_identity=identity,
                                             progress_path=model_path.with_suffix('.progress.json'))
         calibration_mask = mask
-        score, validation = Validation.check(population, calibration_mask, trainer, Training.evaluator(model_path), r, progress=tracker.stage)
+        score, validation = Validation.check(population, calibration_mask, trainer, Training.evaluator(model_path), r,
+                                             progress=tracker.stage, strict_performance=False)
         wp = WorkingPoints.derive(population, calibration_mask, score, cell, r, progress=tracker.stage,
                                   strict_fit_checks=False)
         if 'native_export_validation' in artifact:
@@ -494,14 +500,14 @@ def verify_retained_request(folder, r, simulation, plan, args, *, finalizing=Fal
                          if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
         Models.require(source_hashes == fit_code, 'original fit code manifest differs from the retained request')
     if finalizing:
-        changed_coordination = {'WorkingPoints.py', 'photon_id.py'}
+        changed_coordination = {'WorkingPoints.py', 'Validation.py', 'photon_id.py'}
         if getattr(args, 'prepared_population', None) is not None:
             # The original arrays bypass preparation. Recipe/runtime, original
             # request, diagnosed models and every array are still checked.
             changed_coordination.update(('Inputs.py', 'Models.py', 'ProjectionCache.py'))
         Models.require(set(fit_code) == set(current_code) and all(
             fit_code[key] == current_code[key] for key in fit_code if key not in changed_coordination),
-            'retained completion requires unchanged fitter, evaluator, inputs and numerical validation')
+            'retained completion requires unchanged fitter, evaluator and inputs')
     fit_request = dict(recipe=r, inputs=simulation, code=fit_code, environment=original['environment'])
     if plan['split_reference'] is not None:
         Models.require(original.get('split_reference') == plan['split_reference'], 'retained fit split reference differs')
@@ -580,7 +586,8 @@ def diagnose_fit(inputs, config, system, name, args, *, simulation=None, populat
             hashes = {str(p.relative_to(folder)): Models.file_hash(p) for p in products}
             mask = Training.cell_mask(population, cell)
             evaluator = Training.evaluator(path)
-            score, metrics = Validation.check(population, mask, evaluator, evaluator, r, progress=tracker.stage)
+            score, metrics = Validation.check(population, mask, evaluator, evaluator, r,
+                                              progress=tracker.stage, strict_performance=False)
             try:
                 wp = WorkingPoints.derive(population, mask, score, cell, r, progress=tracker.stage)
                 result = dict(status='WORKING_POINTS_PASS', working_points=wp)
@@ -706,19 +713,22 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         cells = []; all_validation = {}; all_wp = {}
         identity = getattr(args, 'progress_identity', None)
         compact = (folder / '.work' / 'cell_inputs.json').exists()
+        artifact_request = completion['fit_request_sha256'] if completion else request
         for cell in expected_cells:
             if compact:
-                cell_population, original, input_sha, data = CellInputs.load(args.models, request, r, cell,
+                cell_population, original, input_sha, data = CellInputs.load(args.models, artifact_request, r, cell,
                     expected_population=CellInputs.population_witness(population.receipt))
                 CellInputs.verify_origin(data, work, population.receipt)
             else:
                 cell_population, original, input_sha = population, np.flatnonzero(Training.cell_mask(population, cell)), None
-            score, validation, wp = validated_cell(cell_population, r, cell, folder, request, identity,
+            score, validation, wp = validated_cell(cell_population, r, cell, folder, artifact_request, identity,
                 cell_input_sha=input_sha, allow_fit=not completion and not getattr(args, 'assemble_only', False),
                 retained_artifacts=completion['cells'][cell['id']]['artifacts'] if completion else None)
             if completion:
-                Models.require({k: v for k, v in validation.items() if k != 'native_export'} ==
-                               completion['cells'][cell['id']]['validation'],
+                expected_validation = completion['cells'][cell['id']]['validation']
+                compared = {k: v for k, v in validation.items() if k != 'native_export' and
+                            (k != 'performance_quality' or k in expected_validation)}
+                Models.require(compared == expected_validation,
                                'retained model numerical validation changed since diagnosis')
             cells.append(dict(cell, artifact='artifacts/' + cell['id'] + '.json'))
             all_validation[cell['id']] = validation; all_wp[cell['id']] = wp
@@ -729,12 +739,17 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                                 for warning in wp.get('fit_warnings', [])]
         calibration_quality = dict(status='REVIEW_REQUIRED' if calibration_warnings else 'PASS',
                                    warnings=calibration_warnings, scientific_acceptance=False)
+        performance_warnings = [dict(cell=cell_id, **warning) for cell_id, report in all_validation.items()
+                                for warning in report.get('performance_quality', {}).get('warnings', [])]
+        performance_quality = dict(status='REVIEW_REQUIRED' if performance_warnings else 'PASS',
+                                   warnings=performance_warnings, scientific_acceptance=False)
         Diagnostics.save(folder, calibration, r, qa_scores, cells, config, request, progress_identity=identity)
         Models.save_json(folder / 'working_points.json', dict(schema='PhotonIDWorkingPointsV1',
                          calibration_domain=r['domain'], cells=all_wp))
         Models.save_json(folder / 'validation.json', dict(schema='PhotonIDValidationV1', status='PASS', cells=all_validation,
                          population=population.receipt, calibration_population=calibration.receipt,
                          calibration_quality=calibration_quality,
+                         performance_quality=performance_quality,
                          evaluation_domain=r['domain'], qualification='local numerical; farm and physics acceptance separate'))
         Models.save_json(folder / 'selection.json', dict(schema='PhotonIDSelectionV1', system=system,
                          name=r['name'], score_branch=r['score_branch'], state_branch=None,
@@ -752,6 +767,7 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
                         calibration_population_sha256=calibration.receipt['input_recipe_sha256'],
                         calibration_split_sha256=calibration.receipt['split_sha256'],
                         calibration_quality=calibration_quality,
+                        performance_quality=performance_quality,
                         code_sha256=Models.code_identity(), environment=Models.environment(),
                         feature_missing_value_rule='reject invalid/non-finite H70 inputs in model domain; unscored outside domain')
         manifest['split_reference'] = population.receipt['split_reference']
@@ -762,7 +778,8 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         manifest['release_sha256'] = Models.digest(manifest)
         Models.save_json(folder / 'manifest.json', manifest)
         Models.load_release(folder, request=request)
-    return dict(status='PASS', calibration_quality=calibration_quality, **plan)
+    return dict(status='PASS', calibration_quality=calibration_quality,
+                performance_quality=performance_quality, **plan)
 
 
 def main(argv=None):

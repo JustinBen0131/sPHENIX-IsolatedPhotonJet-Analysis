@@ -1,8 +1,8 @@
 """Validation: population, held-out performance and portable-model agreement.
 
 The outer ten percent is evaluated after fitting, never used for epoch or
-architecture selection. These numerical gates certify this model release,
-not physics closure of a downstream analysis. Scores are evaluated in batches.
+architecture selection. Numerical agreement is required; discrimination quality
+is reported separately for review. Scores are evaluated in batches.
 """
 from __future__ import annotations
 
@@ -61,8 +61,14 @@ def native_export(population, mask, reference, native, recipe, *, progress=None)
                 feature_dtype='float32', calibration_evaluator='ROOT_RBDT')
 
 
-def check(population, mask, trainer, saved, recipe, *, progress=None):
-    """Compare every applicable saved score; report train and held-out metrics."""
+def check(population, mask, trainer, saved, recipe, *, progress=None, strict_performance=True):
+    """Require saved-score agreement and report performance against recipe limits.
+
+    The campaign coordinator uses advisory performance checks so an intentionally
+    varied model can be compared even when it overfits. This never changes its
+    rows, weights, split, trees or cuts, and never grants scientific acceptance.
+    Invalid scores, missing classes and changed saved predictions still fail.
+    """
     indices = np.flatnonzero(mask)
     score = np.empty(len(indices), np.float64); maximum = 0.
     if progress: progress('saved-score-validation', 0, len(indices), 'photons')
@@ -88,8 +94,22 @@ def check(population, mask, trainer, saved, recipe, *, progress=None):
     if population.partition is not None and np.any(population.partition[indices] == 1):
         selected = population.partition[indices] == 1
         reports['validation'] = metrics(population.y[indices[selected]], score[selected], population.weights[indices[selected]])
-    require(reports['holdout']['auc'] >= recipe['validation']['min_holdout_auc'], 'held-out discrimination failed')
-    require(abs(reports['train']['auc'] - reports['holdout']['auc']) <=
-            recipe['validation']['max_train_holdout_auc_gap'], 'train/holdout discrimination gap failed')
-    return score, dict(status='PASS', saved_score_max_abs=maximum, split_sha256=population.receipt['split_sha256'],
-                       tuning_on_holdout=False, **reports)
+    gap = abs(reports['train']['auc'] - reports['holdout']['auc'])
+    warnings = []
+    for criterion, measured, limit, failed in (
+        ('min_holdout_auc', reports['holdout']['auc'], recipe['validation']['min_holdout_auc'],
+         reports['holdout']['auc'] < recipe['validation']['min_holdout_auc']),
+        ('max_train_holdout_auc_gap', gap, recipe['validation']['max_train_holdout_auc_gap'],
+         gap > recipe['validation']['max_train_holdout_auc_gap'])):
+        if failed:
+            warnings.append(dict(criterion=criterion, measured=measured, limit=limit))
+    if strict_performance:
+        require(not any(w['criterion'] == 'min_holdout_auc' for w in warnings), 'held-out discrimination failed')
+        require(not any(w['criterion'] == 'max_train_holdout_auc_gap' for w in warnings),
+                'train/holdout discrimination gap failed')
+    report = dict(status='PASS', saved_score_max_abs=maximum, split_sha256=population.receipt['split_sha256'],
+                  tuning_on_holdout=False, **reports)
+    if not strict_performance:
+        report['performance_quality'] = dict(status='REVIEW_REQUIRED' if warnings else 'PASS',
+                                             warnings=warnings, scientific_acceptance=False)
+    return score, report

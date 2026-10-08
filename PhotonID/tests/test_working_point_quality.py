@@ -1,4 +1,4 @@
-"""A borderline line-fit error must preserve cuts and produce review evidence."""
+"""Quality warnings preserve fitted models; numerical failures still stop release."""
 import importlib.util
 import json
 import pathlib
@@ -13,11 +13,52 @@ import numpy as np
 HERE = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 from src import Models, WorkingPoints
-from src import Diagnostics, Training, Validation
+from src import CellInputs, Diagnostics, Training, Validation
 
 spec = importlib.util.spec_from_file_location('photonid_quality_cli', HERE / 'scripts/photon_id.py')
 CLI = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CLI)
+
+
+class PerformanceQualityTests(unittest.TestCase):
+    def fixture(self):
+        rows = 80
+        y = np.arange(rows) % 2
+        score = y.astype(float)
+        score[40:50] = 1. - score[40:50]
+        population = types.SimpleNamespace(x=np.arange(rows)[:, None], y=y, weights=np.ones(rows),
+            train=np.arange(rows) < 40, holdout=np.arange(rows) >= 40, partition=None,
+            receipt=dict(split_sha256='fixed-split'))
+        recipe = dict(validation=dict(saved_score_atol=1e-8, min_rows_per_class_per_split=10,
+                      min_holdout_auc=.55, max_train_holdout_auc_gap=.05))
+        evaluator = lambda x: score[x[:, 0]]
+        return population, np.ones(rows, bool), evaluator, evaluator, recipe
+
+    def test_gap_warning_keeps_scores_metrics_and_recipe_limits(self):
+        args = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'discrimination gap failed'):
+            Validation.check(*args)
+        score, report = Validation.check(*args, strict_performance=False)
+        self.assertEqual(report['status'], 'PASS')
+        self.assertEqual(report['train']['auc'], 1.)
+        self.assertEqual(report['holdout']['auc'], .75)
+        quality = report['performance_quality']
+        self.assertEqual(quality['status'], 'REVIEW_REQUIRED')
+        self.assertFalse(quality['scientific_acceptance'])
+        self.assertEqual(quality['warnings'], [dict(criterion='max_train_holdout_auc_gap', measured=.25, limit=.05)])
+        np.testing.assert_array_equal(score, args[2](args[0].x))
+
+    def test_advisory_mode_still_rejects_changed_saved_scores(self):
+        population, mask, evaluator, _, recipe = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'differs from trainer'):
+            Validation.check(population, mask, evaluator, lambda x: evaluator(x) + .01,
+                             recipe, strict_performance=False)
+
+    def test_advisory_mode_still_rejects_nonfinite_saved_scores(self):
+        population, mask, evaluator, _, recipe = self.fixture()
+        with self.assertRaisesRegex(ValueError, 'nonfinite'):
+            Validation.check(population, mask, evaluator, lambda x: np.full(len(x), np.nan),
+                             recipe, strict_performance=False)
 
 
 class WorkingPointQualityTests(unittest.TestCase):
@@ -123,7 +164,7 @@ class RetainedCompletionTests(unittest.TestCase):
             dict(path='PhotonID/scripts/photon_id.py' if name == 'photon_id.py' else 'PhotonID/src/' + name, sha256=h)
             for name, h in self.fit_code.items()])) + '\n')
 
-    def complete(self):
+    def complete(self, validation_report=None):
         def save_qa(folder, *args, **kwargs):
             Models.save_json(folder / 'qa.json', dict(status='numerical test fixture'))
         with mock.patch.object(Models, 'environment', return_value=dict(runtime='known')), \
@@ -132,7 +173,7 @@ class RetainedCompletionTests(unittest.TestCase):
              mock.patch.object(CLI, 'prepared_population', return_value=(self.population, None)) as prepared, \
              mock.patch.object(Training, 'fit', side_effect=AssertionError('completion must never fit')) as fit, \
              mock.patch.object(Training, 'evaluator', return_value=lambda _: self.score), \
-             mock.patch.object(Validation, 'check', return_value=(self.score, dict(status='PASS'))), \
+             mock.patch.object(Validation, 'check', return_value=(self.score, validation_report or dict(status='PASS'))), \
              mock.patch.object(Diagnostics, 'save', side_effect=save_qa) as qa:
             result = CLI.train_release([], {}, 'PP', self.recipe['name'], self.args, simulation=[])
             self.assertEqual(fit.call_count, 0)
@@ -151,6 +192,31 @@ class RetainedCompletionTests(unittest.TestCase):
         self.assertTrue((self.folder / 'finalization_request.json').is_file())
         self.assertEqual(self.complete()[0]['status'], 'REUSED')
 
+    def test_compact_completion_uses_original_fit_request(self):
+        (self.folder / '.work').mkdir()
+        (self.folder / '.work/cell_inputs.json').write_text('{}')
+        self.args.models = self.folder.parent
+        with mock.patch.object(CellInputs, 'load', return_value=(self.population,
+                np.arange(len(self.score)), None, None)) as loader, \
+             mock.patch.object(CellInputs, 'verify_origin'), \
+             mock.patch.object(CellInputs, 'population_witness', return_value={}):
+            self.assertEqual(self.complete()[0]['status'], 'PASS')
+            self.assertEqual(loader.call_args.args[1], self.original['request_sha256'])
+            self.assertNotEqual(loader.call_args.args[1], 'current-request')
+
+    def test_completion_preserves_performance_warning_in_manifest(self):
+        warning = dict(criterion='max_train_holdout_auc_gap', measured=.06, limit=.05)
+        report = dict(status='PASS', performance_quality=dict(status='REVIEW_REQUIRED',
+                      warnings=[warning], scientific_acceptance=False))
+        self.diagnosis['cells'][0]['validation'] = report
+        (self.folder / 'validation_diagnosis.json').write_text(json.dumps(self.diagnosis) + '\n')
+        self.assertEqual(self.complete(validation_report=report)[0]['performance_quality']['status'], 'REVIEW_REQUIRED')
+        manifest = Models.read_json(self.folder / 'manifest.json')
+        self.assertEqual(manifest['performance_quality']['warnings'], [dict(cell=self.cell['id'], **warning)])
+        self.assertFalse(manifest['performance_quality']['scientific_acceptance'])
+        self.assertEqual(self.before, {p.name: p.read_bytes() for p in (self.folder / 'artifacts').iterdir()
+                                      if p.name in self.before})
+
     def test_missing_diagnosis_never_replaces_original_request_or_starts_training(self):
         (self.folder / 'validation_diagnosis.json').unlink()
         with self.assertRaises(FileNotFoundError): self.complete()
@@ -162,6 +228,15 @@ class RetainedCompletionTests(unittest.TestCase):
         self.save_original(); self.save_fit_manifest()
         with self.assertRaisesRegex(ValueError, 'unchanged fitter'): self.complete()
         self.assertFalse((self.folder / 'finalization_request.json').exists())
+
+    def test_preparation_update_requires_explicit_original_population(self):
+        self.fit_code.update({'Inputs.py': 'd' * 64, 'Models.py': 'e' * 64})
+        self.save_original(); self.save_fit_manifest()
+        self.diagnosis['request_sha256'] = self.original['request_sha256']
+        (self.folder / 'validation_diagnosis.json').write_text(json.dumps(self.diagnosis) + '\n')
+        with self.assertRaisesRegex(ValueError, 'unchanged fitter'): self.complete()
+        self.args.prepared_population = self.folder / 'original-population'
+        self.assertEqual(self.complete()[0]['status'], 'PASS')
 
     def test_changed_fitted_artifact_is_refused(self):
         self.model.with_suffix('.xgboost.json').write_bytes(b'changed model')
@@ -187,6 +262,69 @@ class RetainedCompletionTests(unittest.TestCase):
         args = CLI.arguments(['finalizeCampaign', 'PP', '--model', 'nominal_retrained_v1', '--inputs', 'inputs.yaml'])
         self.assertTrue(args.no_score)
         with self.assertRaises(SystemExit): CLI.arguments(['finalizeCampaign', 'PP'])
+
+
+class RetainedPopulationTests(unittest.TestCase):
+    def setUp(self):
+        from src import Inputs
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.work = pathlib.Path(self.tmp.name).resolve()
+        self.recipe = WorkingPointQualityTests().population(curvature=.001)[4]
+        self.sources = [dict(logical_id='sealed-source', entries=20)]
+        n = 20
+        arrays = dict(x=np.zeros((n, len(self.recipe['features'])), np.float32),
+            y=np.arange(n, dtype=np.int8) % 2, et=np.full(n, 20.), centrality=np.zeros(n),
+            weights=np.ones(n), train=np.arange(n) % 10 != 0, partition=(np.arange(n) % 10 == 0).astype(np.uint8) * 2,
+            split_rank=np.arange(n, dtype=np.uint64), source_index=np.zeros(n, np.uint32),
+            entry=np.arange(n), photon=np.zeros(n, np.int32), event_key=np.arange(n).astype('S32'))
+        for name, values in arrays.items(): np.save(self.work / (name + '.npy'), values)
+        definition = Inputs.population_definition(self.recipe)
+        original_code = dict(Models.code_identity(), **{'Inputs.py': 'a' * 64, 'Models.py': 'b' * 64})
+        self.manifest = self.work / 'fit_CODE_MANIFEST.json'
+        Models.save_json(self.manifest, dict(schema='PhotonIDPublicCodeSnapshotV1', members=[
+            dict(path='PhotonID/scripts/photon_id.py' if key == 'photon_id.py' else 'PhotonID/src/' + key, sha256=value)
+            for key, value in original_code.items()]))
+        self.receipt = dict(schema='PhotonIDPopulationV1', rows=n, sources=self.sources, definition=definition,
+            split_reference=None, array_files={key:key + '.npy' for key in arrays},
+            arrays={key + '.npy':Models.file_hash(self.work / (key + '.npy')) for key in arrays},
+            input_recipe_sha256=Models.digest(dict(inputs=self.sources, **definition, preparation_code=original_code['Inputs.py'])),
+            event_split_sha256='legacy retired event-store witness')
+        self.save_receipt()
+        self.args = types.SimpleNamespace(command='finalizeCampaign', fit_code_manifest=self.manifest,
+                                         prepared_population=self.work)
+
+    def save_receipt(self):
+        (self.work / 'population.json').write_text(json.dumps(self.receipt, indent=2) + '\n')
+
+    def test_reuse_opens_original_arrays_without_database_or_new_files(self):
+        before = {p.name:p.read_bytes() for p in self.work.iterdir()}
+        population, work = CLI.retained_population(self.sources, self.recipe, self.args)
+        self.assertEqual(work, self.work)
+        self.assertEqual(population.receipt, self.receipt)
+        self.assertEqual(population.x.shape, (20, len(self.recipe['features'])))
+        self.assertEqual(before, {p.name:p.read_bytes() for p in self.work.iterdir()})
+        self.assertEqual(self.args.population_reuse['arrays'], self.receipt['arrays'])
+
+    def test_changed_array_is_refused(self):
+        np.save(self.work / 'weights.npy', np.full(20, 2.))
+        with self.assertRaisesRegex(ValueError, 'array changed'): CLI.retained_population(self.sources, self.recipe, self.args)
+
+    def test_wrong_sources_recipe_or_original_code_are_refused(self):
+        with self.assertRaisesRegex(ValueError, 'original sources'): CLI.retained_population([], self.recipe, self.args)
+        self.receipt['input_recipe_sha256'] = 'wrong'; self.save_receipt()
+        with self.assertRaisesRegex(ValueError, 'original preparation code'): CLI.retained_population(self.sources, self.recipe, self.args)
+
+    def test_missing_array_and_borrowed_split_are_refused(self):
+        original = dict(self.receipt['array_files'])
+        self.receipt['array_files'].pop('event_key'); self.save_receipt()
+        with self.assertRaisesRegex(ValueError, 'array roster'): CLI.retained_population(self.sources, self.recipe, self.args)
+        self.receipt['array_files'] = original; self.receipt['split_reference'] = dict(input_recipe_sha256='other'); self.save_receipt()
+        with self.assertRaisesRegex(ValueError, 'split reference'): CLI.retained_population(self.sources, self.recipe, self.args)
+
+    def test_recovery_option_is_completion_only(self):
+        with self.assertRaises(SystemExit): CLI.arguments(['trainCampaign', 'PP', '--prepared-population', str(self.work)])
+        with self.assertRaises(SystemExit): CLI.arguments(['finalizeCampaign', 'PP', '--model', 'nominal_retrained_v1',
+                                                        '--inputs', 'inputs.yaml', '--prepared-population', str(self.work)])
 
 
 if __name__ == '__main__':

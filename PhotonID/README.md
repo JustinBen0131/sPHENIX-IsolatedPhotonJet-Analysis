@@ -212,15 +212,21 @@ original population, revalidates them and restores the original row order for QA
 The sequential command remains available and produces the same model definition.
 Use full-population invocations for nominal, wide-range, depth and pp models.
 
-If a retained fit failed a working-point line check, inspect its measured bins
-without training again:
+Saved-score agreement, finite scores and class coverage are required. Working-point
+line precision and train/holdout performance limits produce separate
+`calibration_quality` and `performance_quality` reports. A `REVIEW_REQUIRED` report
+preserves the measured values and configured limits for comparison; it does not
+grant physics acceptance or change training, scores or cuts.
+
+If an older retained fit stopped at a working-point or performance check, inspect
+its measured results without training again:
 
 ```bash
 ./PhotonID/photon_id.sh diagnoseCampaign PP --config /path/to/training.yaml --inputs /path/to/inputs.yaml --models /path/to/analysis/models --model nominal_retrained_v1
 ```
 
 This writes `validation_diagnosis.json` beside the original unsealed fit, with
-held-out metrics, artifact hashes, the fitted threshold line, bin efficiencies
+held-out metrics and performance warnings, artifact hashes, the fitted threshold line, bin efficiencies
 and the failing limit. It changes no model, working point or release manifest.
 An existing diagnosis is retained; inspect it before considering another run.
 When the diagnostic was installed after fitting, also supply
@@ -236,10 +242,11 @@ fitted artifacts:
 
 `finalizeCampaign` never fits a classifier. It verifies the complete original
 fit, diagnosed artifact hashes, population, runtime and unchanged fitting,
-input and evaluation code, then runs the same calibration and QA stage as
+input and evaluation code, then runs the current numerical validation, calibration and QA stage as
 `trainCampaign`. The original `request.json` and fitted files remain unchanged;
 `finalization_request.json` and the release manifest record the separate
-completion identity and original fit provenance. Approximation warnings remain
+completion identity and original fit provenance. Compact routed inputs retain
+their original fit request when completion uses a newer reporting version. Quality warnings remain
 visible for review. A missing diagnosis or changed training inputs/fitter is
 an error, rather than an implicit retraining request.
 
