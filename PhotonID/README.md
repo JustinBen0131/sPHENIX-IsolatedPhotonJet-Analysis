@@ -356,9 +356,10 @@ two campaign populations and saves `<models>/<system>/preparation_census.json`.
 This report records the prepared array sizes and the actual background/signal
 counts in each model's training, validation and holdout cells. It supports
 resource sizing before batch fitting and performs no fits itself.
-Preparation batches database commits across small sources and uses a bounded
-64 MiB SQLite page cache to reduce shared-storage I/O. These settings preserve
-photon order, weights, duplicate checks and the event split.
+Preparation uses compact arrays and bounded passes over the source bundles.
+It preserves photon order, weights, duplicate checks and the event split;
+it creates no database. Temporary arrays stay in the selected worker scratch
+directory, and only the final population arrays and receipt are published.
 Preparation and fitting then read GPFS products without reading
 or hashing TG trees. A later `trainCampaign` with the same sources, code and
 `--models` root verifies and reuses the populations. Inspection, projection
