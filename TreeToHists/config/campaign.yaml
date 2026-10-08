@@ -1,0 +1,25 @@
+# Prepare once; review the frozen inventory and resource settings before launch.
+Campaign:
+  Settings: ./treetohists.yaml
+  Inputs: ./inputs.yaml
+  WorkDirectory: /sphenix/u/username/histograms/work/campaign_v1
+  OutputDirectory: /sphenix/u/username/histograms/collections/campaign_v1
+  LogsDirectory: /sphenix/u/username/histograms/logs/campaign_v1
+  EventLog: /tmp/username/histograms/campaign_v1/events.log
+  SetupScript: /opt/sphenix/core/bin/sphenix_setup.sh
+  SetupArguments: [-n, ana.568]
+  TimingFile: none  # measured fill receipts for these settings, code and ROOT build
+  InspectSourcesPerJob: 500  # read headers in parallel before assembling the graph
+  InspectConcurrency: 128
+  MaxEventsPerJob: 50000
+  MaxSourcesPerJob: 32  # serial inputs in worker scratch; one validated GPFS chunk
+  # Merge completed chunks in parallel, then merge the partial packages.
+  MergeFanIn: 200
+  FillConcurrency: 20000
+  MergeConcurrency: 128
+  # Requests are independent; size them from measurements on your inputs.
+  PlanMemoryMB: 4096
+  FillMemoryMB: 2048
+  MergeMemoryMB: 2048
+  CollectionMemoryMB: 1024
+  DiskMB: 8192

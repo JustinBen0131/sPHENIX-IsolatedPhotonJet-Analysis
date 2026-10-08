@@ -246,6 +246,9 @@ Settings Settings::read(const std::string &path) {
   s.inputDirectory = text(env, "Input.Directory");
   s.output = text(env, "Output.Results");
   s.qaOutput = text(env, "Output.QA");
+  s.photonIDModels=env.GetValue("QA.PhotonIDModels","");
+  if (s.photonIDModels=="none") s.photonIDModels.clear();
+  if (!s.photonIDModels.empty()) s.photonIDModels=std::filesystem::absolute(std::filesystem::path(path).parent_path()/s.photonIDModels).string();
   s.jet = text(env, "Recoil.Jet");
   s.jetThreshold = slotThreshold(s.jet);
   s.xjEdges = increasing(env, "Measurement.XjEdges");
@@ -276,7 +279,7 @@ Settings Settings::read(const std::string &path) {
   s.fitRange = choice(env, "Prior.FitRange", {"all", "reported"});
   s.priorPower = number(env, "Prior.Power");
   if (s.dataToys < 2 || s.scanIterations < 1 || !(s.priorPower > 0)) throw std::runtime_error("DataToys >= 2, ScanIterations >= 1, Prior.Power > 0");
-  std::set<std::string> known = {"Analysis.Name", "Input.Directory", "Output.Results", "Output.QA", "Recoil.Jet", "Measurement.XjEdges",
+  std::set<std::string> known = {"Analysis.Name", "Input.Directory", "Output.Results", "Output.QA", "QA.PhotonIDModels", "Recoil.Jet", "Measurement.XjEdges",
                                  "Measurement.ReportedXjMax", "Uncertainty.DataToys", "Uncertainty.Seed",
                                  "Uncertainty.DataToyModel", "Uncertainty.ResponseToys", "Uncertainty.ResponseSeed", "Closure.Toys", "Closure.Seed",
                                  "IterationRule.DataToys", "IterationRule.DataSeed", "IterationRule.ResponseToys", "IterationRule.ResponseSeed",

@@ -633,12 +633,16 @@ int run(const Settings &s) {
 namespace fa { int pipeline(const std::string &config, const std::string &package); }
 
 int main(int argc, char **argv) {
+  if (argc == 4 && std::strcmp(argv[1], "--model-qa") == 0) {
+    try { return fa::runModelQA(argv[2], argv[3]); }
+    catch (const std::exception &e) { std::cerr << "FinalAnalysis model QA: " << e.what() << std::endl; return 1; }
+  }
   if (argc == 4 && std::strcmp(argv[1], "--all") == 0) {
     try { return fa::pipeline(argv[2], argv[3]); }
     catch (const std::exception &e) { std::cerr << "FinalAnalysis all: " << e.what() << std::endl; return 1; }
   }
   if (argc != 3 || (std::strcmp(argv[1], "--config") != 0 && std::strcmp(argv[1], "--systematics") != 0 && std::strcmp(argv[1], "--qa") != 0)) {
-    std::cerr << "usage: final_analysis --config SETTINGS | --qa SETTINGS | --systematics SYSTEMATICS" << std::endl;
+    std::cerr << "usage: final_analysis --config SETTINGS | --qa SETTINGS | --model-qa MODELS OUTPUT | --systematics SYSTEMATICS" << std::endl;
     return 2;
   }
   try {

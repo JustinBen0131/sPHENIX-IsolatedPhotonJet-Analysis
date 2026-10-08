@@ -53,6 +53,7 @@ struct Settings {
   std::string inputDirectory;      /* holds <package>/data.root and <package>/photonjet.root */
   std::string output;              /* results.root */
   std::string qaOutput;            /* qa.root: the inputs of the photon and event QA figures */
+  std::string photonIDModels;      /* optional sealed PhotonID models.yaml for saved training QA */
   std::string jet = "jet5";        /* recoil-jet slot of the packages, jet<GeV> */
   double jetThreshold = 5;         /* derived from the slot name */
   Edges xjEdges;
@@ -200,5 +201,7 @@ int systematics(const std::string &configPath);
 /* QA.cc: the inputs of the photon and event QA figures (qa/<package>/ of Output.QA) */
 void writeQA(const Settings &s, TDirectory *results);
 int runQA(const Settings &s);
+/* Import a sealed training-diagnostics collection without histogram inputs. */
+int runModelQA(const std::string &collection, const std::string &output);
 
 }  /* namespace fa */

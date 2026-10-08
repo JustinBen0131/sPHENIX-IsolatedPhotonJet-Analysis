@@ -736,20 +736,29 @@ void ppVsCentral(TFile &f, const std::vector<Result> &results, const std::string
 /* The unfolded per-photon xJ of every result on one plot, over the range all of them report, with the systematic
    boxes when a systematics file is given. */
 void centralityOverlay(TFile &f, const std::vector<Result> &results, const std::string &name) {
-  if (results.empty()) return;
+  // The additional comparison is p+p, 0-20% and 50-80% AuAu, with the same
+  // recoil threshold. Other centrality results keep their individual figures.
+  std::vector<Result> comparison;
+  for(const auto& r:results) if(r.package=="PP") comparison.push_back(r);
+  for(const char* centrality:{"cent0_20","cent50_80"})
+    for(const auto& r:results) if(r.package=="AuAu" && settingsOf(f,r.key).at("centrality")==centrality) comparison.push_back(r);
+  if(comparison.size()!=3 || comparison[0].package!="PP" ||
+     comparison[0].jetThreshold!=comparison[1].jetThreshold || comparison[0].jetThreshold!=comparison[2].jetThreshold)
+    return missing(name,"needs p+p, 0-20% and 50-80% AuAu results with one common recoil threshold");
   double low = 0, high = 1e9;
-  for (const auto &r : results) { low = std::max(low, r.low); high = std::min(high, r.high); }
+  for (const auto &r : comparison) { low = std::max(low, r.low); high = std::min(high, r.high); }
+  if(high<=low) return missing(name,"three-system comparison has no common reported xJ range");
   std::vector<Series> series;
   std::vector<TGraphAsymmErrors *> boxes;
   int i = 0;
-  for (const auto &r : results)
+  for (const auto &r : comparison)
     if (auto *h = get(f, r, "xj_per_photon")) {
       series.push_back({points(h, low, high, seriesColor(i), kMarkers[i % 8], true, 1.2), r.label, "lp"});
       boxes.push_back(systematicBoxes(r.key, low, high, seriesColor(i)));
       ++i;
     }
-  if (series.empty()) return missing(name, "needs xj_per_photon");
-  const Result &first = results.front();
+  if (series.size()!=3) return missing(name, "needs xj_per_photon for all three comparison results");
+  const Result &first = comparison.front();
   TCanvas cv("cv", "", 700, 600);
   xjFrame(series, high, kPerPhoton, {first.energy, jetLine(first), acceptanceLine(first),
                                      gSystematics ? "Bars statistical, boxes systematic" : "Statistical uncertainties"}, boxes);
@@ -1028,6 +1037,8 @@ void IANFigures(const char *results, const char *fig, const char *systematics = 
   gStyle->SetOptStat(0);
   ianPalette();
   gFig = fig;
+  // An empty selection still writes FIGURES.txt with the missing-input reasons.
+  gSystem->mkdir(gFig.c_str(), true);
   auto open = [](const char *path, std::unique_ptr<TFile> &file) {
     file.reset(TFile::Open(path, "READ"));
     if (file && !file->IsZombie()) return true;

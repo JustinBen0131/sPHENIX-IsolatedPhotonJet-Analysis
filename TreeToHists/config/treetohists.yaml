@@ -8,6 +8,7 @@ Selection:
 pp:
   DataTrigger: photon4
   # PhotonIDSelection: /path/to/optional_model/selection.json
+  # SimulationPeriods: all  # all (nominal): the PPG12 sum over the crossing-angle periods; source: each file's own period
 auau:
   DataTrigger: photon12
   # PhotonIDSelection: /path/to/optional_model/selection.json

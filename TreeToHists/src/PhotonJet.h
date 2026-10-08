@@ -12,10 +12,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -32,6 +34,8 @@
 #include <TTreeReader.h>
 #include <TTreeReaderArray.h>
 #include <TTreeReaderValue.h>
+#include <RVersion.h>
+#include <TMVA/RBDT.hxx>
 /* === Selection =======================================================================================================
    Photon + recoil-jet selection on eventTree v1: photon ID and isolation regions, the event-leading
    photon of each region, and its recoil jets. */
@@ -88,7 +92,8 @@ struct Profile {
   double isolationCentMin = 0.0, isolationCentMax = 80.0;
   std::string scoreBranch = "pho_bdt_score", stateBranch = "pho_bdt_state";
   std::string selectionJson, selectionId;
-  bool optionalID = false;  /* finite saved score is applicability; no extra state branch */
+  bool optionalID = false;  /* finite score is applicability; no extra state branch */
+  bool nativeID = false;    /* evaluate the sealed ROOT model during the existing read */
   std::vector<IDCell> idCells;
 
 };
@@ -163,8 +168,8 @@ struct PhotonClass {
   }
 };
 
-template <class Values, class Ints>
-PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centrality, const Values& score, const Ints& state,
+template <class Values, class Ints, class Scores>
+PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centrality, const Scores& score, const Ints& state,
                         const Values& cone, const Values& threshold, const Values& sideband, const Ints& method,
                         const Ints& role, const Ints& idClass, const Ints& isoClass) {
   PhotonClass c;
@@ -256,9 +261,9 @@ inline bool photonKinematics(const Profile& p, double vz, double et, double eta,
 /* One event-local photon index per ABCD region; -1 means no eligible leader.
    Equal ET keeps the later encounter, matching the established >= rule.
    All candidate arrays must share the same photon ordering. */
-template <class Energies, class Values, class Ints>
+template <class Energies, class Values, class Ints, class Scores>
 std::array<long, 4> regionLeaders(const Profile& p, double vz, double centrality, std::size_t n, const Energies& et,
-                                  const Values& eta, const Values& phi, const Values& score, const Ints& presel,
+                                  const Values& eta, const Values& phi, const Scores& score, const Ints& presel,
                                   const Ints& state, const Values& cone, const Values& threshold, const Values& sideband,
                                   const Ints& method, const Ints& role, const Ints& idClass, const Ints& isoClass) {
   std::array<long, 4> leader{-1, -1, -1, -1};
@@ -293,25 +298,57 @@ namespace photonjet {
 /* Set only by the versioned public lifecycle, before booking any histograms.
    Empty keeps the historical macro interface and its reference axes unchanged. */
 inline std::vector<double> configuredXjEdges;
+inline std::vector<double> configuredMeasurementEtEdges;
 inline bool strictReduction = false;
 inline std::string progressPath;
 inline long long progressTotal = 0;
-/* Entry-based progress of a long fill: written every 10,000 entries and at the last one, never on a timer. */
+/* A production row reads a half-open range of the original tree. Entry numbers
+   remain global, including response-smearing seeds and saved event identities. */
+inline Long64_t entryBegin = 0, entryEnd = -1;
+inline void applyEntryRange(TTreeReader &reader) {
+  if (entryEnd < 0) return;
+  if (entryBegin < 0 || entryEnd < entryBegin || entryEnd > reader.GetEntries() ||
+      (entryBegin==entryEnd && reader.GetEntries()!=0))
+    throw std::runtime_error("invalid eventTree entry range");
+  if (reader.GetEntries()==0) return;
+  reader.SetEntriesRange(entryBegin, entryEnd);
+}
+inline nlohmann::json progressIdentity;
+inline std::string progressPhase;
+inline long long progressOffset = 0, progressRowTotal = 0, progressRowProcessed = 0;
+inline auto progressStart = std::chrono::steady_clock::now();
+inline auto progressLast = progressStart;
+/* A grouped worker mirrors the same in-process counts into its row record;
+   it does not start a separate polling process. */
+inline std::function<void(const nlohmann::json &)> progressObserver;
+/* The event loop owns progress. Count all passes and refresh at most every
+   two seconds or 10,000 entries; phase boundaries are written immediately. */
 inline void reportProgress(long long processed) {
   if (progressPath.empty()) return;
-  static auto start=std::chrono::steady_clock::now();
-  if (processed!=progressTotal && processed%10000!=0) return;
+  processed -= entryBegin;
+  if (processed < 0 || processed > progressRowTotal)
+    throw std::runtime_error("progress exceeds the planned entry range");
+  progressRowProcessed = processed;
   const auto now=std::chrono::steady_clock::now();
-  const double seconds=std::chrono::duration<double>(now-start).count();
-  const double rate=seconds>0 ? processed/seconds : 0;
+  if (processed != 0 && processed != progressRowTotal && processed % 10000 != 0 &&
+      std::chrono::duration<double>(now-progressLast).count() < 2) return;
+  progressLast = now;
+  const long long completed = progressOffset + processed;
+  const double seconds=std::chrono::duration<double>(now-progressStart).count();
+  const double rate=seconds>0 ? completed/seconds : 0;
+  nlohmann::json record = progressIdentity;
+  record.update({{"phase",progressPhase}, {"processed",completed}, {"total",progressTotal},
+    {"remaining",progressTotal-completed}, {"row_processed",processed}, {"row_total",progressRowTotal},
+    {"row_remaining",progressRowTotal-processed}, {"deterministic_skip_processed",0},
+    {"deterministic_skip_total",0}, {"deterministic_skip_remaining",0},
+    {"elapsed_seconds",seconds}, {"rate",rate}, {"eta_seconds",rate>0 ? (progressTotal-completed)/rate : -1},
+    {"updated_at_unix",std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()},
+    {"latest_error",nullptr}});
   std::ofstream out(progressPath+".next");
-  out.precision(17);
-  out << "{\"processed\":" << processed << ",\"total\":" << progressTotal
-      << ",\"remaining\":" << progressTotal-processed << ",\"elapsed_seconds\":" << seconds
-      << ",\"rate\":" << rate << ",\"eta_seconds\":" << (rate>0 ? (progressTotal-processed)/rate : -1)
-      << ",\"updated_at_unix\":" << std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
-      << ",\"first_error\":null}";
+  out << record.dump();
+  if (!out) throw std::runtime_error("cannot write fill progress");
   out.close(); std::filesystem::rename(progressPath+".next",progressPath);
+  if (progressObserver) progressObserver(record);
 }
 
 /* The stitching ownership of the job's sample (Au+Au embedded simulation, config/auau_embedded_stitching.json), set by
@@ -425,6 +462,7 @@ const std::vector<double> kJetThresholds = {5.0, 7.0, 10.0, 12.0};
 inline std::string thresholdName(double t) { return "jet" + std::to_string(static_cast<int>(t)); }
 
 inline std::vector<double> photonEtEdges() {
+  if (!configuredMeasurementEtEdges.empty()) return configuredMeasurementEtEdges;
   std::vector<double> e;
   for (int v = 15; v <= 35; ++v) e.push_back(v);  /* native 1 GeV grid */
   return e;
@@ -630,6 +668,12 @@ inline Profile configuredProfile(const char* legacyName, System system, const ch
   p.nonTightHigh = line(s.at("non_tight_high"));
   p.scoreBranch = s.at("score_branch").get<std::string>();
   p.optionalID = s.contains("optional_model");
+  p.nativeID=p.optionalID && s.at("optional_model").contains("native_evaluation");
+  if (p.optionalID) {
+    const auto &domain=s.at("optional_model").at("domain");
+    p.photonEtMin=domain.at("et_min"); p.photonEtMax=domain.at("et_max_exclusive");
+    p.photonAbsEtaMax=domain.at("eta_abs_max");
+  }
   /* The nominal state remains part of every eventTree, but is never used to
      infer optional applicability. Optional scores encode that with NaN. */
   p.stateBranch = p.optionalID ? "pho_bdt_state" : s.at("state_branch").get<std::string>();
@@ -665,15 +709,15 @@ inline Profile validateSelectionInput(TFile& file, Profile p) {
   const auto resolved = SelectionJson::parse(p.selectionJson);
   const auto& s = resolved.at("systems").at(p.system==System::pp ? "pp" : "auau");
   const std::string key = s.at("score_metadata").get<std::string>();
-  const auto id = SelectionJson::parse(metaText(file,key));
-  if (p.optionalID) {
+  const auto id = p.nativeID ? SelectionJson::object() : SelectionJson::parse(metaText(file,key));
+  if (p.optionalID && !p.nativeID) {
     const auto& requested = s.at("optional_model");
     const auto& receipt = id.at(requested.at("model_name").get<std::string>());
     if (receipt.value("status", std::string()) != "PASS" ||
         receipt.at("release_sha256") != requested.at("release_sha256") ||
         receipt.at("score_branch") != requested.at("score_branch") || receipt.at("domain") != requested.at("domain"))
       throw std::runtime_error("optional score receipt differs from selected release/domain");
-  } else {
+  } else if (!p.nativeID) {
     if (id.at("model_sha256") != s.at("model_sha256") ||
         id.value("freeze_sha256", std::string()) != s.at("photon_id_package_sha256").get<std::string>())
       throw std::runtime_error("saved score differs from selected feature/model package");
@@ -692,8 +736,95 @@ inline Profile validateSelectionInput(TFile& file, Profile p) {
   return p;
 }
 
-template <class Values, class Ints>
-void validateSelectionEvent(const Profile& p, double centrality, const Values& et, const Values& score, const Ints& state,
+/* The score has the same photon-aligned interface whether it is retained in
+   eventTree or evaluated from a sealed ROOT model. H70 float32 inputs are
+   already stored by TreeProduction; this reader adds no feature algorithm. */
+class PhotonScores {
+#if ROOT_VERSION_CODE >= ROOT_VERSION(6,32,0)
+  using BDT=TMVA::Experimental::RBDT;
+#else
+  using BDT=TMVA::Experimental::RBDT<>;
+#endif
+  struct Cell { double etLow,etHigh,centLow,centHigh; std::unique_ptr<BDT> model; };
+  TTreeReader &reader_;
+  std::unique_ptr<TTreeReaderArray<double>> saved_,et_,eta_;
+  std::unique_ptr<TTreeReaderArray<float>> features_;
+  std::unique_ptr<TTreeReaderArray<int>> finite_;
+  std::unique_ptr<TTreeReaderValue<double>> vertex_,centrality_;
+  std::unique_ptr<TTreeReaderValue<int>> record_,ready_,vertexValid_,terminal_;
+  std::vector<Cell> cells_;
+  SelectionJson domain_;
+  size_t view_=0,stride_=0;
+  bool auau_=false;
+  mutable Long64_t entry_=-2;
+  mutable std::vector<double> values_;
+
+  void evaluate() const {
+    if (entry_==reader_.GetCurrentEntry()) return;
+    entry_=reader_.GetCurrentEntry(); const size_t n=et_->GetSize();
+    if (eta_->GetSize()!=n || features_->GetSize()!=n*7*stride_ || finite_->GetSize()!=n*7)
+      throw std::runtime_error("native H70 photon/features alignment differs");
+    const double z=**vertex_,cent=**centrality_;
+    if (auau_ && std::isfinite(cent) && cent!=std::round(cent)) throw std::runtime_error("native model centrality is not an integer bin");
+    values_.assign(n,std::numeric_limits<double>::quiet_NaN());
+    const bool event=**record_==0 && **ready_==1 && **vertexValid_==1 && **terminal_==0;
+    std::vector<float> input(stride_);
+    for (size_t i=0;i<n;++i) {
+      const double et=(*et_)[i],eta=(*eta_)[i];
+      if (!event || !(et>=domain_.at("et_min").get<double>() && et<domain_.at("et_max_exclusive").get<double>() &&
+          std::abs(eta)<domain_.at("eta_abs_max").get<double>() && std::abs(z)<domain_.at("vertex_abs_max_cm").get<double>()) ||
+          (auau_ && !(cent>=domain_.at("centrality_min").get<double>() && cent<domain_.at("centrality_max_exclusive").get<double>()))) continue;
+      if ((*finite_)[7*i+view_]!=1) throw std::runtime_error("native model has invalid features inside its domain");
+      for (size_t j=0;j<stride_;++j) {
+        input[j]=(*features_)[(7*i+view_)*stride_+j];
+        if (!std::isfinite(input[j])) throw std::runtime_error("nonfinite native model feature");
+      }
+      const Cell *selected=nullptr;
+      for (const auto &cell : cells_) if (et>=cell.etLow && et<cell.etHigh && (!auau_ || (cent>=cell.centLow && cent<cell.centHigh))) {
+        if (selected) throw std::runtime_error("native model cells overlap"); selected=&cell;
+      }
+      if (!selected) throw std::runtime_error("native model leaves an in-domain routing gap");
+      const auto prediction=selected->model->Compute(input);
+      if (prediction.size()!=1 || !std::isfinite(prediction[0]) || prediction[0]<0 || prediction[0]>1)
+        throw std::runtime_error("native model returned an invalid score");
+      values_[i]=prediction[0];
+    }
+  }
+ public:
+  PhotonScores(TFile &file,TTreeReader &reader,const Profile &profile) : reader_(reader) {
+    if (!profile.nativeID) {saved_=std::make_unique<TTreeReaderArray<double>>(reader,profile.scoreBranch.c_str());return;}
+    const auto selection=SelectionJson::parse(profile.selectionJson);
+    const auto &native=selection.at("systems").at(profile.system==System::pp ? "pp" : "auau").at("optional_model").at("native_evaluation");
+    et_=std::make_unique<TTreeReaderArray<double>>(reader,"pho_et");
+    if (reader.GetTree()->GetEntries()==0) return;  // no photon feature dictionary is needed for an empty source
+    const auto &contract=native.at("feature_contract"); domain_=native.at("domain"); auau_=profile.system==System::auau;
+    const auto constants=SelectionJson::parse(metaText(file,"meta/constants"));
+    const auto schema=SelectionJson::parse(metaText(file,"meta/schema"));
+    const auto names=constants.at("showerViews.definition_name").get<std::vector<std::string>>();
+    const std::string view=contract.at("view");
+    if (names.size()!=7 || std::count(names.begin(),names.end(),view)!=1) throw std::runtime_error("native model shower-view dictionary differs");
+    view_=std::find(names.begin(),names.end(),view)-names.begin();stride_=contract.at("count");
+    if (schema.at("strides").at("shv_features")!=stride_ || contract.at("order").size()!=stride_ ||
+        constants.at("showerViews.semantic_sha256").at(view_)!=contract.at("view_semantic_sha256"))
+      throw std::runtime_error("native model feature count or semantics differ");
+    const uint64_t bits=constants.at("showerViews.floor_gev").at(view_).at("f64").get<uint64_t>();double floor=0;
+    std::memcpy(&floor,&bits,sizeof floor);
+    if (floor!=contract.at("floor_gev").get<double>()) throw std::runtime_error("native model H70 tower floor differs");
+    eta_=std::make_unique<TTreeReaderArray<double>>(reader,"pho_eta");
+    features_=std::make_unique<TTreeReaderArray<float>>(reader,"shv_features");finite_=std::make_unique<TTreeReaderArray<int>>(reader,"shv_finite_feature_state");
+    vertex_=std::make_unique<TTreeReaderValue<double>>(reader,"vtx_z");centrality_=std::make_unique<TTreeReaderValue<double>>(reader,"cent_value");
+    record_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_record");ready_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_nodes_ready");
+    vertexValid_=std::make_unique<TTreeReaderValue<int>>(reader,"vtx_valid");terminal_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_terminal_status");
+    for (const auto &cell : native.at("cells")) cells_.push_back({cell.at("et")[0],cell.at("et")[1],cell.at("centrality")[0],cell.at("centrality")[1],
+      std::make_unique<BDT>(cell.at("key").get<std::string>(),cell.at("file").get<std::string>())});
+    if (cells_.empty()) throw std::runtime_error("native model has no cells");
+  }
+  size_t GetSize() const {return saved_ ? saved_->GetSize() : et_->GetSize();}
+  double operator[](size_t i) const {if (saved_) return (*saved_)[i];evaluate();return values_.at(i);}
+};
+
+template <class Values, class Ints, class Scores>
+void validateSelectionEvent(const Profile& p, double centrality, const Values& et, const Scores& score, const Ints& state,
                             const Values& cone, const Values& threshold, const Values& sideband, const Ints& method,
                             const Ints& role, const Ints& idClass, const Ints& isoClass) {
   if (!p.configured) return;
@@ -738,21 +869,87 @@ inline void configureVertexFit(const SelectionJson& spec) {
   auauVertexFit.reset(static_cast<TH1*>(h->Clone("auau_vertex_fit")));auauVertexFit->SetDirectory(nullptr);
 }
 
+/* Stage-3 trees carry diagnostic copies of the configured AuAu factors.
+   Their hashes determine whether to check the copies or ignore them. */
+inline std::string auauReceiptSha, auauStitchingSha;
+inline bool declaredAuAuCopies(const SelectionJson& w) {
+  auto sha=[](const std::string& x) {return x.size()==64 && x.find_first_not_of("0123456789abcdef")==std::string::npos;};
+  return w.value("composition", "")=="slice*vertex*centrality" && sha(w.value("receipt_sha256", "")) && sha(w.value("stitching_sha256", ""));
+}
+inline void checkAuAuCopies(double slice,double vertex,double centrality,double event,
+                           double owned,double expectedVertex,double expectedCentrality) {
+  auto same=[](double a,double b) {return std::isfinite(a) && std::isfinite(b) && (a==b || std::abs(a-b)<=1e-12*std::abs(b));};
+  if (slice!=owned || !same(vertex,expectedVertex) || centrality!=expectedCentrality || !same(event,owned*expectedVertex*expectedCentrality))
+    throw std::runtime_error("tree AuAu weight differs from the configured weight");
+}
+class AuAuTreeWeightCopies {
+  bool auau_=false;
+  CentralityWeights weights_;
+  std::unique_ptr<OwnershipGate> ownership_;
+  std::unique_ptr<TTreeReaderValue<int>> record_,ready_,terminal_,sampleValid_,vertexValid_;
+  std::unique_ptr<TTreeReaderValue<double>> z_,cent_,slice_,vertex_,centrality_,event_,xsec_;
+ public:
+  AuAuTreeWeightCopies(TFile& file,TTreeReader& reader,const CentralityWeights& weights) : weights_(weights) {
+    const bool simulation=fileSystem(file)==System::auau && isSimulation(file);
+    const SelectionJson w=file.Get("meta/weighting") ? SelectionJson::parse(metaText(file,"meta/weighting")) : SelectionJson::object();
+    const bool declared=simulation && declaredAuAuCopies(w);
+    auau_=simulation && (strictReduction || declared);
+    if (!declared) return;
+    auto *tree=file.Get<TTree>("eventTree");
+    for (const char *branch : {"w_xsec","w_sample_valid","w_vertex_valid"})
+      if (!tree || !tree->GetBranch(branch)) throw std::runtime_error(std::string("declared AuAu copies lack ")+branch);
+    if (!declaredAuAuCopies(w) || w.at("receipt_sha256")!=auauReceiptSha || w.at("stitching_sha256")!=auauStitchingSha) return;
+    if (!auauVertexFit) throw std::runtime_error("matching AuAu copies need the configured truth-vertex fit");
+    ownership_=std::make_unique<OwnershipGate>(reader);
+    z_=std::make_unique<TTreeReaderValue<double>>(reader,"truth_vtx_z");
+    cent_=std::make_unique<TTreeReaderValue<double>>(reader,"cent_value");
+    slice_=std::make_unique<TTreeReaderValue<double>>(reader,"w_slice");
+    vertex_=std::make_unique<TTreeReaderValue<double>>(reader,"w_vertex");
+    centrality_=std::make_unique<TTreeReaderValue<double>>(reader,"w_centrality");
+    event_=std::make_unique<TTreeReaderValue<double>>(reader,"w_event");
+    xsec_=std::make_unique<TTreeReaderValue<double>>(reader,"w_xsec");
+    record_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_record");
+    ready_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_nodes_ready");
+    terminal_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_terminal_status");
+    sampleValid_=std::make_unique<TTreeReaderValue<int>>(reader,"w_sample_valid");
+    vertexValid_=std::make_unique<TTreeReaderValue<int>>(reader,"w_vertex_valid");
+  }
+  void check() const {
+    if (!z_) return;
+    const bool weighted=**record_==0 && **ready_==1 && **terminal_==0 && ownership_->owned();
+    if (**sampleValid_!=1 || **vertexValid_!=(weighted ? 1 : 0) || **xsec_!=**slice_)
+      throw std::runtime_error("tree AuAu weight state differs from the configured weight");
+    if (!weighted) {
+      checkAuAuCopies(**slice_,**vertex_,**centrality_,**event_,0.,1.,1.);
+      return;
+    }
+    const double z=**z_;
+    if (!std::isfinite(z) || z<=-9000.) throw std::runtime_error("matching AuAu tree weight lacks a truth vertex");
+    const double v=(z<auauVertexFit->GetXaxis()->GetXmin() || z>auauVertexFit->GetXaxis()->GetXmax()) ? 0. : auauVertexFit->Interpolate(z);
+    checkAuAuCopies(**slice_,**vertex_,**centrality_,**event_,1.,v,weights_(**cent_));
+    if (xsec_ && **xsec_!=**slice_) throw std::runtime_error("tree AuAu w_xsec differs from w_slice");
+  }
+  double baseWeight(double existing) const {return auau_ ? 1. : existing;}
+};
+
 class VertexEventWeight {
+  bool copied_=false;
   std::unique_ptr<TTreeReaderValue<double>> z_, previous_;
  public:
   VertexEventWeight(TFile& file,TTreeReader& reader) {
     if(!auauVertexFit) return;
     if(fileSystem(file)!=System::auau || !isSimulation(file))
       throw std::runtime_error("additional vertex fit applies only to AuAu SIM");
-    if(file.Get("meta/weighting") && SelectionJson::parse(metaText(file,"meta/weighting")).value("vertex_enabled",false))
+    const SelectionJson copies=file.Get("meta/weighting") ? SelectionJson::parse(metaText(file,"meta/weighting")) : SelectionJson::object();
+    copied_=declaredAuAuCopies(copies);
+    if(copies.value("vertex_enabled",false) && !copied_)
       throw std::runtime_error("input already includes a vertex weight");
     z_=std::make_unique<TTreeReaderValue<double>>(reader,"truth_vtx_z");
     previous_=std::make_unique<TTreeReaderValue<double>>(reader,"w_vertex");
   }
   double operator()() const {
     if(!z_) return 1.;
-    if(**previous_!=1.) throw std::runtime_error("input vertex factor is not unity; refusing double weighting");
+    if(!copied_ && **previous_!=1.) throw std::runtime_error("input vertex factor is not unity; refusing double weighting");
     const double z=**z_;
     if(!std::isfinite(z) || z<=-9000.) throw std::runtime_error("missing truth vertex for nominal AuAu weight");
     if(z<auauVertexFit->GetXaxis()->GetXmin() || z>auauVertexFit->GetXaxis()->GetXmax()) return 0.;
@@ -761,6 +958,52 @@ class VertexEventWeight {
     return w;
   }
 };
+
+/* The p+p simulation crossing-angle periods (0 and 1.5 mrad): the PPG12 two-period sum. PPG12, and our PPG12 parity
+   production (the97, 2026-07-09), run the simulation once per period, each pass with that period's luminosity share,
+   SI/DI fraction and truth-vertex fit, and add the passes. TreeProduction writes each event's factors for the one period
+   its source is catalogued in; with the periods configured (selection pp.simulation_periods, mode all, read from
+   TreeProduction's ppg12_weights) TreeToHists adds the passes per event from the same trees:
+     w = w_slice x sum_p share_p x mix_p x v_p(z),  mix_p = 1 - f_DI,p (single) or f_DI,p (double interaction),
+   v_p the period's fit at the hard-scatter truth vertex, times at the minimum-bias truth vertex for a double
+   interaction. The term of the source's own period must equal its stored w_period x w_sidi x w_vertex, which proves the
+   fits and constants are the producer's. */
+struct PpPeriod {
+  std::string name;
+  double share = 0, doubleFraction = 0;
+  std::unique_ptr<TH1> fit;
+};
+inline std::vector<PpPeriod> ppPeriods;  /* empty: each source's own period, w_event as written */
+inline void configurePpPeriods(const SelectionJson& spec) {
+  ppPeriods.clear();
+  if (spec.is_null() || spec.empty() || spec.value("mode", std::string()) != "all") return;
+  for (const auto& [name, p] : spec.at("periods").items()) {
+    PpPeriod period;
+    period.name = name;
+    period.share = p.at("share").get<double>();
+    period.doubleFraction = p.at("double_fraction").get<double>();
+    if (!(period.share > 0 && period.share <= 1) || !(period.doubleFraction >= 0 && period.doubleFraction <= 1))
+      throw std::runtime_error("invalid p+p period share or double-interaction fraction for " + name);
+    TDirectory::TContext context;
+    const auto& fit = p.at("fit");
+    std::unique_ptr<TFile> file(TFile::Open(fit.at("path").get<std::string>().c_str(), "READ"));
+    if (!file || file->IsZombie()) throw std::runtime_error("cannot open the " + name + " truth-vertex fit");
+    auto* h = dynamic_cast<TH1*>(file->Get(fit.at("histogram").get<std::string>().c_str()));
+    if (!h || h->GetDimension() != 1 || h->GetNbinsX() < 2) throw std::runtime_error("invalid " + name + " truth-vertex histogram");
+    period.fit.reset(static_cast<TH1*>(h->Clone(("pp_vertex_fit_" + name).c_str())));
+    period.fit->SetDirectory(nullptr);
+    ppPeriods.push_back(std::move(period));
+  }
+}
+
+/* The producer's truth-vertex lookup: interpolated, 0 outside the fit or for a non-positive value, NaN without a
+   vertex (TreeProduction Event.cc, as PPG12). */
+inline double truthVertexWeight(TH1& fit, double z) {
+  if (!std::isfinite(z) || z <= -9000.) return std::numeric_limits<double>::quiet_NaN();
+  if (z < fit.GetXaxis()->GetXmin() || z > fit.GetXaxis()->GetXmax()) return 0.;
+  const double w = fit.Interpolate(z);
+  return std::isfinite(w) && w > 0. ? w : 0.;
+}
 
 /* The lane component code of a pp simulation source. The eventTree branch ppg12_weight_lane_code carries the
    producer's ppg12_weight_lane_component_code (eventTree_v1: events.ppg12_weight_lane_component_code), not its raw
@@ -772,11 +1015,15 @@ inline int ppWeightComponent(const SelectionJson& source) {
   if (dataset != "isSim" && dataset != "isSimInclusive")
     throw std::runtime_error("pp simulation dataset is neither isSim nor isSimInclusive: " + dataset);
   const bool inclusive = dataset == "isSimInclusive";
-  if (source.contains("lane") && source.at("lane") != (inclusive ? "pp_inclusive_sim" : "pp_photon_sim"))
-    throw std::runtime_error("pp simulation source lane disagrees with its dataset " + dataset);
   const std::string role = source.value("si_di_role", std::string());
   if (role != "SI" && role != "DI")
     throw std::runtime_error("pp simulation source does not declare its SI/DI component (meta/source si_di_role)");
+  // Older DI metadata names the SIM profile; the explicit role and the
+  // numeric event component still identify the double-interaction weight.
+  const std::string simLane = inclusive ? "pp_inclusive_sim" : "pp_photon_sim";
+  const std::string diLane = inclusive ? "pp_inclusive_di" : "pp_photon_di";
+  if (source.contains("lane") && source.at("lane") != simLane && !(role == "DI" && source.at("lane") == diLane))
+    throw std::runtime_error("pp simulation source lane disagrees with its dataset/role " + dataset + "/" + role);
   return (inclusive ? 3 : 1) + (role == "DI" ? 1 : 0);
 }
 
@@ -785,17 +1032,28 @@ inline int ppWeightComponent(const SelectionJson& source) {
    A structurally retained event can have been rejected by source stitching (ppg12_weight_active_state 0, component
    code 0). Only active canonical weights enter measurement, response and selected QA; an active event must carry its
    source's component code (ppWeightComponent) and one weight application. The saved slice, truth-vertex, SI/DI and
-   period factors are checked against w_event and used once. Historical direct macros remain a separate reference
+   period factors are checked against w_event and used once; weight() gives the event weight to fill with (w_event, or
+   with the periods configured the PPG12 two-period sum above). Historical direct macros remain a separate reference
    interface. */
 class PpSimulationGate {
-  int expectedLane_ = 0;
+  int expectedLane_ = 0, ownPeriod_ = -1;
+  bool doubleInteraction_ = false;
   std::unique_ptr<TTreeReaderValue<int>> active_, lane_, applications_;
-  std::unique_ptr<TTreeReaderValue<double>> event_, slice_, vertex_, mix_, period_;
+  std::unique_ptr<TTreeReaderValue<double>> event_, slice_, vertex_, mix_, period_, hardZ_, minimumBiasZ_;
 
  public:
   PpSimulationGate(TFile& file, TTreeReader& reader) {
     if (!strictReduction || fileSystem(file) != System::pp || !isSimulation(file)) return;
-    expectedLane_ = ppWeightComponent(SelectionJson::parse(metaText(file, "meta/source")));
+    const SelectionJson source = SelectionJson::parse(metaText(file, "meta/source"));
+    expectedLane_ = ppWeightComponent(source);
+    doubleInteraction_ = expectedLane_ == 2 || expectedLane_ == 4;
+    if (!ppPeriods.empty()) {
+      const std::string own = source.value("period", std::string());
+      for (size_t i = 0; i < ppPeriods.size(); ++i) if (ppPeriods[i].name == own) ownPeriod_ = static_cast<int>(i);
+      if (ownPeriod_ < 0) throw std::runtime_error("pp simulation source period '" + own + "' is not a configured period");
+      hardZ_ = std::make_unique<TTreeReaderValue<double>>(reader, "truth_vtx_z");
+      if (doubleInteraction_) minimumBiasZ_ = std::make_unique<TTreeReaderValue<double>>(reader, "truth_mbvtx_z");
+    }
     active_ = std::make_unique<TTreeReaderValue<int>>(reader, "ppg12_weight_active_state");
     lane_ = std::make_unique<TTreeReaderValue<int>>(reader, "ppg12_weight_lane_code");
     applications_ = std::make_unique<TTreeReaderValue<int>>(reader, "w_application_count");
@@ -824,6 +1082,24 @@ class PpSimulationGate {
         std::abs(**event_ - product) > 1e-12 * std::max(1., std::abs(product)))
       throw std::runtime_error("pp event weight differs from its canonical factor product");
     return true;
+  }
+
+  /* The weight to fill an accepted event with: w_event as written, or w_slice x the sum over the configured periods. */
+  double weight(double wEvent) const {
+    if (!active_ || ppPeriods.empty() || **active_ != 1) return wEvent;
+    double sum = 0., own = std::numeric_limits<double>::quiet_NaN();
+    for (size_t i = 0; i < ppPeriods.size(); ++i) {
+      const PpPeriod& p = ppPeriods[i];
+      double vertex = truthVertexWeight(*p.fit, **hardZ_);
+      if (doubleInteraction_) vertex *= truthVertexWeight(*p.fit, **minimumBiasZ_);
+      const double term = p.share * (doubleInteraction_ ? p.doubleFraction : 1. - p.doubleFraction) * vertex;
+      if (static_cast<int>(i) == ownPeriod_) own = term;
+      sum += term;
+    }
+    const double stored = **period_ * **mix_ * **vertex_;
+    if (!std::isfinite(sum) || !std::isfinite(own) || std::abs(own - stored) > 1e-12 * std::max(1., std::abs(stored)))
+      throw std::runtime_error("the source period's term differs from the producer's w_period x w_sidi x w_vertex");
+    return **slice_ * sum;
   }
 };
 

@@ -1,0 +1,15 @@
+# Local second stage, after the verified TreeToHists collection is downloaded.
+# Edit HistogramCollection to point to the downloaded collection.
+#   ./FinalAnalysis/final_analysis.sh all --config FinalAnalysis/config/pipeline_histograms.yaml
+Pipeline:
+  HistogramCollection: /path/to/downloaded/collection/collection.yaml
+  AnalysisSettings: analysis.yaml
+  UseCollectionSamples: 1  # response and inclusive-QA names from the collection
+  OutputDirectory: ../outputs/analysis_v1  # relative to this configuration; plots in fig/
+  SystematicsSettings: none
+  Variations: none
+  ExpectedFigures: none  # supply an exact figure inventory when qualifying coverage
+
+# analysis.yaml owns binning, iterations, corrections, bootstrap and closure.
+# Later offline studies can add Analysis variations and SystematicsSettings.
+# A change that needs tree-level information requires another TreeToHists run.

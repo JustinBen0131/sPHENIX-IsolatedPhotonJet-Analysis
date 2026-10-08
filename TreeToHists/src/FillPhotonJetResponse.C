@@ -392,13 +392,15 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
   if (simulationSystem(*file) != profile.system) throw std::runtime_error("profile system differs from " + path);
   const std::uint64_t source = textKey(sourceSha(*file));
   TTreeReader reader("eventTree", file.get());
+  applyEntryRange(reader);
   const VertexEventWeight vertexWeight(*file,reader);
   const PpSimulationGate ppSelection(*file,reader);
+  const AuAuTreeWeightCopies treeCopies(*file,reader,centralityWeight);
   TTreeReaderValue<int> record(reader, "evt_record"), ready(reader, "evt_nodes_ready"), vtxValid(reader, "vtx_valid"),
       terminal(reader, "evt_terminal_status");
   TTreeReaderValue<double> vz(reader, "vtx_z"), centrality(reader, "cent_value"), weightValue(reader, "w_event");
-  TTreeReaderArray<double> storedEt(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi"),
-      score(reader, profile.scoreBranch.c_str());
+  TTreeReaderArray<double> storedEt(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi");
+  PhotonScores score(*file,reader,profile);
   TTreeReaderArray<int> presel(reader, "pho_presel_active"), state(reader, profile.stateBranch.c_str());
   TTreeReaderArray<double> cone(reader, "isow_cone_sum"), threshold(reader, "isow_threshold"),
       sideband(reader, "isow_sideband_threshold");
@@ -429,6 +431,7 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
   /* Sums: entries are in source order, the reference's event order. Every fill of one event carries the same weight,
      so the order of the fills inside an event (region, truth photon, recoil order) cannot change any sum. */
   while (reader.Next()) {
+    treeCopies.check();
     reportProgress(reader.GetCurrentEntry()+1);
     validateSelectionEvent(profile, *centrality, storedEt, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
     if (*record != 0) continue;  /* upstream-rejected entries carry only evt_ fields */
@@ -462,8 +465,9 @@ inline void fillFile(const std::string& path, const Profile& requested, const st
     if (!ppSelection.accepts()) continue;
     if (!owner.owned()) continue;  /* a stitched sample's events outside its window belong to another sample */
     if (!responseEvent(profile, *vz)) continue;
-    /* w_event x the centrality weight; a non-finite product counts 1, as the reference does */
-    const double product = *weightValue * vertexWeight() * centralityWeight(*centrality);
+    /* w_event (p+p: summed over the configured periods) x the centrality weight; a non-finite product counts 1, as the
+       reference does */
+    const double product = treeCopies.baseWeight(ppSelection.weight(*weightValue)) * vertexWeight() * centralityWeight(*centrality);
     if (strictReduction && !std::isfinite(product)) throw std::runtime_error("nonfinite response weight");
     const double w = std::isfinite(product) ? product : 1.0;
     if (cone.GetSize() != 2 * nPhoton) throw std::runtime_error("isolation witnesses are not 2 per photon in " + path);

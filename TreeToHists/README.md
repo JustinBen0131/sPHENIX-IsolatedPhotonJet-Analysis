@@ -1,108 +1,146 @@
 # TreeToHists
 
-Fill histogram packages from eventTree v1 files using one shared selection
-for spectra, QA and simulation responses. Inputs are read only.
-Requires ROOT 6, its C++ compiler, libyaml, `nlohmann/json.hpp` and a POSIX shell.
-The supplied conda environment includes these dependencies.
+Reduce published eventTree files to one ROOT histogram package per sample.
+Packages preserve spectra, responses, QA, Sumw2, event records and original
+source contributions for FinalAnalysis.
 
-## Run locally
+## Build
 
-From the repository root:
+Load the ROOT environment on your computer, or the selected sPHENIX release
+on SDCC. The build requires a C++20 compiler, ROOT 6, Autoconf, Automake,
+libyaml and `nlohmann/json.hpp`.
 
 ```bash
-./TreeToHists/tree_to_hists.sh local --settings TreeToHists/config/treetohists.yaml \
-    --inputs inputs.yaml --work work --out histograms --parallel 8
+./TreeToHists/tree_to_hists.sh build
 ```
 
-`local` builds the driver, plans one job per input file, fills and merges.
-A completed job is reused only when its input and plan match. Use a new work
-directory for changed settings. Existing output packages are not replaced.
+The conventional build files are in [src/](src/): `autogen.sh`, `configure.ac`
+and `Makefile.am`. Build once before launching farm jobs.
 
-## Inputs and settings
+## Inputs and selection
 
-Copy [config/inputs.yaml](config/inputs.yaml) and name your DATA and SIM inputs.
-TreeProduction's DST `.list` files are used earlier, when making the trees.
+Copy [inputs.yaml](config/inputs.yaml) and [treetohists.yaml](config/treetohists.yaml).
+Name the published tree groups or ROOT files in the input YAML. Paths are
+relative to that file. DST `.list` files belong to TreeProduction.
 
 ```yaml
 samples:
   - system: PP
     name: data
     family: data
-    files: [/path/to/eventTree.root]
+    groups: [/path/to/published_pp_group]
 ```
 
-Paths are relative to the input YAML file. Use `groups` instead of `files`
-for published tree-group directories. The template documents simulation
-normalization and AuAu centrality/vertex bindings.
+The selection defaults to the frozen photon-ID and isolation definitions,
+pp Photon4, and AuAu Photon12 with minimum-bias selection. Simulation families
+are `photonjet` and `inclusivejet`; keep each named SI or DI population separate.
 
-[config/treetohists.yaml](config/treetohists.yaml) selects photon ID,
-isolation, DATA triggers and storage axes.
-The defaults use the frozen nominal photon-ID definition and AuAu isolation
-line. The DATA triggers are pp Photon4 and AuAu Photon12.
-For an optional model, set `PhotonIDSelection` under `auau` or `pp`
-to its `selection.json`.
+DATA produces `<system>/run_<run>.root` for every input run, followed by
+`<system>/data.root` combined from the validated run files. Keep the run files
+for offline QA. `exclude_runs` omits a run only from the combined analysis;
+its run file is retained. Optional `run_population_sources` and `run_luminosity`
+maps record expected source counts and qualified luminosity by run.
+Missing values stay unknown. Trigger-study spectra use each run's GL1
+live/scaled correction before combination; nominal physics weights are unchanged.
 
-Frozen definitions, JSON records inside ROOT files and package sidecars retain
-the source identity, selection and normalization needed by FinalAnalysis. The driver reads these
-automatically; analysts supply YAML settings and tree inputs.
+To add newly published inputs, set `reuse_collection` in the input YAML to a
+previous `collection.yaml` and use new work/output directories. Unchanged run
+and simulation packages are reused only when their inputs, code, selection and
+corrections match. Changed runs are rebuilt; combined DATA is rebuilt from the
+validated run files.
 
-## Run on Condor
+An optional `PhotonIDSelection` selects a sealed model and its working points.
+Native BDT releases evaluate the stored H70 feature vector while reading each
+tree; they do not require a separate scored-tree production.
+
+p+p simulation weights sum the 0 and 1.5 mrad periods using their luminosity
+shares, interaction fractions and truth-vertex fits from TreeProduction's
+`ppg12_weights`. Absolute normalization uses that family's reference cross
+section divided by all entries of the selected trees, including inactive
+entries. FinalAnalysis applies it once. AuAu simulation needs the qualified
+centrality weights and truth-vertex fit specified in the input template.
+
+## Produce on SDCC
+
+Copy [campaign.yaml](config/campaign.yaml), set your GPFS directories, setup
+script and measured timing file, then prepare and inspect the frozen campaign:
 
 ```bash
-./TreeToHists/tree_to_hists.sh plan --settings TreeToHists/config/treetohists.yaml \
-    --inputs inputs.yaml --work work
-./TreeToHists/tree_to_hists.sh condor --work work --logs logs \
-    --events-log /tmp/$USER/photonjet/events.log \
-    --setup "/opt/sphenix/core/bin/sphenix_setup.sh -n new"
-mkdir -p "/tmp/$USER/photonjet"
-condor_submit work/condor/fill.sub
-./TreeToHists/tree_to_hists.sh merge --work work --sample PP/data --out histograms
+./TreeToHists/tree_to_hists.sh campaign --config campaign.yaml --prepare-only
+./TreeToHists/tree_to_hists.sh campaign --config campaign.yaml --submit
 ```
 
-`condor` prepares the submit file; the analyst submits it. Merge each sample
-after its jobs finish. Jobs use the supplied setup script and prebuilt driver.
+Launch after site preflight and production approval. The DAG checks input
+headers in parallel (`InspectSourcesPerJob`, `InspectConcurrency`), assembles
+the plan on a compute node, fills bounded source groups, merges disjoint sources and validates the
+completed collection. `MaxEventsPerJob` defaults to 50,000 (at most 100,000);
+`MaxSourcesPerJob` limits the small inputs read serially by each worker. Samples
+and DATA runs stay separate. Per-source phase files use private worker scratch;
+GPFS receives one validated ROOT chunk per group, in sharded directories.
+`MergeFanIn` defaults to 200: independent jobs merge completed chunks into
+partials, then merge those partials through further levels. Merges start as
+their inputs finish. They open one ROOT file at a time and stream source/event
+records; each new package passes the full check before publication.
+`FillConcurrency` and `MergeConcurrency` limit each stage. Set the separate
+`FillMemoryMB`, `MergeMemoryMB` and `CollectionMemoryMB` requests from your
+measurements. The final collection job checks small validation receipts and
+file hashes rather than loading the complete input inventory again.
+A source larger than the event cap uses deterministic ranges with its original
+identity retained. Timing includes all fill
+passes and must bind the current code, settings and ROOT build; ranges target eight
+hours with a 1.5 safety factor. Workers use the prebuilt executable.
 
-## Additional commands
+Completed fill phases and packages are reused when their hashes and bindings
+match. Input reads have three bounded attempts. Other failures stop the DAG
+and leave checkpoint and rescue evidence for an explicit restart. Changed
+inputs or settings require a new work directory.
 
-- `centrality` derives AuAu simulation weights from the DATA package.
-- `isolation population|derive|freeze|check` builds and checks an isolation definition.
-- `Fill.ResponseVariation` in the settings varies simulated response scale/resolution.
-- `Fill.RequireStage3Fractions: 1` requires filled jet calorimeter fractions;
-  the default 0 permits inputs where they remain unavailable.
+## Transfer and analyze
 
-Run `tree_to_hists.sh` without arguments for command syntax.
-[FinalAnalysis](../FinalAnalysis/README.md) provides the end-to-end `all` command.
+The finished GPFS folder contains `collection.yaml`, `selection.yaml`,
+`histograms.yaml`, and `<system>/<sample>.root` with its JSON sidecar. Transfer
+that folder through SDCC SFTP, then run [FinalAnalysis](../FinalAnalysis/README.md)
+locally with [pipeline_histograms.yaml](../FinalAnalysis/config/pipeline_histograms.yaml).
+The sidecars and ROOT metadata are read automatically. Partial or unknown
+source coverage stays labeled; nominal p+p analysis requires both SI and DI
+packages for each included family.
 
-## Output
+For a local reduction, use the same implementation:
 
-```text
-<out>/<system>/data.root       DATA package
-<out>/<system>/<sample>.root   simulation package
-<out>/<system>/<sample>.json   package sidecar
+```bash
+./TreeToHists/tree_to_hists.sh local --settings treetohists.yaml \
+    --inputs inputs.yaml --work work --out histograms --parallel 4
 ```
 
-Packages contain measurement and QA histograms, simulation responses,
-event records and source contributions. Histograms retain Sumw2; event/source
-records support correlated resampling in FinalAnalysis. Simulation's absolute
-sample normalization is recorded here and applied by FinalAnalysis.
-Incomplete or unknown input coverage remains labeled.
+`centrality` derives AuAu weights from a DATA package. The `isolation`
+commands derive and check an isolation definition. Run the entry point
+without arguments for their syntax.
+
+For the AuAu truth-vertex fit, copy [auau_vertex.yaml](config/auau_vertex.yaml)
+and set the pinned inputs and centrality-weight file. `vertex population`
+retains the needed tree sums; `vertex derive` writes `vertex.root` and
+`DERIVATION.json`. The fit is a candidate until event-level vertex and
+centrality closure checks qualify the production weight receipt.
+
+```bash
+./TreeToHists/tree_to_hists.sh vertex population --config auau_vertex.yaml --out population.root
+./TreeToHists/tree_to_hists.sh vertex derive --config auau_vertex.yaml \
+    --population population.root --out vertex_fit
+```
 
 ## Source map
 
-Start at `TreeToHists.cc::main`. `plan` resolves inputs and settings;
-`fill` calls the common selection and fill macros; `merge` writes one sample package.
-
 | File | Responsibility |
 |---|---|
-| [TreeToHists.cc](src/TreeToHists.cc) | Settings, catalogue, planning, filling and merge |
-| [Configuration.h](src/Configuration.h) | YAML reader shared with FinalAnalysis |
-| [PhotonJet.h](src/PhotonJet.h) | Shared cuts, regions, weights and truth relations |
+| [TreeToHists.cc](src/TreeToHists.cc) | Selection, input planning, filling and raw merge |
+| [Campaign.cc](src/Campaign.cc) | Frozen campaign, Condor dependencies and collection publication |
+| [Package.cc](src/Package.cc) | Source-aware hierarchical merge and package checks |
+| [Corrections.cc](src/Corrections.cc) | AuAu vertex population and PPG12 fit candidate |
+| [PhotonJet.h](src/PhotonJet.h) | Shared cuts, weights, truth relations and bounded readers |
 | [FillPhotonJet.C](src/FillPhotonJet.C) | Measurement histograms and event records |
-| [FillPhotonJetResponse.C](src/FillPhotonJetResponse.C) | Simulation response, misses and fakes |
-| [FillPhotonQA.C](src/FillPhotonQA.C) | QA and retained-observable extensions |
+| [FillPhotonJetResponse.C](src/FillPhotonJetResponse.C) | Response, misses and fakes |
+| [FillPhotonQA.C](src/FillPhotonQA.C) | Established QA and retained-observable extensions |
 | [Isolation.cc](src/Isolation.cc) | Isolation derivation and checks |
-| [TreeToHists.h](src/TreeToHists.h) | Shared driver declarations |
 
-Input compatibility is checked automatically. Full-population statistics and
-the normalization, weighting and physics-closure qualifications remain
-necessary for final scientific use.
+Package validation checks structure, hashes and source/event accounting.
+Scientific acceptance also requires adequate statistics and analysis closure.

@@ -85,6 +85,7 @@ R__LOAD_LIBRARY(libTreePlayer)
    isonoueslice_<f>        the same without UE subtraction (Au+Au)
    width_<var>_<f>         var x ET x slice      stage 1; weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx in 0.01 bins
    over 0-1 (the shape histograms keep the full range)
+   width_tight_iso_<var>_<f>  the same fine axes, stage 3; retained for DATA/SIM overlays after tight + isolation
    e11e33_dt_data_<c>      e11/e33 x ET x dt     DATA, stage 0; dt = cluster time - MBD t0 [ns]
    etatime_data_<c>        eta x dt              DATA, stage 0, ET >= 10 GeV
    evt_vz_<F>_<c>          vertex z              events before the vertex window
@@ -255,7 +256,10 @@ inline void prebook(Book& b, Family family, System system, const std::vector<Cen
     b.h3("bdt_"+label,"",{200,0,1},kEt,slices);
     b.h3("isoslice_"+label,"",kIso,kEt,slices);
     if (auau) b.h3("isonoueslice_"+label,"",kIso,kEt,slices);
-    for (const auto& v:kWidths) b.h3("width_"+v+"_"+label,"",kWidth,kEt,slices);
+    for (const auto& v:kWidths) {
+      b.h3("width_"+v+"_"+label,"",kWidth,kEt,slices);
+      b.h3("width_tight_iso_"+v+"_"+label,"",kWidth,kEt,slices);
+    }
   }
   b.h3("evt_calo_"+F,"",auau?Range{300,0,3000}:Range{200,0,200},auau?Range{100,0,100}:Range{1,0,100},{4,0,4});
   if (auau) {
@@ -263,7 +267,10 @@ inline void prebook(Book& b, Family family, System system, const std::vector<Cen
     if (!sim) b.h2("cent_bits_data","",{100,0,100},{64,0,64});
   }
   if (sim) b.h2("gen_"+F,"",{160,0,80},{2,0,2});
-  else b.h3("trig_data","",{100,0,40},{64,0,64},{65,0,65});
+  else {
+    b.h3("trig_data","",{100,0,40},{64,0,64},{65,0,65});
+    b.h3("trig_study_data","",{40,0,20},{64,0,64},{65,0,65});
+  }
 }
 
 /* The candidate's photon-ID and isolation decisions under the profile (the per-candidate form of regionLeaders). */
@@ -272,8 +279,8 @@ struct Decision {
   double iso = std::numeric_limits<double>::quiet_NaN();
 };
 
-template <class Values, class Ints>
-Decision decide(const Profile& p, std::size_t i, double et, double centrality, const Values& score, const Ints& state,
+template <class Values, class Ints, class Scores>
+Decision decide(const Profile& p, std::size_t i, double et, double centrality, const Scores& score, const Ints& state,
                 const Values& cone, const Values& threshold, const Values& sideband, const Ints& method, const Ints& role,
                 const Ints& idClass, const Ints& isoClass) {
   /* the selection's own classes (PhotonJet.h photonClass), plus the witness cone sum for the isolation plots */
@@ -305,21 +312,24 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
   const DataEventSelection dataSelection(*file,profile);
   const std::string F = familyName(family);
   TTreeReader reader("eventTree", file.get());
+  applyEntryRange(reader);
   const VertexEventWeight vertexWeight(*file,reader);
   const PpSimulationGate ppSelection(*file,reader);
+  const AuAuTreeWeightCopies treeCopies(*file,reader,centralityWeight);
   TTreeReaderValue<int> record(reader, "evt_record"), ready(reader, "evt_nodes_ready"), vtxValid(reader, "vtx_valid"),
       terminal(reader, "evt_terminal_status"), centMb(reader, "cent_mb_decision"), embMb(reader, "evt_embedded_mb_decision"), run(reader,"evt_run");
   TTreeReaderValue<double> vz(reader, "vtx_z"), centrality(reader, "cent_value"), weightValue(reader, "w_event"),
       caloTotal(reader, "calo_total"), maxCluster(reader, "calo_max_cluster_e"), mbdT0(reader, "mbd_t0");
   TTreeReaderValue<ULong64_t> scaled(reader, "trig_scaled"), live(reader, "trig_live");
-  TTreeReaderArray<double> et(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi"), score(reader, profile.scoreBranch.c_str()),
+  TTreeReaderArray<double> et(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi"),
       time(reader, "pho_time_ns"), npb(reader, "pho_npb_score");
+  PhotonScores score(*file,reader,profile);
   TTreeReaderArray<int> presel(reader, "pho_presel_active"), state(reader, profile.stateBranch.c_str()), idClass(reader, "pho_id_class"),
       isoClass(reader, "pho_iso_class");
   std::vector<std::unique_ptr<TTreeReaderArray<double>>> shape;
   for (const std::string& var : kShapes) {
     std::string branch = "pho_" + var;
-    if (var == "bdt") branch = profile.scoreBranch;
+    if (var == "bdt") {shape.emplace_back(nullptr);continue;}
     if (var == "et1" || var == "et2" || var == "et3" || var == "et4") branch = "pho_npb_cluster_" + var;
     shape.emplace_back(new TTreeReaderArray<double>(reader, branch.c_str()));
   }
@@ -352,12 +362,23 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
   const Range centRange = auau ? Range{100, 0.0, 100.0} : Range{1, 0.0, 100.0};
 
   while (reader.Next()) {
+    treeCopies.check();
     reportProgress(reader.GetCurrentEntry()+1);
+    /* The legacy trigger study precedes analysis cuts: |vz| < 30 cm,
+       maximum retained cluster energy >= 1 GeV, 40 bins over 0–20 GeV.
+       Its run-level live/scaled correction is applied by the package merge. */
+    if (!sim && std::isfinite(*vz) && std::fabs(*vz)<30 && std::isfinite(*maxCluster) && *maxCluster>=1) {
+      auto &study=b.h3("trig_study_data","",{40,0,20},{64,0,64},{65,0,65});
+      for (int s=0;s<64;++s) if ((*scaled>>s)&1ULL) {
+        study.Fill(*maxCluster,s+0.5,64.5);
+        for (int l=0;l<64;++l) if ((*live>>l)&1ULL) study.Fill(*maxCluster,s+0.5,l+0.5);
+      }
+    }
     validateSelectionEvent(profile, *centrality, et, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
     if (*record != 0 || *ready != 1 || *terminal != 0) continue;
     const bool ppOwned = ppSelection.accepts();
     if (strictReduction && !std::isfinite(*weightValue)) throw std::runtime_error("nonfinite QA event weight");
-    const double wEvent = (std::isfinite(*weightValue) ? *weightValue : 1.0) * vertexWeight();
+    const double wEvent = (std::isfinite(*weightValue) ? treeCopies.baseWeight(ppSelection.weight(*weightValue)) : 1.0) * vertexWeight();
     double w = wEvent;
     if (sim && auau) {
       w = wEvent * centralityWeight(*centrality);
@@ -484,7 +505,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
       }
       if (!(kQaEtMin <= et[i] && et[i] < kQaEtMax)) continue;
       for (std::size_t v = 0; v < kShapes.size(); ++v) {
-        const double x = (*shape[v])[i];
+        const double x = shape[v] ? (*shape[v])[i] : score[i];
         if (!std::isfinite(x)) continue;
         TH3F& h = b.h3("ss_" + kShapes[v] + "_" + tag, (";" + kShapes[v] + ";E_{T} [GeV];stage").c_str(), shapeRange(kShapes[v]),
                        kEt, kStage);
@@ -523,10 +544,14 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
       for (const std::string& var : kWidths) {
         std::size_t v = 0;
         while (kShapes[v] != var) ++v;
-        const double x = (*shape[v])[i];
-        if (std::isfinite(x))
+        const double x = shape[v] ? (*shape[v])[i] : score[i];
+        if (std::isfinite(x)) {
           b.h3("width_" + var + "_" + f, ("preselected;" + var + ";E_{T} [GeV];5% slice").c_str(), kWidth, kEt, slices)
               .Fill(x, et[i], slice + 0.5, w);
+          if (stage == 3)
+            b.h3("width_tight_iso_" + var + "_" + f, ("tight and isolated;" + var + ";E_{T} [GeV];5% slice").c_str(), kWidth, kEt, slices)
+                .Fill(x, et[i], slice + 0.5, w);
+        }
       }
     }
     /* the event-leading photon of each region, as FillPhotonJet.C selects it, by its label */
@@ -718,8 +743,10 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
     scoreRoles->Sumw2();
   }
   TTreeReader r("eventTree",input.get());
+  applyEntryRange(r);
   const VertexEventWeight vertexWeight(*input,r);
   const PpSimulationGate ppSelection(*input,r);
+  const AuAuTreeWeightCopies treeCopies(*input,r,weights);
   TTreeReaderValue<int> run(r,"evt_run");
   TTreeReaderValue<ULong64_t> scaled(r,"trig_scaled");
   TTreeReaderValue<int> record(r,"evt_record"),ready(r,"evt_nodes_ready"),terminal(r,"evt_terminal_status"),valid(r,"vtx_valid"),cmb(r,"cent_mb_decision"),emb(r,"evt_embedded_mb_decision"),chargeState(r,"mbd_charge_sum_state");
@@ -736,7 +763,8 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
     if(fractions) for(const auto* d:{"emcal","ihcal","ohcal"})
       fracs.emplace_back(new TTreeReaderArray<double>(r,(std::string("jet")+rr+"_"+d+"_frac").c_str()));
   }
-  TTreeReaderArray<double> et(r,"pho_et"),eta(r,"pho_eta"),phi(r,"pho_phi"),score(r,profile.scoreBranch.c_str());
+  TTreeReaderArray<double> et(r,"pho_et"),eta(r,"pho_eta"),phi(r,"pho_phi");
+  PhotonScores score(*input,r,profile);
   TTreeReaderArray<int> pre(r,"pho_presel_active"),state(r,profile.stateBranch.c_str());
   std::unique_ptr<TTreeReaderArray<int>> pr,pt,pc,jr,jc,tvalid,tclass;
   std::unique_ptr<TTreeReaderArray<double>> pm,jm;
@@ -748,16 +776,18 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
   }
   const OwnershipGate owner(r);  /* a stitched sample's events outside its window belong to another sample */
   while(r.Next()) {
+    treeCopies.check();
     reportProgress(r.GetCurrentEntry()+1);
     if(*record!=0) continue;
     if(!ppSelection.accepts()) continue;
     if(!owner.owned()) continue;
     if(!std::isfinite(*w)) throw std::runtime_error("nonfinite event weight");
-    const double weight=*w*vertexWeight()*weights(*c), centValue=auau?*c:50.;
+    const double weight=treeCopies.baseWeight(ppSelection.weight(*w))*vertexWeight()*weights(*c), centValue=auau?*c:50.;
     auto& cut=h3("qa/events/cutflow",{6,0,6},cent,{2,0,2});
     const bool gates[]={true,*ready==1,*terminal==0,*valid==1,std::isfinite(*vz)&&std::abs(*vz)<profile.vertexAbsZMax,!auau||(*c>=0&&*c<80)};
     for(int i=0;i<6;++i) {if(!gates[i]) break;cut.Fill(i+.5,centValue,.5);cut.Fill(i+.5,centValue,1.5,weight);}
-    b.h2(key("qa/events/weights"),"",{200,-10,10},{2,0,2}).Fill(*w,.5);
+    // Base weight applied by TreeToHists; the second channel holds the final weight.
+    b.h2(key("qa/events/weights"),"",{200,-10,10},{2,0,2}).Fill(treeCopies.baseWeight(*w),.5);
     if(!gates[1]||!gates[2]||!gates[3]) continue;
     const int mbState=(*cmb==1?2:*cmb==0?1:0)+3*(*emb==1?2:*emb==0?1:0);
     if(*chargeState==1&&std::isfinite(*q)) b.h2(key("qa/events/mbd_charge"),"",charge,cent).Fill(*q,centValue,weight);

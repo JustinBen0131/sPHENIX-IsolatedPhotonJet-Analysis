@@ -180,8 +180,10 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
   const Profile profile = validateSelectionInput(*file, requested);
   if (fileSystem(*file) != profile.system) throw std::runtime_error("profile system differs from " + path);
   TTreeReader reader("eventTree", file.get());
+  applyEntryRange(reader);
   const VertexEventWeight vertexWeight(*file,reader);
   const PpSimulationGate ppSelection(*file,reader);
+  const AuAuTreeWeightCopies treeCopies(*file,reader,weights);
   const DataEventSelection dataSelection(*file,profile);
   const ULong64_t triggerMask = dataTrigger.empty() ? 0 : dataTriggerMask(*file,dataTrigger);
   std::unique_ptr<TTreeReaderValue<ULong64_t>> scaled;
@@ -192,8 +194,8 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
       terminal(reader, "evt_terminal_status"), run(reader, "evt_run");
   TTreeReaderValue<Long64_t> seq(reader, "evt_seq");
   TTreeReaderValue<double> vz(reader, "vtx_z"), centrality(reader, "cent_value"), weightValue(reader, "w_event");
-  TTreeReaderArray<double> et(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi"),
-      score(reader, profile.scoreBranch.c_str());
+  TTreeReaderArray<double> et(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi");
+  PhotonScores score(*file,reader,profile);
   TTreeReaderArray<int> presel(reader, "pho_presel_active"), state(reader, profile.stateBranch.c_str());
   TTreeReaderArray<double> cone(reader, "isow_cone_sum"), threshold(reader, "isow_threshold"),
       sideband(reader, "isow_sideband_threshold");
@@ -203,6 +205,7 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
   const OwnershipGate owner(reader);  /* a stitched sample's events outside its window belong to another sample */
 
   while (reader.Next()) {
+    treeCopies.check();
     reportProgress(progressOffset+reader.GetCurrentEntry()+1);
     validateSelectionEvent(profile, *centrality, et, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
     if (*record != 0 || *ready != 1 || *vtxValid != 1 || *terminal != 0) continue;
@@ -211,7 +214,7 @@ inline void fillFile(const std::string& path, int fileIndex, const Profile& requ
     if(profile.configured && (!std::isfinite(*vz) || std::fabs(*vz)>=profile.vertexAbsZMax)) continue;
     if(!dataSelection.accepts(*run,scaled?**scaled:0,mb?**mb:0)) continue;
     if(!dataTrigger.empty() && !(**scaled & triggerMask)) continue;
-    const double product = *weightValue * vertexWeight() * weights(*centrality);
+    const double product = treeCopies.baseWeight(ppSelection.weight(*weightValue)) * vertexWeight() * weights(*centrality);
     if (strictReduction && !std::isfinite(product)) throw std::runtime_error("nonfinite event weight in " + path);
     const double w = std::isfinite(product) ? product : 1.0;
     int k = 0;  /* the event's centrality class (classes are disjoint) */

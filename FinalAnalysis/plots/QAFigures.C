@@ -11,6 +11,8 @@
 #include <TF1.h>
 #include <TH3.h>
 #include <TParameter.h>
+#include <TLeaf.h>
+#include <TTree.h>
 
 #include <algorithm>
 #include <array>
@@ -487,7 +489,7 @@ void ncbScore(const std::string &pkg) {
   if (TH1 *h = of("phosim")) curves.push_back(lineCurve(spectrum(h), cRed, "Photon+jet simulation"));
   if (TH1 *h = of("jetsim")) curves.push_back(lineCurve(spectrum(h), cBlue, "Inclusive-jet simulation"));
   curves.push_back(pointCurve(spectrum(data), cBlack, 20, "DATA"));
-  drawCurves(curves, 0, 1, true, "NCB classifier score", "Normalized entries",
+  drawCurves(curves, 0, 1, false, "NCB classifier score", "Normalized entries",
              {(pkg == "PP" ? std::string("p+p, ") : spanLabel() + ", ") + energyOf(pkg), photonWindowLabel(low,high)}, name,
              [] { vline(0.5, gFrameLow, gFrameHigh); });
 }
@@ -528,22 +530,29 @@ void showerShapes() {
     }
 }
 
-/* Cluster widths of the preselected prompt photons (photon simulation) and inclusive-jet candidates per Au+Au class. */
+/* DATA against prompt-photon and inclusive-jet simulation, with identical tight + isolated selection.
+   The preselection widths stay in the package; these panels use the separately retained stage-3 fine bins. */
 void widths() {
   for (const auto &[label, family, who] : {std::make_tuple("sig", "phosim", "signal"), std::make_tuple("bkg", "jetsim", "background")})
     for (const auto &[var, slot, xtitle] : {std::make_tuple("weta_cogx", "full_cluster", "w_{#eta}^{COG}"),
                                             std::make_tuple("weta33_cogx", "3x3", "w_{#eta}^{3#times3, COG}")}) {
       const std::string name = std::string("photonOnly/auau_") + who + "_" + slot + "_width.png";
-      TH1 *h = qa(std::string("AuAu/") + family + "/slices/" + label + "/width_" + var);
-      if (!h) { missing(name, std::string("no Au+Au ") + family + " simulation QA"); continue; }
+      TH1 *h = qa(std::string("AuAu/") + family + "/slices/" + label + "/width_tight_iso_" + var);
+      TH1 *data = qa(std::string("AuAu/data/slices/data/width_tight_iso_") + var);
+      if (!h || !data) { missing(name, "needs Au+Au DATA and simulation tight + isolated width QA"); continue; }
       std::vector<Curve> curves;
       const int colors[] = {cBlue, cOrange, cGreen, cRed, cPurple};
       int i = 0;
       const auto domain = photonSupport("AuAu");
-      for (const auto &c : classesOf("AuAu"))
-        curves.push_back(lineCurve(unit(project(h, 0, {{1, domain.first, domain.second}, {2, lowOf(c) / 5, highOf(c) / 5}})), colors[i++ % 5], percent(lowOf(c), highOf(c))));
+      for (const auto &c : classesOf("AuAu")) {
+        const int color = colors[i++ % 5];
+        const std::string centrality = percent(lowOf(c), highOf(c));
+        auto spectrum = [&](const TH1 *hist) { return unit(project(hist, 0, {{1, domain.first, domain.second}, {2, lowOf(c) / 5, highOf(c) / 5}})); };
+        curves.push_back(lineCurve(spectrum(h), color, centrality + " simulation"));
+        curves.push_back(pointCurve(spectrum(data), color, 20 + (i - 1) % 3, centrality + " DATA"));
+      }
       drawCurves(curves, 0, 0.7, false, xtitle, "Unit-normalized candidates / 0.01",
-                 {"Au+Au, " + energyOf("AuAu"), std::string(label == std::string("sig") ? "Truth-matched prompt photons" : "Inclusive-jet candidates") + ", preselected",
+                 {"Au+Au, " + energyOf("AuAu"), std::string(label == std::string("sig") ? "Prompt-photon simulation and DATA" : "Inclusive-jet simulation and DATA") + ", tight + isolated",
                   photonWindowLabel(domain.first,domain.second)}, name);
     }
 }
@@ -1209,12 +1218,14 @@ void triggerStudy(const std::string &pkg) {
   std::sort(photons.begin(), photons.end(), [](const std::string &a, const std::string &b) {
     return std::atof(a.c_str() + a.find_first_of("0123456789")) < std::atof(b.c_str() + b.find_first_of("0123456789"));
   });
-  const std::vector<std::string> lines = {(pp ? "p+p, " : "Au+Au, ") + energyOf(pkg), Form("scaled-trigger study, %d runs", runs)};
+  const bool corrected=info["correction"]=="run_live_over_scaled";
+  const std::vector<std::string> lines = {(pp ? "p+p, " : "Au+Au, ") + energyOf(pkg),
+    Form("%s, %d runs",corrected ? "per-run prescale-corrected study" : "scaled-trigger study",runs)};
   const int colors[] = {cBlue, cRed, cGreen, cPurple};  /* the IAN's order: the lowest photon threshold blue, then red */
   std::vector<Curve> curves = {lineCurve(binsOf(static_cast<TH1 *>(d->Get("reference"))), cBlack, latexCuts(info["reference"]))};
   for (size_t i = 0; i < photons.size(); ++i) curves.push_back(lineCurve(binsOf(static_cast<TH1 *>(d->Get(("spectrum_" + photons[i]).c_str()))), colors[i % 4], photons[i]));
   const Bins &reference = curves.front().bins;
-  drawCurves(curves, reference.edges.front(), reference.edges.back(), true, "Maximum cluster energy [GeV]", "Scaled-trigger events", lines, spectra);
+  drawCurves(curves, reference.edges.front(), reference.edges.back(), true, "Maximum cluster energy [GeV]", corrected ? "Prescale-corrected events" : "Scaled-trigger events", lines, spectra);
   const Bins denominator = binsOf(static_cast<TH1 *>(d->Get("reference_denominator")));
   std::vector<Curve> efficiencies;
   for (size_t i = 0; i < photons.size(); ++i) {
@@ -1222,7 +1233,10 @@ void triggerStudy(const std::string &pkg) {
     double crossing = std::nan("");
     for (int b = 0; b < eff.n(); ++b) {
       const double n = denominator.v[b], e = n > 0 ? eff.v[b] / n : std::nan("");
-      eff.v[b] = e, eff.e2[b] = n > 0 ? std::max(e * (1 - e), 0.0) / n : 0;
+      /* Match ROOT's legacy weighted-binomial Divide(...,"B") convention. */
+      const double numVariance=eff.e2[b];
+      eff.v[b] = e;
+      eff.e2[b] = n>0 ? (corrected ? (e==1 ? 0 : std::fabs((1-2*e)*numVariance+e*e*denominator.e2[b])/(n*n)) : std::max(e*(1-e),0.0)/n) : 0;
       if (std::isnan(crossing) && std::isfinite(e) && e >= 0.9) crossing = eff.center(b);
     }
     efficiencies.push_back(pointCurve(eff, colors[i % 4], 20, photons[i] + "/MBD" + (std::isfinite(crossing) ? Form(" (90%%: %.1f GeV)", crossing) : "")));
@@ -1231,8 +1245,307 @@ void triggerStudy(const std::string &pkg) {
              [pp] { hline(1, 0, pp ? 20 : 30); });
 }
 
+/* PhotonID owns the training statistics. These figures only display the saved
+   tables and histograms imported by the QA step. Model support is independent
+   of the photon bins used for the physics measurement. */
+PlotJson modelMetadata(const std::string &name) {
+  auto *object=dynamic_cast<TObjString*>(gQA->Get(("model_qa/"+name+"/meta/diagnostics").c_str()));
+  if(!object)throw std::runtime_error("missing saved PhotonID diagnostics metadata: "+name);
+  return PlotJson::parse(object->GetString().Data());
+}
+std::vector<PlotJson> modelTable(const std::string &name,const std::string &table) {
+  auto *tree=dynamic_cast<TTree*>(gQA->Get(("model_qa/"+name+"/"+table).c_str()));
+  if(!tree)throw std::runtime_error("missing saved PhotonID table: "+table);
+  std::vector<PlotJson> rows;
+  for(Long64_t i=0;i<tree->GetEntries();++i) {
+    tree->GetEntry(i);PlotJson row=PlotJson::object();
+    TIter next(tree->GetListOfLeaves());while(auto *leaf=static_cast<TLeaf*>(next())) row[leaf->GetName()]=leaf->GetValue();
+    rows.push_back(row);
+  }
+  return rows;
+}
+std::vector<std::string> modelHeader(const std::string &name,const PlotJson &meta) {
+  const auto &range=meta.at("et_ranges_gev").at("training");
+  const bool pp=meta.value("system","AuAu")=="PP",ppg12=pp && name.rfind("ppg12_retrained_",0)==0;
+  auto lines=std::vector<std::string>{pp ? "p+p photon-ID training" : "Au+Au photon-ID training",name,
+    Form("%g #leq E_{T}^{#gamma} %s %g GeV; |#eta| < 0.7; |z| < 10 cm",
+      range.at(0).get<double>(),ppg12 ? "#leq" : "<",range.at(1).get<double>())};
+  if(meta.value("qualification","").find("FORMAT_TEST")!=std::string::npos)lines.push_back("Format test: synthetic inputs");
+  return lines;
+}
+void saveModelQA(TCanvas &canvas,const std::string &path,const PlotJson &index,const std::vector<std::string> &names) {
+  gSemanticPackages.clear();save(canvas,path);
+  const auto file=gFig+"/"+path+".json";
+  auto receipt=photonjet_render::read(file);
+  auto *checked=dynamic_cast<TObjString*>(gQA->Get("model_qa/validation"));
+  const auto validation=checked ? PlotJson::parse(checked->GetString().Data()) : PlotJson();
+  const bool imported=!validation.is_null() && validation.value("status","")=="PASS" &&
+    validation.at("collection_sha256")==index.at("collection_sha256") && index.value("qualification","").find("FORMAT_TEST")==std::string::npos;
+  PlotJson models=PlotJson::array();for(const auto &name:names)for(const auto &entry:index.at("models"))if(entry.at("name")==name)models.push_back(entry);
+  receipt["kind"]="PHOTON_ID_MODEL_QA";
+  receipt["annotation_status"]="SAVED_MODEL_METADATA";
+  receipt["model_qa"]={{"collection_sha256",index.at("collection_sha256")},{"models",models},
+    {"import_validation",validation},{"qualification",imported ? "SEALED_MODEL_QA" : "FORMAT_TEST_ONLY"},
+    {"scientific_acceptance",false}};
+  if(index.value("system","AuAu")=="PP")receipt["model_qa"]["comparisons"]=index.at("comparisons");
+  photonjet_render::write(file,receipt);
+}
+void trainingReweighting(const std::string &name,const PlotJson &index,const std::string &prefix) {
+  const auto meta=modelMetadata(name);
+  for(const std::string variable:{"et","eta"}) {
+    const std::string system=meta.value("system","AuAu")=="PP" ? "pp" : "auau";
+    const std::string relative=prefix+"photonOnly/"+system+"_training_"+variable+"_reweighting.png";
+    auto hist=[&](const std::string &klass,const std::string &weight) {
+      auto *saved=dynamic_cast<TH1*>(gQA->Get(("model_qa/"+name+"/training/"+variable+"_"+klass+"_"+weight).c_str()));
+      if(!saved || !(saved->Integral()>0))throw std::runtime_error("empty saved model training histogram");
+      auto *out=static_cast<TH1*>(saved->Clone(fresh().c_str()));out->SetDirectory(nullptr);out->Scale(1/out->Integral());return out;
+    };
+    auto *signal=hist("signal","raw"), *background=hist("background","raw");
+    auto *ratio=hist("signal","weighted"), *den=hist("background","weighted");ratio->Divide(den);
+    const char *xlabel=variable=="et" ? "Cluster E_{T} [GeV]" : "Cluster #eta";
+    TCanvas canvas(fresh().c_str(),"",1400,650);canvas.Divide(2,1);
+    canvas.cd(1);std::vector<Extent> ext;extents(ext,signal,true);extents(ext,background,true);
+    auto *legend=ianFrame(signal->GetXaxis()->GetXmin(),signal->GetXaxis()->GetXmax(),0,ext,false,xlabel,"Unit-normalized entries",
+      modelHeader(name,meta),{"Signal, before weights","Background, before weights"});
+    style(signal,cBlue,20);style(background,cOrange,21);signal->Draw("E SAME");background->Draw("E SAME");
+    legend->AddEntry(signal,"Signal, before weights","lp");legend->AddEntry(background,"Background, before weights","lp");legend->Draw();
+    canvas.cd(2);gPad->SetTopMargin(.25);ratio->SetTitle("");ratio->GetXaxis()->SetTitle(xlabel);ratio->GetYaxis()->SetTitle("Weighted signal / background");
+    ratio->SetMinimum(.5);ratio->SetMaximum(1.5);style(ratio,cBlue,20);ratio->Draw("AXIS");
+    TBox band(ratio->GetXaxis()->GetXmin(),.95,ratio->GetXaxis()->GetXmax(),1.05);band.SetFillColorAlpha(gGray,.2);band.Draw("SAME");
+    TLine line(ratio->GetXaxis()->GetXmin(),1,ratio->GetXaxis()->GetXmax(),1);line.SetLineStyle(2);line.Draw();ratio->Draw("E SAME");
+    header(.16,.93,{"Saved training weights","Each class normalized to unit integral","Shaded interval: #pm5%"},true,false);
+    gProjectionSteps.push_back({{"operation","display_normalization"},{"scope","each class to unit integral; ratio of saved weighted histograms"}});
+    saveModelQA(canvas,relative,index,{name});
+  }
+}
+void featureDiagnostics(const std::string &name,const PlotJson &index,const std::string &prefix) {
+  const auto meta=modelMetadata(name),features=meta.at("feature_order");const auto rows=modelTable(name,"features");
+  if(rows.size()!=features.size())throw std::runtime_error("saved feature diagnostic size differs");
+  for(bool gain:{false,true}) {
+    const std::string system=meta.value("system","AuAu")=="PP" ? "pp" : "auau";
+    const std::string relative=prefix+"photonOnly/"+system+"_bdt_"+(gain ? "feature_split_gain" : "single_feature_separation")+".png";
+    TCanvas canvas(fresh().c_str(),"",1100,1000);canvas.SetLeftMargin(.29);canvas.SetBottomMargin(.14);canvas.SetTopMargin(.22);
+    TH1D bars(fresh().c_str(),"",features.size(),0,features.size());bars.SetDirectory(nullptr);
+    double low=0,high=gain ? 1 : 0;int invalid=0;
+    for(std::size_t i=0;i<rows.size();++i) {
+      const int b=i+1;bars.GetXaxis()->SetBinLabel(b,features.at(i).get<std::string>().c_str());
+      const bool valid=rows[i].at(gain ? "gain_valid" : "separation_valid").get<double>()!=0;
+      if(!valid) {++invalid;bars.GetXaxis()->SetBinLabel(b,(features.at(i).get<std::string>()+" (unavailable)").c_str());continue;}
+      const double value=rows[i].at(gain ? "total_gain_fraction" : "standardized_mean_difference");
+      bars.SetBinContent(b,value);low=std::min(low,value);high=std::max(high,value);
+    }
+    bars.SetFillColor(gain ? cOrange : cBlue);bars.SetBarWidth(.72);bars.GetXaxis()->SetLabelSize(.028);
+    bars.GetYaxis()->SetTitle(gain ? "Fraction of total split gain" : "Standardized mean difference");
+    bars.GetYaxis()->SetTitleSize(.035);bars.GetYaxis()->SetTitleOffset(1.25);
+    bars.SetMinimum(low<0 ? low*1.2 : 0);bars.SetMaximum(high>0 ? high*1.2 : 1);bars.Draw("HBAR");
+    auto lines=modelHeader(name,meta);lines.push_back(gain ? "Saved XGBoost split gain" : "Single-variable separation; unweighted training population");
+    if(invalid)lines.push_back(Form("%d inputs have undefined statistics",invalid));header(.30,.94,lines,true,false);
+    saveModelQA(canvas,relative,index,{name});
+  }
+}
+void routingDiagnostics(const PlotJson &index) {
+  const std::string relative="photonOnly/auau_bdt_routing_auc_by_et_centrality.png";
+  const auto group=index.at("comparisons").at("routing");const std::string reference=group.at("reference");
+  if(group.at("models").empty()) {missing(relative,"no matched routed model releases");return;}
+  const auto baseline=modelTable(reference,"holdout_et_c3");
+  TCanvas canvas(fresh().c_str(),"",1700,820);canvas.SetBottomMargin(.28);canvas.SetTopMargin(.25);
+  std::vector<TH1D*> series;std::vector<std::string> names={reference};double bound=1;
+  for(const auto &item:group.at("models")) {
+    const std::string name=item;const auto rows=modelTable(name,"holdout_et_c3");
+    if(rows.size()!=baseline.size())throw std::runtime_error("routing QA grids differ");
+    auto *hist=new TH1D(fresh().c_str(),"",rows.size(),0,rows.size());hist->SetDirectory(nullptr);
+    for(std::size_t i=0;i<rows.size();++i) {
+      for(const char *key:{"et_low","et_high","centrality_low","centrality_high"})if(rows[i].at(key)!=baseline[i].at(key))throw std::runtime_error("routing QA boundaries differ");
+      const bool valid=rows[i].at("valid").get<double>() && baseline[i].at("valid").get<double>();
+      const double delta=valid ? 1000*(rows[i].at("auc").get<double>()-baseline[i].at("auc").get<double>()) : 0;
+      hist->SetBinContent(i+1,delta);bound=std::max(bound,std::abs(delta)*1.2);
+      hist->GetXaxis()->SetBinLabel(i+1,Form("%g-%g GeV / %g-%g%%%s",rows[i].at("et_low").get<double>(),rows[i].at("et_high").get<double>(),
+        rows[i].at("centrality_low").get<double>(),rows[i].at("centrality_high").get<double>(),valid ? "" : " NA"));
+    }
+    names.push_back(name);series.push_back(hist);
+  }
+  auto *legend=ianLegend(.62,.75,.95,.94,.13);
+  for(std::size_t i=0;i<series.size();++i) {
+    auto *hist=series[i];hist->SetMinimum(-bound);hist->SetMaximum(bound);hist->GetYaxis()->SetTitle("10^{3} (AUC_{routed} - AUC_{reference})");
+    hist->GetXaxis()->LabelsOption("v");hist->GetXaxis()->SetLabelSize(.024);style(hist,seriesColor(i+1),kMarkers[i%8]);
+    hist->Draw(i==0 ? "P" : "P SAME");legend->AddEntry(hist,names[i+1].c_str(),"p");
+  }
+  auto lines=std::vector<std::string>{"Au+Au photon-ID; saved held-out weighted AUC","Reference: "+reference,"Matched sources, event split and training weights; NA = undefined"};
+  if(index.value("qualification","").find("FORMAT_TEST")!=std::string::npos)lines.push_back("Format test: synthetic inputs");
+  header(.15,.94,lines,true,false);
+  legend->Draw();saveModelQA(canvas,relative,index,names);
+}
+void depthDiagnostics(const PlotJson &index) {
+  const std::string relative="photonOnly/auau_bdt_tree_depth_train_holdout_diagnostic.png";
+  const auto group=index.at("comparisons").at("depth");std::vector<std::string> names=group.at("models").get<std::vector<std::string>>();
+  if(names.size()<2) {missing(relative,"need at least two matched depths for a capacity scan");return;}
+  std::vector<std::pair<double,std::array<double,4>>> points;
+  for(const auto &name:names) {
+    const auto rows=modelTable(name,"performance");double depth=modelMetadata(name).at("max_depth");std::array<double,4> values{};bool valid=rows.size()==2;
+    for(const auto &row:rows) {const int split=row.at("split").get<double>();valid=valid && row.at("valid").get<double>() && (split==0 || split==1);
+      if(split==0 || split==1) {values[split]=row.at("auc");values[split+2]=row.at("logloss");}}
+    if(!valid) {missing(relative,"a depth has undefined train/holdout statistics");return;}points.push_back({depth,values});
+  }
+  std::sort(points.begin(),points.end());TCanvas canvas(fresh().c_str(),"",1400,1100);canvas.Divide(2,2);
+  std::vector<std::unique_ptr<TGraph>> graphs;
+  for(int panel=0;panel<4;++panel) {
+    canvas.cd(panel+1);gPad->SetTopMargin(.30);gPad->SetLeftMargin(.24);graphs.emplace_back(new TGraph);graphs.emplace_back(new TGraph);
+    auto &train=*graphs[graphs.size()-2],&holdout=*graphs.back();
+    for(std::size_t i=0;i<points.size();++i) {const auto &v=points[i].second;
+      train.SetPoint(i,points[i].first,panel<2 ? v[2*panel] : panel==2 ? v[0]-v[1] : v[2]-v[3]);
+      if(panel<2)holdout.SetPoint(i,points[i].first,v[2*panel+1]);}
+    style(&train,cBlue,20);style(&holdout,cOrange,21);train.SetTitle("");train.GetXaxis()->SetTitle("Maximum tree depth");
+    train.GetYaxis()->SetTitle(panel==0 ? "Weighted AUC" : panel==1 ? "Weighted log loss" : panel==2 ? "AUC_{train} - AUC_{holdout}" : "Log loss_{train} - log loss_{holdout}");
+    train.GetYaxis()->SetLabelSize(.032);train.GetYaxis()->SetTitleSize(.04);train.GetYaxis()->SetTitleOffset(1.8);
+    double low=1e300,high=-1e300;
+    for(int i=0;i<train.GetN();++i) {low=std::min(low,train.GetY()[i]);high=std::max(high,train.GetY()[i]);
+      if(panel<2) {low=std::min(low,holdout.GetY()[i]);high=std::max(high,holdout.GetY()[i]);}}
+    const double padding=std::max(panel==0 ? .005 : .001,(high-low)*.2);
+    train.SetMinimum(panel<2 ? std::max(0.,low-padding) : low-padding);train.SetMaximum(high+padding);
+    train.Draw("ALP");if(panel<2) {holdout.Draw("LP SAME");auto *l=ianLegend(.65,.76,.95,.90,.2);l->AddEntry(&train,"Training","lp");l->AddEntry(&holdout,"Held out","lp");l->Draw();}
+    auto lines=std::vector<std::string>{"Saved model capacity scan"};
+    if(index.value("qualification","").find("FORMAT_TEST")!=std::string::npos)lines.push_back("Format test: synthetic inputs");
+    header(.18,.93,lines,true,false);
+    gPad->Modified();gPad->Update();
+  }
+  saveModelQA(canvas,relative,index,names);
+}
+/* These displays use PhotonID's saved held-out records. Each class retains its
+   own training weights; unit normalization compares shapes, not a common cut. */
+TH1 *savedScoreShape(const std::string &name,const std::string &path) {
+  auto *saved=dynamic_cast<TH1*>(gQA->Get(("model_qa/"+name+"/"+path).c_str()));
+  if(!saved || !std::isfinite(saved->Integral()) || !(saved->Integral()>0))
+    throw std::runtime_error("empty saved held-out score histogram: "+name+"/"+path);
+  auto *hist=static_cast<TH1*>(saved->Clone(fresh().c_str()));hist->SetDirectory(nullptr);
+  hist->Scale(1/hist->Integral());return hist;
+}
+/* Probability axes have fixed physical bounds. Put annotations in the top
+   margin rather than expanding a log axis to make room inside the frame. */
+TLegend *modelComparisonFrame(double x0,double x1,double y0,double y1,bool logy,
+    const char *xtitle,const char *ytitle,const std::vector<std::string> &lines,const std::vector<std::string> &labels) {
+  const double h=padHeightPx(),w=padWidthPx(),left=gPad->GetLeftMargin(),top=.94;
+  const double headerBottom=header(left,top,lines,false,false)-10/h;
+  double width=0;for(const auto &label:labels)width=std::max(width,textWidth(label,kLinePx));
+  const double symbol=46/w; width+=symbol+10/w;
+  double legendX2=1-gPad->GetRightMargin(),legendX1=legendX2-width,legendY2=top;
+  if(legendX1<left+headerWidth(lines)+24/w) {
+    legendX1=left;legendX2=left+width;legendY2=headerBottom-4/h;
+  }
+  const double legendY1=legendY2-labels.size()*kStepPx/h;
+  const double annotationBottom=std::min(headerBottom,legendY1);
+  if(annotationBottom<=gPad->GetBottomMargin()+.2)
+    throw std::runtime_error("model comparison annotations do not fit the canvas");
+  gPad->SetTopMargin(std::max(.27,1-annotationBottom+20/h));gPad->SetLogy(logy);
+  gFrame=gPad->DrawFrame(x0,y0,x1,y1);gFrameLow=y0;gFrameHigh=y1;
+  gFrame->GetXaxis()->SetTitle(xtitle);gFrame->GetYaxis()->SetTitle(ytitle);
+  header(left,top,lines,true,false);
+  return ianLegend(legendX1,legendY1,legendX2,legendY2,symbol/width);
+}
+TGraph *savedROC(const std::string &name,const std::string &path) {
+  auto *tree=dynamic_cast<TTree*>(gQA->Get(("model_qa/"+name+"/"+path+"/roc").c_str()));
+  if(!tree || tree->GetEntries()<2)throw std::runtime_error("missing saved held-out ROC");
+  auto *x=tree->GetLeaf("false_positive_rate"), *y=tree->GetLeaf("true_positive_rate");
+  if(!x || !y)throw std::runtime_error("incomplete saved held-out ROC columns");
+  auto *graph=new TGraph;double previousX=-1,previousY=-1;
+  for(Long64_t i=0;i<tree->GetEntries();++i) {
+    tree->GetEntry(i);const double f=x->GetValue(),t=y->GetValue();
+    if(!std::isfinite(f) || !std::isfinite(t) || f<0 || f>1 || t<0 || t>1 || f<previousX || t<previousY)
+      throw std::runtime_error("invalid saved held-out ROC coordinates");
+    graph->SetPoint(i,f,t);previousX=f;previousY=t;
+  }
+  if(graph->GetPointX(0)!=0 || graph->GetPointY(0)!=0 || previousX!=1 || previousY!=1)
+    throw std::runtime_error("saved held-out ROC endpoints differ");
+  return graph;
+}
+void ppAuAuModelComparison(const PlotJson &index) {
+  const auto &comparison=index.at("comparisons").at("auau_settings");
+  const std::string pp=comparison.at("pp_model"),auau="references/auau";
+  const auto ppMeta=modelMetadata(pp),auauMeta=modelMetadata(auau);
+  std::vector<std::string> lines={"p+p and Au+Au 50-80%; held-out simulation",
+    "15 #leq E_{T}^{#gamma} < 35 GeV; |#eta| < 0.7; |z| < 10 cm",
+    "Canonical learner; system-specific scores"};
+  if(index.value("qualification","").find("FORMAT_TEST")!=std::string::npos)lines.push_back("Format test: synthetic inputs");
+  {
+    TCanvas canvas(fresh().c_str(),"",1100,850);canvas.SetTopMargin(.28);
+    std::vector<TH1*> histograms;
+    for(const auto &model:std::vector<std::pair<std::string,std::string>>{{pp,"holdout_scores"},{auau,"peripheral_15to35_scores"}})
+      for(const std::string label:{"signal","background"})histograms.push_back(savedScoreShape(model.first,model.second+"/"+label+"_weighted"));
+    std::vector<Extent> ext;for(auto *hist:histograms)extents(ext,hist,false);
+    auto headerLines=lines;headerLines.push_back("Training weights; unit-normalized classes");
+    const std::vector<std::string> labels={"pp prompt #gamma+jet","pp inclusive jet","Au+Au prompt #gamma+jet","Au+Au inclusive jet"};
+    auto *legend=modelComparisonFrame(0,1,1e-4,1,true,"System-specific BDT score","Weighted fraction / 0.02 score bin",headerLines,labels);
+    for(std::size_t i=0;i<histograms.size();++i) {
+      auto *hist=histograms[i];hist->SetLineColor(i%2 ? cOrange : cBlue);hist->SetLineStyle(i<2 ? 1 : 2);hist->SetLineWidth(3);
+      hist->Draw("HIST SAME");legend->AddEntry(hist,labels[i].c_str(),"l");
+    }
+    legend->Draw();saveModelQA(canvas,"photonOnly/pp_auau_bdt_heldout_score_separation.png",index,{pp});
+  }
+  {
+    TCanvas canvas(fresh().c_str(),"",1000,850);canvas.SetTopMargin(.27);
+    auto *ppROC=savedROC(pp,"holdout_scores"), *auauROC=savedROC(auau,"peripheral_15to35_scores");
+    std::vector<Extent> ext={{0,1,1}};
+    const std::vector<std::string> labels={Form("p+p, weighted AUC = %.4f",ppMeta.at("heldout_scores").at("auc").get<double>()),
+      Form("Au+Au 50-80%%, weighted AUC = %.4f",auauMeta.at("peripheral_15to35_scores").at("auc").get<double>())};
+    auto *legend=modelComparisonFrame(0,1,0,1.02,false,"Background acceptance","Signal efficiency",lines,labels);
+    ppROC->SetLineColor(cBlue);auauROC->SetLineColor(cOrange);
+    for(auto *graph:{ppROC,auauROC}) {graph->SetLineWidth(3);graph->Draw("L SAME");}
+    TLine random(0,0,1,1);random.SetLineStyle(2);random.SetLineColor(kGray+1);random.Draw();
+    legend->AddEntry(ppROC,labels[0].c_str(),"l");legend->AddEntry(auauROC,labels[1].c_str(),"l");legend->Draw();
+    saveModelQA(canvas,"photonOnly/pp_auau_bdt_heldout_roc.png",index,{pp});
+  }
+}
+void ppg12ModelComparison(const PlotJson &index) {
+  const std::string name=index.at("comparisons").at("ppg12").at("model");const auto meta=modelMetadata(name);
+  auto *tree=dynamic_cast<TTree*>(gQA->Get(("model_qa/"+name+"/original_comparison/paired_scores").c_str()));
+  if(!tree || tree->GetEntries()!=meta.at("original_comparison").at("rows").get<Long64_t>())
+    throw std::runtime_error("saved PPG12 pair count differs");
+  auto *original=tree->GetLeaf("original_score"),*retrained=tree->GetLeaf("retrained_score"),*difference=tree->GetLeaf("difference");
+  if(!original || !retrained || !difference)throw std::runtime_error("missing saved paired score columns");
+  auto lines=std::vector<std::string>{"p+p; original and retrained PPG12 BDT","Paired test photons; validation rows excluded",Form("%lld saved pairs",tree->GetEntries())};
+  if(index.value("qualification","").find("FORMAT_TEST")!=std::string::npos)lines.push_back("Format test: synthetic inputs");
+  {
+    TCanvas canvas(fresh().c_str(),"",1100,950);canvas.SetRightMargin(.18);canvas.SetTopMargin(.27);canvas.SetLogz();
+    const double upper=std::nextafter(1.,std::numeric_limits<double>::infinity());
+    TH2D pairs(fresh().c_str(),"",80,0,upper,80,0,upper);pairs.SetDirectory(nullptr);pairs.SetStats(false);
+    for(Long64_t i=0;i<tree->GetEntries();++i) {
+      tree->GetEntry(i);const double a=original->GetValue(),b=retrained->GetValue(),delta=difference->GetValue();
+      if(!std::isfinite(a) || !std::isfinite(b) || a<0 || a>1 || b<0 || b>1 || !std::isfinite(delta) || std::abs(delta-(b-a))>1e-12)
+        throw std::runtime_error("invalid saved PPG12 paired scores");
+      pairs.Fill(a,b);
+    }
+    pairs.GetXaxis()->SetTitle("Original PPG12 score");pairs.GetYaxis()->SetTitle("Retrained PPG12 score");pairs.GetZaxis()->SetTitle("Test photons / score bin");
+    pairs.SetMinimum(1);pairs.Draw("COLZ");TLine equal(0,0,1,1);equal.SetLineStyle(2);equal.SetLineWidth(2);equal.Draw();
+    header(.15,.94,lines,true,false);saveModelQA(canvas,"photonOnly/pp_bdt_original_vs_retrained_scores.png",index,{name});
+  }
+  {
+    TCanvas canvas(fresh().c_str(),"",1100,850);canvas.SetTopMargin(.25);
+    auto *signal=savedScoreShape(name,"original_comparison/signal_difference"),*background=savedScoreShape(name,"original_comparison/background_difference");
+    std::vector<Extent> ext;extents(ext,signal,false);extents(ext,background,false);
+    auto headerLines=lines;headerLines.push_back("Training weights; unit-normalized classes");
+    const double upper=1.15*std::max(signal->GetMaximum(),background->GetMaximum());
+    auto *legend=modelComparisonFrame(-1,1,0,upper,false,"Score difference, retrained - original","Weighted fraction / 0.02 score bin",headerLines,{"Prompt photon+jet","Nonprompt inclusive jet"});
+    signal->SetLineColor(cBlue);background->SetLineColor(cOrange);signal->SetLineWidth(3);background->SetLineWidth(3);
+    signal->Draw("HIST SAME");background->Draw("HIST SAME");vline(0,0,std::max(signal->GetMaximum(),background->GetMaximum()));
+    legend->AddEntry(signal,"Prompt photon+jet","l");legend->AddEntry(background,"Nonprompt inclusive jet","l");legend->Draw();
+    saveModelQA(canvas,"photonOnly/pp_bdt_retraining_score_difference.png",index,{name});
+  }
+}
+void modelQAFigures() {
+  auto *saved=dynamic_cast<TObjString*>(gQA->Get("model_qa/collection"));if(!saved)return;
+  const auto index=PlotJson::parse(saved->GetString().Data());const std::string nominal=index.at("default_model");
+  const std::string population=gPopulation;gPopulation="SAVED_MODEL_QA";
+  for(const auto &entry:index.at("models")) {
+    const std::string name=entry.at("name"),prefix=name==nominal ? "" : "models/"+name+"/";
+    trainingReweighting(name,index,prefix);featureDiagnostics(name,index,prefix);
+  }
+  if(index.value("system","AuAu")=="PP") {ppAuAuModelComparison(index);ppg12ModelComparison(index);}
+  else {routingDiagnostics(index);depthDiagnostics(index);}
+  gPopulation=population;
+}
+
 /* Draw the supported QA families from saved quantities. Individual helpers report missing inputs through missing(). */
 void qaFigures() {
+  modelQAFigures();
   for (const std::string pkg : {"AuAu", "PP"}) triggerStudy(pkg);
   for (const std::string pkg : {"PP", "AuAu"})
     for (const std::string family : {"phosim", "jetsim"})

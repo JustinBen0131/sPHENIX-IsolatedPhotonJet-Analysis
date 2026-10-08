@@ -72,9 +72,33 @@ The tables below map generated output filenames to the measurement and QA figure
 
 Drawn by `plots/QAFigures.C` from `qa.root` once packages with QA fills exist (the new production; the legacy July
 histograms carry none). Every IAN QA slot has its own file name below; the shower-shape figures are also written for the
-other Au+Au classes (`cent1`, `cent2`). The frozen photon-ID model's training and validation figures
-(`photonOnly/auau_training_*`, `auau_bdt_*`, `pp_auau_bdt_heldout_*`, `pp_bdt_*`) belong to the frozen model and are not
-drawn here.
+other Au+Au classes (`cent1`, `cent2`). The photon-ID training figures for IAN
+40–44 are drawn from an AuAu collection supplied through `PhotonIDModels`:
+ET/eta reweighting, feature separation, split gain, routing and depth scans.
+The pp collection draws figures 45 and 46 from its saved held-out score/ROC
+records and paired original-versus-retrained PPG12 test scores. Figure 45 uses
+15–35 GeV and AuAu 50–80%, with a separately sealed canonical AuAu reference;
+figure 46 uses the PPG12 model's test rows and excludes its validation rows.
+Missing variants or undefined statistics are recorded in `FIGURES.txt`.
+The cluster-width panels compare DATA with simulation after the same tight and
+isolated photon selection; the package retains the fine width distributions
+for each centrality slice, alongside the preselection distributions.
+BDT working-point and per-centrality score figures (13 and 14) use model-selected
+histogram QA from TreeToHists. Their source is separate from training diagnostics.
+
+| Model QA file under `photonOnly/` | Input |
+|---|---|
+| `auau_training_et_reweighting.png`, `auau_training_eta_reweighting.png` | Saved AuAu training distributions |
+| `auau_bdt_single_feature_separation.png`, `auau_bdt_feature_split_gain.png` | Saved feature moments and split gain |
+| `auau_bdt_routing_auc_by_et_centrality.png` | Matched routing releases |
+| `auau_bdt_tree_depth_train_holdout_diagnostic.png` | Matched depth releases |
+| `pp_auau_bdt_heldout_score_separation.png`, `pp_auau_bdt_heldout_roc.png` | Canonical pp and peripheral AuAu held-out records |
+| `pp_bdt_original_vs_retrained_scores.png`, `pp_bdt_retraining_score_difference.png` | Paired PPG12 test-photon scores |
+
+Alternative models' weight and feature figures are under `models/<name>/`.
+The nominal model uses the stable top-level names. PNG sidecars bind the model
+collection and imported references; drawing a figure does not establish
+scientific acceptance.
 
 | File | Kind |
 |---|---|

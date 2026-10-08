@@ -113,6 +113,141 @@ Config reduction(const fs::path &path) {
     if (c.count(k) && !c[k].empty()) c[k] = resolve(path.parent_path(), c[k]).string();
   return c;
 }
+
+/* A transferred collection uses paths relative to its manifest. Verify only
+   its declared payload, including package identity and recorded coverage;
+   no eventTrees or farm paths are needed by this stage. */
+struct HistogramCollection {
+  fs::path directory;
+  Json manifest;
+  std::vector<fs::path> files;
+  std::map<std::string,std::string> pins;
+};
+HistogramCollection histogramCollection(const fs::path &input, const fs::path &scratch) {
+  if (fs::is_directory(input)) return {input, Json(), {}, {}};  // existing directory interface
+  if (!photonjet_config::isYaml(input.string())) throw std::runtime_error("histogram collection must be a directory or collection.yaml");
+  const Json c = photonjet_config::readYaml(input.string());
+  if (c.value("schema", "") != "PhotonJetHistogramCollectionV1" || c.value("status", "") != "VALIDATED" ||
+      c.value("samples", Json::array()).empty() || c.value("files", Json::array()).empty())
+    throw std::runtime_error("histogram collection is incomplete or has not passed package validation");
+  HistogramCollection out{fs::canonical(input.parent_path()), c, {input}, {{input.string(),hash(input,scratch)}}};
+  auto payload = [&](const std::string &name) {
+    const fs::path relative(name);
+    if (name.empty() || relative.is_absolute() || relative.lexically_normal() != relative)
+      throw std::runtime_error("unsafe collection path " + name);
+    for (const auto &part : relative) if (part == ".." || part == ".") throw std::runtime_error("unsafe collection path " + name);
+    const fs::path path = fs::canonical(out.directory / relative);
+    const fs::path inside = path.lexically_relative(out.directory);
+    if (inside.empty() || *inside.begin() == ".." || !fs::is_regular_file(path))
+      throw std::runtime_error("collection file escapes its directory: " + name);
+    return path;
+  };
+  std::map<std::string, std::string> hashes;
+  for (const auto &file : c.at("files")) {
+    const std::string name = file.at("path"), expected = file.at("sha256");
+    if (!hashes.emplace(name, expected).second) throw std::runtime_error("duplicate collection file " + name);
+    const auto path = payload(name);
+    if (hash(path, scratch) != expected) throw std::runtime_error("transferred collection file has changed: " + name);
+    out.files.push_back(path);
+    out.pins[path.string()]=expected;
+  }
+  if (!hashes.count("selection.yaml") || !hashes.count("histograms.yaml")) throw std::runtime_error("collection configuration files are missing");
+  const Json selection=photonjet_config::readYaml(payload("selection.yaml").string());
+  const Json histograms=photonjet_config::readYaml(payload("histograms.yaml").string());
+  if (selection.at("selection_sha256")!=c.at("selection_sha256")) throw std::runtime_error("collection selection binding differs");
+  std::set<std::string> allowed={"selection.yaml","histograms.yaml"};
+  std::set<std::string> samples;
+  for (const auto &sample : c.at("samples")) {
+    const std::string system = sample.at("system"), name = sample.at("name"), family = sample.at("family");
+    const std::string key = system + "/" + name, root = key + ".root", sidecar = key + ".json";
+    const bool dataRun=family=="data" && sample.contains("run") && sample.at("run").is_number_integer() &&
+      sample.at("run").get<int>()>0 && name=="run_"+std::to_string(sample.at("run").get<int>());
+    if ((system != "PP" && system != "AuAu") || name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos ||
+        (family != "data" && family != "photonjet" && family != "inclusivejet") ||
+        ((family=="data") != (name=="data" || dataRun)) || !samples.insert(key).second)
+      throw std::runtime_error("invalid or duplicate sample in histogram collection: " + key);
+    if (sample.at("path") != root || !hashes.count(root) || !hashes.count(sidecar) || hashes.at(root) != sample.at("sha256").get<std::string>())
+      throw std::runtime_error("collection is missing the ROOT package or sidecar for " + key);
+    allowed.insert(root); allowed.insert(sidecar);
+    TFile file(payload(root).c_str(), "READ");
+    auto *saved = dynamic_cast<TObjString *>(file.Get("meta/package"));
+    if (file.IsZombie() || !saved) throw std::runtime_error("cannot read package metadata for " + key);
+    const Json meta = Json::parse(saved->GetString().Data());
+    if (meta.value("schema", "") != "PhotonJetSampleV1" || meta.at("system") != system || meta.at("name") != name || meta.at("family") != family ||
+        meta.at("coverage") != sample.at("coverage") || meta.at("plan_sha256") != sample.value("package_plan_sha256",c.at("input_snapshot_sha256")) ||
+        meta.at("selection")!=selection || meta.at("histograms")!=histograms || meta.at("package_kind")!="FINAL" ||
+        meta.at("source_count")!=sample.at("source_count") || meta.at("event_records")!=sample.at("event_records") ||
+        meta.at("histograms_written")!=sample.at("histograms"))
+      throw std::runtime_error("package identity, coverage or input snapshot differs for " + key);
+    if (meta.at("plan_sha256")!=c.at("input_snapshot_sha256") &&
+        (!sample.contains("package_binding_sha256") || sample.contains("run_packages") ||
+         meta.value("package_binding_sha256",Json())!=sample.at("package_binding_sha256")))
+      throw std::runtime_error("reused package has no matching input/settings binding for " + key);
+    if (meta.value("run",Json())!=sample.value("run",Json()) || meta.value("run_packages",Json())!=sample.value("run_packages",Json()))
+      throw std::runtime_error("collection DATA run binding differs for " + key);
+    if (system=="PP" && family!="data" &&
+        (meta.at("si_di_role")!=sample.at("si_di_role") ||
+         meta.at("selection").at("systems").at("pp").at("simulation_periods").at("mode")!=sample.at("simulation_periods")))
+      throw std::runtime_error("p+p period or SI/DI binding differs for " + key);
+    std::ifstream sidecarFile(payload(sidecar));
+    const Json record = Json::parse(sidecarFile);
+    if (record.at("sha256") != hashes.at(root) || record.at("plan_sha256") != meta.at("plan_sha256") ||
+        record.value("package_binding_sha256",Json())!=meta.value("package_binding_sha256",Json()) ||
+        record.at("selection_sha256")!=c.at("selection_sha256"))
+      throw std::runtime_error("package sidecar does not bind " + key);
+  }
+  if (allowed.size()!=hashes.size()) throw std::runtime_error("collection declares an unrelated payload");
+  for (const auto &sample : c.at("samples")) if (sample.contains("run_packages")) {
+    std::set<std::string> runs;
+    long long sourceCount=0,eventCount=0;
+    if (sample.at("family")!="data" || sample.at("name")!="data" || sample.at("run_packages").empty())
+      throw std::runtime_error("invalid combined DATA lineage");
+    for (const auto &key : sample.at("run_packages")) {
+      const auto found=std::find_if(c.at("samples").begin(),c.at("samples").end(),[&](const Json &s) {return s.at("system").get<std::string>()+"/"+s.at("name").get<std::string>()==key.get<std::string>();});
+      if (found==c.at("samples").end() || !found->contains("run") || found->at("system")!=sample.at("system") || !runs.insert(key).second)
+        throw std::runtime_error("combined DATA is missing a declared run package");
+      sourceCount+=found->at("source_count").get<long long>();eventCount+=found->at("event_records").get<long long>();
+    }
+    if (sourceCount!=sample.at("source_count").get<long long>() || eventCount!=sample.at("event_records").get<long long>())
+      throw std::runtime_error("combined DATA source/event accounting differs from its run packages");
+  }
+  return out;
+}
+
+/* Explicit opt-in: use the exact populations of this verified collection for
+   response and inclusive-jet QA. Analysis windows and toy settings stay in
+   the analyst's configuration. Missing DATA or photon simulation is an error. */
+void collectionSamples(Config &analysis, const Json &collection) {
+  if (collection.is_null()) throw std::runtime_error("Pipeline.UseCollectionSamples requires collection.yaml");
+  std::map<std::string, std::vector<std::string>> photon, inclusive;
+  std::set<std::string> data;
+  std::map<std::string,Json> pp;
+  for (const auto &sample : collection.at("samples")) {
+    const std::string system = sample.at("system"), name = sample.at("name"), family = sample.at("family");
+    if (sample.contains("run")) continue;  /* retained for offline QA; the combined DATA is the analysis input */
+    if (family == "data") data.insert(system);
+    else (family == "photonjet" ? photon : inclusive)[system].push_back(name);
+    if (system=="PP" && family!="data") pp[name]=sample;
+  }
+  for (const auto &[name,sample] : pp) if (sample.at("simulation_periods")=="all") {
+    const bool di=sample.at("si_di_role")=="DI";
+    if (!di && sample.at("si_di_role")!="SI") throw std::runtime_error("unknown p+p interaction role");
+    const std::string suffix="_double";
+    const std::string partner=di ? (name.size()>suffix.size() && name.substr(name.size()-suffix.size())==suffix ? name.substr(0,name.size()-suffix.size()) : "") : name+suffix;
+    if (partner.empty() || !pp.count(partner) || pp.at(partner).at("family")!=sample.at("family") ||
+        pp.at(partner).at("si_di_role")!=(di ? "SI" : "DI") || pp.at(partner).at("simulation_periods")!="all")
+      throw std::runtime_error("p+p two-period analysis needs both SI and DI packages for " + name);
+  }
+  auto joined = [](const std::vector<std::string> &v) {
+    std::string out; for (const auto &name : v) { if (!out.empty()) out += ' '; out += name; } return out.empty() ? "none" : out;
+  };
+  for (const auto &system : words(required(analysis, "Systems"))) {
+    const auto package = required(analysis, system + ".Package");
+    if (!data.count(package) || photon[package].empty()) throw std::runtime_error("collection needs DATA and photon simulation for " + package);
+    analysis[system + ".Simulation"] = joined(photon[package]);
+    analysis["QA." + package + ".Inclusive"] = joined(inclusive[package]);
+  }
+}
 }  /* namespace */
 
 /* Run the existing package commands in dependency order. Each stage has a log and stops the chain on failure;
@@ -135,7 +270,7 @@ int pipeline(const std::string &file, const std::string &home) {
   if (systematic == "none" && !variations.empty()) throw std::runtime_error("variations require systematics settings");
   Config sys = systematic == "none" ? Config() : read(resolve(base, systematic));
   std::set<std::string> known = {"Pipeline.InputCollection", "Pipeline.HistogramCollection", "Pipeline.ReductionSettings", "Pipeline.AnalysisSettings",
-    "Pipeline.SystematicsSettings", "Pipeline.ExpectedFigures", "Pipeline.Variations", "Pipeline.OutputDirectory", "Pipeline.Parallel"};
+    "Pipeline.SystematicsSettings", "Pipeline.ExpectedFigures", "Pipeline.Variations", "Pipeline.OutputDirectory", "Pipeline.Parallel", "Pipeline.UseCollectionSamples", "Pipeline.PhotonIDModels"};
   for (const auto &[k, v] : settings) {
     bool ok = known.count(k);
     for (const auto &name : variations) ok = ok || k.rfind(name + ".Analysis.", 0) == 0 || k.rfind(name + ".Reduction.", 0) == 0;
@@ -144,6 +279,9 @@ int pipeline(const std::string &file, const std::string &home) {
   const std::string parallel = settings.count("Pipeline.Parallel") ? settings.at("Pipeline.Parallel") : "1";
   if (parallel.empty() || parallel.find_first_not_of("0123456789") != std::string::npos || std::stol(parallel) < 1 || std::stol(parallel) > 256)
     throw std::runtime_error("Pipeline.Parallel must be an integer in 1..256");
+  const std::string binding = settings.count("Pipeline.UseCollectionSamples") ? settings.at("Pipeline.UseCollectionSamples") : "0";
+  if (binding != "0" && binding != "1") throw std::runtime_error("Pipeline.UseCollectionSamples must be 0 or 1");
+  if (trees && binding == "1") throw std::runtime_error("Pipeline.UseCollectionSamples applies only to saved histogram collections");
   std::vector<std::string> expectedFiles;
   if (expected != "none") {
     std::ifstream list(resolve(base, expected)); if (!list) throw std::runtime_error("cannot read expected figure list");
@@ -174,17 +312,25 @@ int pipeline(const std::string &file, const std::string &home) {
   try {
     pin(path); pin(nominalPath);
     if (trees) { pin(input); pin(reductionPath); }
+    const auto collection = trees ? HistogramCollection{input, Json(), {}, {}} : histogramCollection(input, output / "logs");
+    for (const auto &[file,digest] : collection.pins) record["input_pins"][file]=digest;
+    if (!collection.manifest.is_null()) record["histogram_collection"] = collection.manifest;
     if (systematic != "none") pin(resolve(base, systematic));
     if (expected != "none") pin(resolve(base, expected));
-    for (const auto &root : {package, tth}) {
+    for (const auto &root : trees ? std::vector<fs::path>{package, tth} : std::vector<fs::path>{package}) {
       pin(root / (root == package ? "final_analysis.sh" : "tree_to_hists.sh"));
       for (const auto &dir : {"src", "plots"}) if (fs::is_directory(root / dir)) for (const auto &e : fs::recursive_directory_iterator(root / dir))
         if (e.is_regular_file() && (e.path().extension() == ".cc" || e.path().extension() == ".h" || e.path().extension() == ".C" || e.path().extension() == ".json")) pin(e.path());
     }
+    if (!trees) {
+      pin(tth / "src/Configuration.h");
+      pin(package.parent_path() / "TreeProduction/src/internal/Configuration.h");
+    }
     std::map<std::string, fs::path> results;
-    fs::path nominalPackages = input;
+    fs::path nominalPackages = collection.directory;
     for (const auto &name : [&]() { std::vector<std::string> n{"nominal"}; n.insert(n.end(), variations.begin(), variations.end()); return n; }()) {
       Config analysis = nominal, fill = nominalReduction;
+      if (binding == "1") collectionSamples(analysis, collection.manifest);
       const bool differentReduction = std::any_of(settings.begin(), settings.end(), [&](const auto &item) { return item.first.rfind(name + ".Reduction.", 0) == 0; });
       if (differentReduction && !trees) throw std::runtime_error("response variations require an input eventTree collection");
       overlays(analysis, settings, name + ".Analysis."); overlays(fill, settings, name + ".Reduction.");
@@ -209,11 +355,14 @@ int pipeline(const std::string &file, const std::string &home) {
         step(name + "_reduction", {(tth / "tree_to_hists.sh").string(), "local", "--settings", cfg.string(), "--inputs", input.string(), "--work", (output / ("work_" + name)).string(), "--out", packages.string(), "--parallel", parallel});
         if (name == "nominal") nominalPackages = packages;
       }
-      if (name == "nominal" || differentReduction) {
+      if ((name == "nominal" || differentReduction) && collection.manifest.is_null()) {
         for (const auto &e : fs::recursive_directory_iterator(packages)) if (e.is_regular_file() && e.path().extension() == ".root") pin(e.path());
       }
       const auto result = output / "results" / (name + ".root"), qa = output / "results" / (name + "_qa.root"), cfg = output / "config" / (name + "_analysis.yaml");
       analysis["Input.Directory"] = packages.string(); analysis["Output.Results"] = result.string(); analysis["Output.QA"] = qa.string();
+      if (settings.count("Pipeline.PhotonIDModels") && settings.at("Pipeline.PhotonIDModels")!="none") {
+        const auto models=resolve(base,settings.at("Pipeline.PhotonIDModels"));pin(models);analysis["QA.PhotonIDModels"]=models.string();
+      }
       config(cfg, analysis); results[name] = result;
       step(name + "_qa", {(package / "final_analysis.sh").string(), "qa", "--config", cfg.string()});
       step(name + "_analysis", {(package / "final_analysis.sh").string(), "run", "--config", cfg.string()});

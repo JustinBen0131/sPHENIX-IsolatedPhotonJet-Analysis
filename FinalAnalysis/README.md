@@ -67,6 +67,13 @@ the releases, imports their saved diagnostics and draws them without refitting
 or recomputing training statistics. Routing and depth comparisons require
 matching sources, event splits and training weights.
 
+To draw saved training diagnostics before the histogram packages are available:
+
+```bash
+./FinalAnalysis/final_analysis.sh qa --models /path/to/models/models.yaml --out model_qa.root
+./FinalAnalysis/final_analysis.sh draw --qa model_qa.root --fig figures
+```
+
 The AuAu collection supplies the training-weight, feature, routing and depth
 figures. The pp collection supplies the pp/AuAu held-out comparison and the
 original-versus-retrained PPG12 comparison. Bind the canonical AuAu reference

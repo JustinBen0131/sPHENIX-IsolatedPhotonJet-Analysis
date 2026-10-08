@@ -1,0 +1,14 @@
+# Inputs is an analyst-supplied YAML collection of pinned AuAu DATA and SIM trees.
+# CentralityWeights is produced by tree_to_hists.sh centrality before derive.
+VertexCorrection:
+  Settings: treetohists.yaml
+  Inputs: inputs.yaml
+  CentralityWeights: centrality_weights.json
+  TruthRangeCM: [-60, 60]
+  RecoRangeCM: [-10, 10]
+  BinWidthCM: 0.25
+  SigmaTargetRangeCM: [0.5, 30]
+  SigmaTargetStepCM: 0.125
+  ResidualSmoothingPasses: 1
+  ResidualClip: [0.1, 10]
+  ResidualEdgeClamp: true

@@ -19,13 +19,15 @@ samples:
 #     source_sample: run28_photonjet20
 #     files: [/path/to/pp_photonjet20.root]
 #     normalization:
-#       source_factor: cross_section_over_generated
-#       cross_section_pb: <qualified cross section in pb>
-#       generated_events: <qualified generated-event count>
+#       source_factor: family_reference
+#       reference: photon_jet  # inclusive_jet for the inclusive-jet family
+# Add the corresponding run28_photonjet20_double sample for DI. p+p weights
+# use the producer's family reference cross section divided by every entry
+# of the exact selected trees, including stitching-inactive entries.
 # Optional population_sources sets the expected source count; omitted means
 # UNKNOWN coverage. Simulation families are photonjet and inclusivejet.
-# Other supported normalization rules are family_reference (with reference and
-# a top-level reference_cross_section_pb mapping) and auau_embedded_stitching.
+# AuAu simulation uses source_factor: auau_embedded_stitching. The frozen
+# table supplies its cross section; the fill jobs count its exact denominator.
 #
 # AuAu simulation additionally supplies these qualified fields per sample:
 #     centrality_weights: [<16 positive weights>]
@@ -38,4 +40,4 @@ samples:
 #       coordinate: truth_vtx_z
 #       selection_sha256: <resolved selection sha256>
 #       centrality_weights_sha256: <weights digest from the derivation>
-#       evidence: <fit qualification record>
+#       evidence: /path/to/qualified_weights.json  # AuAuSimWeightFreezeV1, status QUALIFIED

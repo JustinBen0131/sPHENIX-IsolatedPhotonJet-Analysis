@@ -4,13 +4,19 @@
    and saves candidate purity, leakage, stitching, working-point, trigger
    and centrality checks for the maintained IAN renderer.
    Purity study values share the measurement's correction implementation.
+   Saved model diagnostics can also be imported independently of the histogram
+   packages, using the same release checks and drawing code.
    Missing or empty populations stay unavailable; figures invent no values.
    The inventory below documents the quantities written to qa.root. */
 #include "FinalAnalysis.h"
+#include "RenderMetadata.h"
+#include "../../TreeToHists/src/Configuration.h"
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -588,6 +594,9 @@ void writeQA(const Settings &s, TDirectory *results) {
     auto *sources = dynamic_cast<TTree *>(data->Get("records/sources"));
     auto *cells = dynamic_cast<TTree *>(data->Get("records/source_contributions"));
     auto *bitsRaw = dynamic_cast<TH3 *>(data->Get("qa/events/trigger_bits_raw"));
+    const bool perRunStudy=data->Get("qa/events/trigger_study_bits_raw")!=nullptr;
+    if (perRunStudy) bitsRaw=dynamic_cast<TH3 *>(data->Get("qa/events/trigger_study_bits_raw"));
+    const std::string studyCells=perRunStudy ? "qa/events/trigger_study_bits_corrected" : "qa/events/trigger_bits_raw";
     if (sources && cells && bitsRaw) {
       const bool auau = package == "AuAu";
       const std::string reference = auau ? "MBD N&S >= 2, vtx < 150 cm" : "MBD N&S >= 1";
@@ -608,13 +617,17 @@ void writeQA(const Settings &s, TDirectory *results) {
       };
       const int nE = bitsRaw->GetNbinsX();
       std::vector<double> refSpectrum(nE), den(nE);
+      std::vector<double> refVariance(nE), denVariance(nE);
       std::map<std::string, std::vector<double>> photonSpectrum, num;
+      std::map<std::string, std::vector<double>> photonVariance, numVariance;
       for (const auto &p : photonsStudy) photonSpectrum[p.first].assign(nE, 0), num[p.first].assign(nE, 0);
+      for (const auto &p : photonsStudy) photonVariance[p.first].assign(nE, 0), numVariance[p.first].assign(nE, 0);
       int runs = 0, firstSeen = 0, lastSeen = 0;
+      std::set<int> studiedRuns;
       TTreeReader rs(sources), rc(cells);
       TTreeReaderValue<std::string> json(rs, "json"), histogram(rc, "histogram");
       TTreeReaderValue<Long64_t> begin(rs, "contribution_begin"), end(rs, "contribution_end"), bin(rc, "bin");
-      TTreeReaderValue<double> value(rc, "value");
+      TTreeReaderValue<double> value(rc, "value"), variance(rc,"variance");
       std::unique_ptr<TH3> one(static_cast<TH3 *>(bitsRaw->Clone("one_source")));
       one->SetDirectory(nullptr);
       std::vector<double> target;
@@ -630,14 +643,14 @@ void writeQA(const Settings &s, TDirectory *results) {
       while (rs.Next()) {
         const Json source = Json::parse(*json);
         const Json &m = source.at("metadata");
-        const Json info = m.contains("trigger_selection") ? m.at("trigger_selection") : m.value("trigger_run_info", Json());
+        const Json info = m.contains("trigger_run_info") ? m.at("trigger_run_info") : m.value("trigger_selection", Json());
         const int run = m.at("source").value("run", -1);
         if (info.is_null()) continue;
         one->Reset();
         if (centralityOne) centralityOne->Reset();
         for (Long64_t i = *begin; i < *end; ++i) {
           if (rc.SetEntry(i) != TTreeReader::kEntryValid) break;
-          if (*histogram == "qa/events/trigger_bits_raw") one->SetBinContent(static_cast<int>(*bin), *value);
+          if (*histogram == studyCells) {one->SetBinContent(static_cast<int>(*bin), *value);one->SetBinError(static_cast<int>(*bin),std::sqrt(*variance));}
           else if (centralityOne && *histogram == "qa/events/centrality_scaled_bits") centralityOne->SetBinContent(static_cast<int>(*bin), *value);
         }
         /* the centrality target: the selected trigger, enabled in this source */
@@ -656,26 +669,36 @@ void writeQA(const Settings &s, TDirectory *results) {
         double referenceEvents = 0;
         for (int x = 1; x <= nE; ++x) referenceEvents += one->GetBinContent(x, bits[0] + 1, 65);
         if (!(referenceEvents > 0)) continue;
-        ++runs, firstSeen = firstSeen ? std::min(firstSeen, run) : run, lastSeen = std::max(lastSeen, run);
+        studiedRuns.insert(run); runs=studiedRuns.size(); firstSeen = firstSeen ? std::min(firstSeen, run) : run; lastSeen = std::max(lastSeen, run);
         for (int x = 1; x <= nE; ++x) {
           refSpectrum[x - 1] += one->GetBinContent(x, bits[0] + 1, 65);
           den[x - 1] += one->GetBinContent(x, bits[0] + 1, 65);
+          const double referenceError=one->GetBinError(x,bits[0]+1,65);
+          refVariance[x-1]+=referenceError*referenceError; denVariance[x-1]+=referenceError*referenceError;
           for (size_t p = 0; p < photonsStudy.size(); ++p) {
             photonSpectrum[photonsStudy[p].first][x - 1] += one->GetBinContent(x, bits[p + 1] + 1, 65);
-            num[photonsStudy[p].first][x - 1] += one->GetBinContent(x, bits[0] + 1, bits[p + 1] + 1);
+            const int y=perRunStudy ? bits[p+1]+1 : bits[0]+1, z=perRunStudy ? 65 : bits[p+1]+1;
+            num[photonsStudy[p].first][x - 1] += one->GetBinContent(x,y,z);
+            const double e=one->GetBinError(x,bits[p+1]+1,65), en=one->GetBinError(x,y,z);
+            photonVariance[photonsStudy[p].first][x-1]+=e*e; numVariance[photonsStudy[p].first][x-1]+=en*en;
           }
         }
       }
       Edges energy;
       for (int b = 1; b <= nE + 1; ++b) energy.push_back(bitsRaw->GetXaxis()->GetBinLowEdge(b));
       TDirectory *d = dirOf(out, "triggers");
-      put(d, hist("reference", energy, refSpectrum));
-      put(d, hist("reference_denominator", energy, den));
+      auto studyHist=[&](const std::string &name,const std::vector<double> &v,const std::vector<double> &e) {
+        auto *h=hist(name,energy,v);
+        for (int b=1;b<=h->GetNbinsX();++b) h->SetBinError(b,std::sqrt(e[b-1]));
+        return h;
+      };
+      put(d, studyHist("reference",refSpectrum,refVariance));
+      put(d, studyHist("reference_denominator",den,denVariance));
       for (const auto &p : photonsStudy) {
-        put(d, hist("spectrum_" + p.first, energy, photonSpectrum[p.first]));
-        put(d, hist("numerator_" + p.first, energy, num[p.first]));
+        put(d, studyHist("spectrum_"+p.first,photonSpectrum[p.first],photonVariance[p.first]));
+        put(d, studyHist("numerator_"+p.first,num[p.first],numVariance[p.first]));
       }
-      put(d, new TObjString(Form("runs=%d;first=%d;last=%d;reference=%s", runs, firstSeen, lastSeen, reference.c_str())), "study");
+      put(d, new TObjString(Form("runs=%d;first=%d;last=%d;reference=%s;correction=%s", runs, firstSeen, lastSeen, reference.c_str(),perRunStudy ? "run_live_over_scaled" : "legacy_raw")), "study");
       if (centralityBits) {
         Edges centrality;
         for (int b = 1; b <= centralityBits->GetNbinsX() + 1; ++b) centrality.push_back(centralityBits->GetXaxis()->GetBinLowEdge(b));
@@ -687,6 +710,181 @@ void writeQA(const Settings &s, TDirectory *results) {
 }
 
 /* The QA file: written to Output.QA.partial and moved into place; an existing file is never replaced. */
+/* Copy the producer's saved model diagnostics without recomputing training
+   statistics. A model release, its diagnostics and its collection must agree. */
+void savedModelQA(const std::string &collection,TDirectory *output) {
+  namespace fs=std::filesystem;
+  const auto index=photonjet_config::readYaml(collection);
+  Json body=index;body.erase("collection_sha256");
+  if (index.value("schema","")!="PhotonIDModelQACollectionV1" || index.at("models").empty() ||
+      photonjet_render::sha256(body.dump(-1,' ',true))!=index.at("collection_sha256").get<std::string>())
+    throw std::runtime_error("invalid or changed saved model-QA collection");
+  const fs::path base=fs::canonical(fs::path(collection).parent_path());
+  const fs::path modelRoot=base.parent_path().filename()==".campaigns" ? base.parent_path().parent_path() : base;
+  auto readJson=[](const fs::path &path) {std::ifstream file(path);if(!file)throw std::runtime_error("missing model-QA metadata");return Json::parse(file);};
+  std::set<std::string> names;
+  std::map<std::string,Json> recipes, metadataByName;
+  const std::string system=index.at("system");
+  if(system!="AuAu" && system!="PP")throw std::runtime_error("unknown model-QA collision system");
+  auto *models=output->mkdir("model_qa");
+  // The pp comparison imports its separately sealed AuAu reference into a
+  // distinct directory: both systems may use the same nominal model name.
+  auto import=[&](const Json &entry,const std::string &expectedSystem,TDirectory *parent,bool reference=false) {
+    const std::string name=entry.at("name");
+    if (name.empty() || name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")!=std::string::npos)
+      throw std::runtime_error("invalid or duplicate model-QA name");
+    const fs::path folder=fs::canonical(base/entry.at("path").get<std::string>());
+    if (folder.lexically_relative(modelRoot).empty() || *folder.lexically_relative(modelRoot).begin()=="..") throw std::runtime_error("model-QA release escapes models root");
+    const Json release=readJson(folder/"manifest.json"), diagnostics=readJson(folder/"diagnostics.json");
+    Json releaseBody=release;releaseBody.erase("release_sha256");
+    if (release.value("schema","")!="PhotonIDReleaseV1" || release.value("status","")!="PASS" ||
+        release.at("release_sha256")!=entry.at("release_sha256") ||
+        photonjet_render::sha256(releaseBody.dump(-1,' ',true))!=release.at("release_sha256").get<std::string>() ||
+        photonjet_render::sha256((folder/"diagnostics.json").string(),true)!=entry.at("diagnostics_json_sha256").get<std::string>() ||
+        photonjet_render::sha256((folder/"diagnostics.root").string(),true)!=entry.at("diagnostics_root_sha256").get<std::string>() ||
+        diagnostics.at("root_sha256")!=entry.at("diagnostics_root_sha256") ||
+        release.at("system")!=expectedSystem || diagnostics.at("system")!=expectedSystem ||
+        diagnostics.at("et_ranges_gev")!=release.at("recipe").at("et_ranges_gev") ||
+        diagnostics.at("identity").at("request_sha256")!=release.at("request_sha256") ||
+        diagnostics.at("identity").at("recipe_sha256")!=photonjet_render::sha256(release.at("recipe").dump(-1,' ',true)))
+      throw std::runtime_error("model-QA inputs are not bound to their sealed release");
+    for (const auto &[name,expected] : release.at("artifacts").items()) {
+      const fs::path artifact=fs::canonical(folder/name);
+      if (artifact.lexically_relative(folder).empty() || *artifact.lexically_relative(folder).begin()==".." ||
+          photonjet_render::sha256(artifact.string(),true)!=expected.get<std::string>()) throw std::runtime_error("sealed model-QA artifact changed");
+    }
+    if (entry.at("name")!=release.at("name") || entry.at("name")!=diagnostics.at("name")) throw std::runtime_error("model-QA names differ");
+    if (!reference && (entry.at("axes")!=release.at("recipe").at("axes") ||
+        entry.at("et_ranges_gev")!=diagnostics.at("et_ranges_gev") ||
+        entry.at("max_depth")!=release.at("recipe").at("learner").at("max_depth")))
+      throw std::runtime_error("model-QA routing/depth settings differ from release");
+    if(!reference) {
+      recipes[name]=release.at("recipe");metadataByName[name]=diagnostics;
+      for (const char *field : {"population_sha256","split_sha256","event_split_sha256","training_weights_sha256"})
+      if (diagnostics.at("identity").at(field)!=entry.at("pins").at(field)) throw std::runtime_error("model-QA population/split/weight pin differs");
+    // Retained fits keep the training implementation pin; subsequent reporting
+    // code has its own pin and does not change which learner was trained.
+    const Json fitCode=release.contains("retained_fit") && release.at("retained_fit").contains("fit_code_sha256")
+      ? release.at("retained_fit").at("fit_code_sha256") : release.at("code_sha256");
+    if(entry.contains("reporting_code_sha256") && entry.at("reporting_code_sha256")!=release.at("code_sha256"))
+      throw std::runtime_error("model-QA reporting implementation pin differs");
+    const Json implementation={{"code",fitCode},{"environment",release.at("environment")},{"ROOT",diagnostics.at("ROOT")}};
+    if (entry.at("pins").at("sources_sha256")!=photonjet_render::sha256(diagnostics.at("sources").dump(-1,' ',true)) ||
+        entry.at("pins").at("implementation_sha256")!=photonjet_render::sha256(implementation.dump(-1,' ',true))) throw std::runtime_error("model-QA source or implementation pin differs");
+    }
+    TFile input((folder/"diagnostics.root").c_str(),"READ");if(input.IsZombie()) throw std::runtime_error("cannot read model diagnostics");
+    auto *saved=dynamic_cast<TObjString*>(input.Get("meta/diagnostics"));if(!saved)throw std::runtime_error("missing saved model-QA metadata");
+    const Json metadata=Json::parse(saved->GetString().Data());
+    for(const char *field:{"identity","name","system","feature_order","et_ranges_gev","max_depth"})
+      if(metadata.at(field)!=diagnostics.at(field))throw std::runtime_error("model-QA ROOT and JSON metadata differ");
+    for(const char *table:{"features","performance","holdout_et_c3"})if(!dynamic_cast<TTree*>(input.Get(table)))throw std::runtime_error("missing saved model-QA table");
+    auto *dest=parent->mkdir(reference ? "auau" : name.c_str());
+    std::function<void(TDirectory*,TDirectory*)> copy=[&](TDirectory *from,TDirectory *to) {
+      TIter next(from->GetListOfKeys());while(auto *key=static_cast<TKey*>(next())) {
+        std::unique_ptr<TObject> object(key->ReadObj());
+        if(auto *dir=dynamic_cast<TDirectory*>(object.get())) copy(dir,to->mkdir(key->GetName()));
+        else if(auto *tree=dynamic_cast<TTree*>(object.get())) {
+          to->cd();auto *clone=tree->CloneTree(-1,"fast");if(!clone)throw std::runtime_error("cannot copy model-QA records");
+          clone->Write(key->GetName());clone->SetDirectory(nullptr);delete clone;
+        }
+        else {to->cd();object->Write(key->GetName());}
+      }
+    };
+    copy(&input,dest);
+    if (photonjet_render::sha256((folder/"diagnostics.root").string(),true)!=entry.at("diagnostics_root_sha256").get<std::string>()) throw std::runtime_error("model diagnostics changed during QA import");
+    return std::make_pair(release.at("recipe"),diagnostics);
+  };
+  for(const auto &entry:index.at("models")) {
+    if(!names.insert(entry.at("name")).second)throw std::runtime_error("duplicate model-QA name");
+    if(entry.at("system")!=system)throw std::runtime_error("model-QA collection systems differ");
+    import(entry,system,models);
+  }
+  if (!names.count(index.at("default_model"))) throw std::runtime_error("model-QA default is absent");
+  if(system=="AuAu")for (const std::string kind : {"routing","depth"}) {
+    const auto &group=index.at("comparisons").at(kind);
+    if (!names.count(group.at("reference"))) throw std::runtime_error("model-QA comparison reference is absent");
+    auto entryFor=[&](const Json &name)->const Json& {
+      for(const auto &entry:index.at("models")) if(entry.at("name")==name)return entry;
+      throw std::runtime_error("model-QA comparison member is absent");
+    };
+    const auto &reference=entryFor(group.at("reference"));
+    for(const auto &name:group.at("models")) {
+      const auto &entry=entryFor(name);
+      if(entry.at("pins")!=reference.at("pins") || entry.at("et_ranges_gev")!=reference.at("et_ranges_gev"))
+        throw std::runtime_error("model-QA comparison populations differ");
+      Json a=recipes.at(reference.at("name")),b=recipes.at(entry.at("name"));
+      for(const char *field:{"name","score_branch"}) {a.erase(field);b.erase(field);}
+      if(kind=="routing") {a.erase("axes");b.erase("axes");}
+      else {a.at("learner").erase("max_depth");b.at("learner").erase("max_depth");}
+      if(a!=b)throw std::runtime_error("model-QA comparison changes additional settings");
+    }
+  }
+  if(system=="PP") {
+    const auto &groups=index.at("comparisons"), &paired=groups.at("ppg12"), &comparison=groups.at("auau_settings");
+    const std::string pp= comparison.at("pp_model"), ppg12=paired.at("model");
+    if(!names.count(pp) || !names.count(ppg12) || pp!=index.at("default_model").get<std::string>() ||
+       ppg12.rfind("ppg12_retrained_",0)!=0 || paired.at("table")!="original_comparison/paired_scores" ||
+       comparison.at("status")!="BOUND" || comparison.at("et_range_gev")!=Json::array({15.,35.}) ||
+       comparison.at("auau_centrality_range")!=Json::array({50.,80.}))
+      throw std::runtime_error("pp model-QA comparison is absent or unbound");
+    const auto &ppRecipe=recipes.at(pp), &ppMeta=metadataByName.at(pp), &pairedMeta=metadataByName.at(ppg12);
+    if(ppRecipe.at("et_ranges_gev").at("application")!=comparison.at("et_range_gev") ||
+       ppMeta.at("heldout_scores").at("valid").get<int>()!=1 ||
+       pairedMeta.at("original_comparison").at("reference_model_sha256")!=recipes.at(ppg12).at("reference_model_sha256"))
+      throw std::runtime_error("pp saved comparison scope or frozen reference differs");
+    const auto &reference= comparison.at("auau_reference");
+    if(reference.at("name").get<std::string>().rfind("nominal_retrained_",0)!=0)
+      throw std::runtime_error("pp comparison requires the canonical AuAu reference");
+    const auto [auauRecipe,auauMeta]=import(reference,"AuAu",models->mkdir("references"),true);
+    if(auauMeta.at("peripheral_15to35_scores").at("valid").get<int>()!=1)
+      throw std::runtime_error("AuAu reference lacks valid peripheral held-out scores");
+    for(const char *field:{"learner","training","weights"})
+      if(auauRecipe.at(field)!=ppRecipe.at(field))throw std::runtime_error("pp/AuAu training settings differ");
+    Json sharedFeatures=Json::array();
+    for(const auto &feature:auauRecipe.at("features"))
+      if(feature!="cluster_weta33_cogx" && feature!="cluster_wphi33_cogx" && feature!="centrality")sharedFeatures.push_back(feature);
+    if(sharedFeatures!=ppRecipe.at("features"))throw std::runtime_error("pp/AuAu shared feature order differs");
+    for(const char *field:{"et_min","et_max_exclusive","eta_abs_max","vertex_abs_max_cm"})
+      if(auauRecipe.at("domain").at(field)!=ppRecipe.at("domain").at(field))throw std::runtime_error("pp/AuAu comparison domains differ");
+    for(const std::string &key:std::vector<std::string>{pp+"/holdout_scores/roc",ppg12+"/original_comparison/paired_scores", "references/auau/peripheral_15to35_scores/roc"})
+      if(!dynamic_cast<TTree*>(models->Get(key.c_str())))throw std::runtime_error("missing saved pp comparison table");
+  }
+  models->cd();TObjString(index.dump().c_str()).Write("collection");
+  const Json validation={{"schema","PhotonIDModelQAImportV1"},{"status","PASS"},
+    {"collection_sha256",index.at("collection_sha256")},{"scientific_acceptance",false}};
+  TObjString(validation.dump().c_str()).Write("validation");output->cd();
+}
+
+int runModelQA(const std::string &collection, const std::string &output) {
+  namespace fs=std::filesystem;
+  const auto input=fs::canonical(collection);
+  const auto inputHash=photonjet_render::sha256(input.string(),true);
+  const std::string partial=output+".partial";
+  for(const auto &path:{output,partial,output+".render.json"})
+    if(fs::exists(path) || fs::is_symlink(path)) throw std::runtime_error(path+" exists; choose a new output");
+  std::unique_ptr<TFile> out(TFile::Open(partial.c_str(),"CREATE"));
+  if(!out || out->IsZombie()) throw std::runtime_error("cannot write "+partial);
+  savedModelQA(input.string(),out.get());
+  if(photonjet_render::sha256(input.string(),true)!=inputHash)
+    throw std::runtime_error("model-QA collection changed during import");
+  // Empty measurement settings record the executable sources without implying
+  // that any DATA, simulation histogram or measurement was processed.
+  Json metadata=photonjet_render::verify(Json::parse(renderMetadata(Settings{})));
+  metadata["model_qa"]={{"path",input.string()},{"sha256",inputHash}};
+  const std::string render=photonjet_render::seal(metadata).dump();
+  out->cd();
+  TObjString("saved-model-qa").Write("analysis");
+  const Json coverage={{"status","SAVED_MODEL_DIAGNOSTICS"},{"histogram_packages_processed",0},
+                       {"scientific_acceptance",false}};
+  TObjString(coverage.dump().c_str()).Write("input_coverage");
+  TObjString(render.c_str()).Write("render_metadata");
+  out->Close();
+  if(gSystem->Rename(partial.c_str(),output.c_str())!=0) throw std::runtime_error("cannot publish model QA output");
+  renderProductReceipt(output,render);
+  std::cout << "[FinalAnalysis] wrote " << output << std::endl;
+  return 0;
+}
+
 int runQA(const Settings &s) {
   const std::string coverage = inputCoverage(s);
   const std::string render = renderMetadata(s);
@@ -695,6 +893,7 @@ int runQA(const Settings &s) {
   std::unique_ptr<TFile> out(TFile::Open(partial.c_str(), "RECREATE"));
   if (!out || out->IsZombie()) throw std::runtime_error("cannot write " + partial);
   writeQA(s, out.get());
+  if (!s.photonIDModels.empty()) savedModelQA(s.photonIDModels,out.get());
   out->cd();
   TObjString(s.name.c_str()).Write("analysis");
   TObjString(coverage.c_str()).Write("input_coverage");

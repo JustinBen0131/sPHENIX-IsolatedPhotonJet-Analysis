@@ -3,6 +3,7 @@
 #
 #   final_analysis.sh run         --config SETTINGS              the measurement: the results file named in SETTINGS
 #   final_analysis.sh qa          --config SETTINGS              the photon and event QA inputs: the QA file named in SETTINGS
+#   final_analysis.sh qa          --models MODELS --out FILE     saved training QA, independent of histogram packages
 #   final_analysis.sh systematics --config SYSTEMATICS           the systematic uncertainties of results of one change each
 #   final_analysis.sh draw        [--results FILE] [--qa FILE] [--systematics FILE] --fig DIR
 #                                                                the figures of the given files, sPHENIX style, into DIR
@@ -21,6 +22,7 @@ usage_tables="usage: final_analysis.sh tables --results FILE [--systematics FILE
 compile() {
   mkdir -p "$build"
   if [ ! -x "$build/final_analysis" ] || [ "$package/../TreeToHists/src/Configuration.h" -nt "$build/final_analysis" ] || \
+     [ "$package/../TreeProduction/src/internal/Configuration.h" -nt "$build/final_analysis" ] || \
      [ -n "$(find "$package/src" -type f -newer "$build/final_analysis")" ]; then
     # shellcheck disable=SC2046
     $(root-config --cxx) -O2 -std=c++17 $(root-config --cflags) -I"$package/src" "$package"/src/*.cc \
@@ -36,7 +38,15 @@ case "${1:-}" in
   run)
     shift; compile
     exec "$build/final_analysis" "$@" ;;
-  systematics|qa)
+  qa)
+    if [ "$#" -eq 5 ] && [ "$2" = "--models" ] && [ "$4" = "--out" ]; then
+      compile
+      exec "$build/final_analysis" --model-qa "$3" "$5"
+    fi
+    [ "$#" -eq 3 ] && [ "$2" = "--config" ] || { echo 'usage: final_analysis.sh qa --config FILE | --models MODELS --out FILE' >&2; exit 2; }
+    compile
+    exec "$build/final_analysis" --qa "$3" ;;
+  systematics)
     [ "$#" -eq 3 ] && [ "$2" = "--config" ] || { echo "usage: final_analysis.sh $1 --config FILE" 1>&2; exit 2; }
     compile
     exec "$build/final_analysis" "--$1" "$3" ;;
