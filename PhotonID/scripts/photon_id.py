@@ -43,14 +43,14 @@ def arguments(argv=None):
     parser.add_argument('--cache-layout', choices=('packed', 'source'), default='packed', help='projection storage; packed is one row bundle per shard')
     parser.add_argument('--scratch-root', type=Path, help='existing physical data-staging directory; otherwise use _CONDOR_SCRATCH_DIR')
     parser.add_argument('--auau-reference', type=Path, help='sealed canonical AuAu release for the pp/AuAu heldout comparison')
-    parser.add_argument('--model', action='append', default=[], help='trainCampaign/prepareCells recipe; repeat to select several')
+    parser.add_argument('--model', action='append', default=[], help='campaign recipe or QA subset; repeat to select several')
     parser.add_argument('--cell', help='trainCampaign: one exact cell from prepared compact inputs')
     parser.add_argument('--assemble-only', action='store_true', help='trainCampaign: seal completed cells; refuse any missing fit')
     parser.add_argument('--summary', action='store_true', help='planCampaign: compact human-readable preview')
     parser.add_argument('--execution-plan', action='store_true', help='planCampaign: preview independent cells and release barriers; no dispatch')
     parser.add_argument('--census', type=Path, help='planCampaign --execution-plan: saved preparation_census.json for exact cell counts')
     parser.add_argument('--fit-code-manifest', type=Path, help='diagnoseCampaign: original code manifest when the diagnostic source differs from the fit')
-    parser.add_argument('--prepared-population', type=Path, help='finalizeCampaign: reuse the original completed numeric population after a preparation-code update')
+    parser.add_argument('--prepared-population', type=Path, help='diagnoseCampaign/finalizeCampaign: reuse the original verified numeric population')
     parser.add_argument('--projection-code-manifest', type=Path, help='original extraction code manifest for packed caches predating recorded code provenance')
     args = parser.parse_args(argv)
     if args.command == 'reTrainNominal' and args.target not in ('AuAu', 'PP', 'AuAuAndPP'):
@@ -86,14 +86,14 @@ def arguments(argv=None):
         parser.error('projection event bound must be 1..100000 and shard index must be nonnegative')
     if args.auau_reference and (args.command not in ('trainCampaign', 'collectQA') or args.target != 'PP'):
         parser.error('--auau-reference applies to trainCampaign PP or collectQA PP')
-    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign'):
-        parser.error('--model applies only to trainCampaign, prepareCells, diagnoseCampaign or finalizeCampaign')
+    if args.model and args.command not in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA'):
+        parser.error('--model applies only to trainCampaign, prepareCells, diagnoseCampaign, finalizeCampaign or collectQA')
     if args.command in ('diagnoseCampaign', 'finalizeCampaign') and (len(args.model) != 1 or not args.inputs):
         parser.error(args.command + ' requires one --model and the original --inputs catalogue')
     if args.fit_code_manifest and args.command not in ('diagnoseCampaign', 'finalizeCampaign'):
         parser.error('--fit-code-manifest applies only to diagnoseCampaign or finalizeCampaign')
-    if args.prepared_population and (args.command != 'finalizeCampaign' or not args.fit_code_manifest):
-        parser.error('--prepared-population requires finalizeCampaign and the original --fit-code-manifest')
+    if args.prepared_population and (args.command not in ('finalizeCampaign', 'diagnoseCampaign') or not args.fit_code_manifest):
+        parser.error('--prepared-population requires finalizeCampaign or diagnoseCampaign and the original --fit-code-manifest')
     if args.projection_code_manifest and args.command not in (
             'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'reTrainNominal', 'trainNew', 'diagnoseCampaign'):
         parser.error('--projection-code-manifest applies only to packed-cache consumers')
@@ -153,12 +153,12 @@ def retained_population(simulation, recipe, args):
     """Verify the original numeric arrays once; require no retired event store.
 
     This recovery path preserves the original preparation identity. It opens
-    only its receipt and twelve arrays, and is available only for completion
+    only its receipt and twelve arrays, and is available only for diagnosis or completion
     of an already fitted model whose original source manifest is supplied.
     """
     from src import Inputs, Models
-    Models.require(args.command == 'finalizeCampaign' and args.fit_code_manifest,
-                   'retained population requires calibration-only completion')
+    Models.require(args.command in ('finalizeCampaign', 'diagnoseCampaign') and args.fit_code_manifest,
+                   'retained population requires diagnosis or calibration-only completion')
     work = Path(args.prepared_population).absolute()
     Models.require(work.resolve() == work and work.is_dir(), 'retained population directory is aliased or missing')
     path = work / 'population.json'
@@ -500,7 +500,7 @@ def verify_retained_request(folder, r, simulation, plan, args, *, finalizing=Fal
                          if row['path'].startswith('PhotonID/src/') or row['path'] == 'PhotonID/scripts/photon_id.py'}
         Models.require(source_hashes == fit_code, 'original fit code manifest differs from the retained request')
     if finalizing:
-        changed_coordination = {'WorkingPoints.py', 'Validation.py', 'photon_id.py'}
+        changed_coordination = {'WorkingPoints.py', 'Validation.py', 'Diagnostics.py', 'photon_id.py'}
         if getattr(args, 'prepared_population', None) is not None:
             # The original arrays bypass preparation. Recipe/runtime, original
             # request, diagnosed models and every array are still checked.
@@ -778,6 +778,10 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         manifest['release_sha256'] = Models.digest(manifest)
         Models.save_json(folder / 'manifest.json', manifest)
         Models.load_release(folder, request=request)
+        # QA may finish before manifest hashing and native release loading.
+        # Refresh its existing terminal counter only after publication passes.
+        Models.WorkProgress(folder / 'progress.json', 1, 'QA products',
+            'qa-' + system.lower() + '-' + r['name'], identity).write('release-complete', 1, status='PASS')
     return dict(status='PASS', calibration_quality=calibration_quality,
                 performance_quality=performance_quality, **plan)
 
@@ -786,7 +790,7 @@ def main(argv=None):
     """Dispatch one model request and score complete groups after release validation."""
     args = arguments(argv)
     from src import Models
-    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign') else []
+    campaign_names = Models.campaign_models(args.target) if args.command in ('trainCampaign', 'prepareCells', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA') else []
     if args.model:
         Models.require(len(args.model) == len(set(args.model)), 'duplicate --model recipe')
         Models.require(set(args.model) <= set(campaign_names),
@@ -814,8 +818,12 @@ def main(argv=None):
     elif args.command == 'collectQA':
         from src import Diagnostics
         version = args.release_version
+        # A subset can advance completed plots while other variants fit. Every
+        # collection keeps the nominal reference required by its comparisons.
+        if 'nominal_retrained_v1' not in campaign_names:
+            campaign_names = ['nominal_retrained_v1', *campaign_names]
         releases = [Models.release_dir(args.models, args.target, name.removesuffix('v1') + version)
-                    for name in Models.campaign_models(args.target)]
+                    for name in campaign_names]
         result = dict(status='CHECKED' if args.check else 'INDEXED',
                       model_qa_collection=str(Diagnostics.collection(args.models, releases, system=args.target,
                                                                    auau_reference=args.auau_reference, check_only=args.check,

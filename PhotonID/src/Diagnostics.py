@@ -403,7 +403,8 @@ def _collection(root, releases, system, auau_reference, check_only, tracker):
         pins = {key: diagnostics['identity'][key] for key in
                 ('population_sha256', 'split_sha256', 'event_split_sha256', 'training_weights_sha256')}
         pins['sources_sha256'] = Models.digest(diagnostics['sources'])
-        pins['implementation_sha256'] = Models.digest(dict(code=manifest['code_sha256'],
+        fit_code = manifest.get('retained_fit', {}).get('fit_code_sha256', manifest['code_sha256'])
+        pins['implementation_sha256'] = Models.digest(dict(code=fit_code,
                                                          environment=manifest['environment'], ROOT=diagnostics['ROOT']))
         ranges = manifest['recipe']['et_ranges_gev']
         Models.require(diagnostics['et_ranges_gev'] == ranges, 'QA collection support differs from model')
@@ -414,6 +415,9 @@ def _collection(root, releases, system, auau_reference, check_only, tracker):
                             release_sha256=manifest['release_sha256'], et_ranges_gev=ranges, pins=pins,
                             diagnostics_json_sha256=Models.file_hash(folder / 'diagnostics.json'),
                             diagnostics_root_sha256=diagnostics['root_sha256'],
+                            performance_quality=manifest.get('performance_quality'),
+                            calibration_quality=manifest.get('calibration_quality'),
+                            reporting_code_sha256=manifest['code_sha256'],
                             axes=manifest['recipe']['axes'], max_depth=manifest['recipe']['learner']['max_depth']))
         recipes[manifest['name']] = manifest['recipe']
         if tracker: tracker.write('check-releases', len(entries))

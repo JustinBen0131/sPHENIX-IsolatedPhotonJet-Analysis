@@ -178,8 +178,8 @@ recipe reuses complete preparation; it does not change the learner, weights,
 event split or working points.
 Independent `--model` invocations can run in parallel after preparation. They
 reuse the verified arrays on disk and each fit the complete selected recipe.
-Selected invocations seal their own releases; `collectQA` requires the complete
-campaign before writing its comparison index.
+Selected invocations seal their own releases. `collectQA` collects the complete
+campaign by default; use `--model` for a completed subset.
 
 For a compact batch-planning preview, use:
 
@@ -232,6 +232,8 @@ An existing diagnosis is retained; inspect it before considering another run.
 When the diagnostic was installed after fitting, also supply
 `--fit-code-manifest /path/to/original/CODE_MANIFEST.json`. The original fit
 request and the current diagnostic keep separate code identities.
+Supply `--prepared-population /path/to/original/population` with that manifest
+to reuse the verified original arrays when preparation code has changed.
 
 After that diagnosis has finished, complete calibration and QA using the same
 fitted artifacts:
@@ -283,6 +285,17 @@ This verifies the releases and writes `models.yaml`. An unfiltered
 `Pipeline.PhotonIDModels` to that index in FinalAnalysis, and use each model's
 `selection.json` when producing its TreeToHists analysis QA; see
 [Outputs and use in TreeToHists](#outputs-and-use-in-treetohists).
+
+To draw nominal QA while variants are still fitting:
+
+```bash
+./PhotonID/photon_id.sh collectQA AuAu --models /path/to/analysis/models --model nominal_retrained_v1
+```
+
+Repeat `--model` to add completed variants. The nominal reference is always
+included; every selected release must pass the same hash and comparison checks.
+Each subset writes its own immutable collection, leaving the eventual complete
+campaign index separate. A subset cannot supply comparisons for missing models.
 
 `--check` checks the selected runtime before opening input groups and previews
 source and recipe bindings. Training commands leave the tree groups unchanged.
