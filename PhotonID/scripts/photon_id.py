@@ -51,6 +51,7 @@ def arguments(argv=None):
     parser.add_argument('--census', type=Path, help='planCampaign --execution-plan: saved preparation_census.json for exact cell counts')
     parser.add_argument('--fit-code-manifest', type=Path, help='diagnoseCampaign: original code manifest when the diagnostic source differs from the fit')
     parser.add_argument('--prepared-population', type=Path, help='finalizeCampaign: reuse the original completed numeric population after a preparation-code update')
+    parser.add_argument('--projection-code-manifest', type=Path, help='original extraction code manifest for packed caches predating recorded code provenance')
     args = parser.parse_args(argv)
     if args.command == 'reTrainNominal' and args.target not in ('AuAu', 'PP', 'AuAuAndPP'):
         parser.error('reTrainNominal requires AuAu, PP or AuAuAndPP')
@@ -93,6 +94,9 @@ def arguments(argv=None):
         parser.error('--fit-code-manifest applies only to diagnoseCampaign or finalizeCampaign')
     if args.prepared_population and (args.command != 'finalizeCampaign' or not args.fit_code_manifest):
         parser.error('--prepared-population requires finalizeCampaign and the original --fit-code-manifest')
+    if args.projection_code_manifest and args.command not in (
+            'verifyProjections', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'reTrainNominal', 'trainNew', 'diagnoseCampaign'):
+        parser.error('--projection-code-manifest applies only to packed-cache consumers')
     if (args.cell or args.assemble_only) and args.command != 'trainCampaign':
         parser.error('--cell and --assemble-only apply only to trainCampaign')
     if args.cell and (len(args.model) != 1 or not args.inputs or args.assemble_only):
@@ -321,7 +325,8 @@ def campaign_projections(simulation, config, args, *, system):
     root = args.projection_root or args.models / '.projections'
     return ProjectionCache.load_campaign(simulation, recipe, root,
         progress_path=args.models / '.progress' / ('verify-projections-' + system.lower() + '.json'),
-        progress_identity=getattr(args, 'progress_identity', None))
+        progress_identity=getattr(args, 'progress_identity', None),
+        code_manifest=getattr(args, 'projection_code_manifest', None))
 
 
 def verify_projections(simulation, config, args, *, system):
@@ -493,7 +498,7 @@ def verify_retained_request(folder, r, simulation, plan, args, *, finalizing=Fal
         if getattr(args, 'prepared_population', None) is not None:
             # The original arrays bypass preparation. Recipe/runtime, original
             # request, diagnosed models and every array are still checked.
-            changed_coordination.update(('Inputs.py', 'Models.py'))
+            changed_coordination.update(('Inputs.py', 'Models.py', 'ProjectionCache.py'))
         Models.require(set(fit_code) == set(current_code) and all(
             fit_code[key] == current_code[key] for key in fit_code if key not in changed_coordination),
             'retained completion requires unchanged fitter, evaluator, inputs and numerical validation')

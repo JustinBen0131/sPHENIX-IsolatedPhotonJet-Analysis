@@ -252,6 +252,15 @@ event database or replacement population. This recovery option applies to
 populations with their own split; borrowed split references require their
 original preparation workflow.
 
+Packed extraction receipts now retain the extraction code hashes alongside
+the source identities, layout and row checksums. Preparation uses those saved
+rows even after its own code is updated; it still verifies every source and
+row checksum. For older packed caches, supply their original extraction
+snapshot with `--projection-code-manifest /path/to/extraction/CODE_MANIFEST.json`
+to `prepareCampaign` or another cache-consuming command. This verifies the
+original cache identity and avoids extracting the trees again. The option
+reads provenance only; it never executes the old code or rewrites a cache.
+
 ### 4. Collect the releases for FinalAnalysis
 
 After all recipes listed by `planCampaign` have finished:

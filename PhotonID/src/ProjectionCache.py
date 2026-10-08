@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 
@@ -18,13 +19,28 @@ from .Models import WorkProgress, digest, file_hash, read_json, require, save_js
 SCHEMA = 'PhotonIDProjectionBundleV1'
 
 
-def bundle_identity(sources, recipe):
+def projection_code(manifest=None):
+    """Extraction provenance, independent of a later population consumer."""
+    if manifest is None:
+        return dict(projector_sha256=file_hash(Inputs.__file__), storage_sha256=file_hash(__file__))
+    saved = read_json(manifest)
+    require(saved.get('schema') == 'PhotonIDPublicCodeSnapshotV1', 'original extraction code manifest is invalid')
+    result = {}
+    for path, key in (('PhotonID/src/Inputs.py', 'projector_sha256'),
+                      ('PhotonID/src/ProjectionCache.py', 'storage_sha256')):
+        selected = [row['sha256'] for row in saved['members'] if row['path'] == path]
+        require(len(selected) == 1 and re.fullmatch('[0-9a-f]{64}', selected[0]),
+                'original extraction code manifest is incomplete')
+        result[key] = selected[0]
+    return result
+
+
+def bundle_identity(sources, recipe, *, code=None):
     return digest(dict(sources=sources, definition=Inputs.population_definition(recipe),
-                       projector_sha256=file_hash(Inputs.__file__),
-                       storage_sha256=file_hash(__file__)))
+                       **(code or projection_code())))
 
 
-def load_bundle(folder, recipe, *, progress=None):
+def load_bundle(folder, recipe, *, progress=None, code=None):
     """Verify all bytes and member receipts once; return source-aligned views."""
     folder = Path(folder)
     witness = Inputs.projection_witness(folder, index_file='bundle.json')
@@ -33,10 +49,14 @@ def load_bundle(folder, recipe, *, progress=None):
     require(receipt.get('schema') == SCHEMA and receipt.get('status') == 'PASS' and
             receipt.get('bundle_sha256') == digest(body), 'bundle receipt changed or incomplete')
     require(receipt['definition'] == Inputs.population_definition(recipe), 'bundle population differs')
+    code = code or receipt.get('projection_code') or projection_code()
+    require(set(code) == {'projector_sha256', 'storage_sha256'} and
+            all(isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) for value in code.values()) and
+            receipt.get('projection_code', code) == code, 'bundle extraction code provenance differs')
     sources = [part['projection']['source'] for part in receipt['parts']]
     require(sources and sources == sorted(sources, key=lambda item: item['logical_id']) and
             len({s['logical_id'] for s in sources}) == len(sources), 'bundle sources must be sorted and unique')
-    require(receipt['cache_identity'] == bundle_identity(sources, recipe), 'bundle source or code identity differs')
+    require(receipt['cache_identity'] == bundle_identity(sources, recipe, code=code), 'bundle source or code identity differs')
     dtype = Inputs.projection_dtype(recipe)
     require(digest(receipt['record_dtype']) == digest(dtype.descr) and
             receipt['source_events'] == sum(item['entries'] for item in sources) <= 100000,
@@ -48,7 +68,8 @@ def load_bundle(folder, recipe, *, progress=None):
             member_body = {k: v for k, v in member.items() if k != 'projection_sha256'}
             require(member['schema'] == 'PhotonIDSourceProjectionV1' and member['status'] == 'PASS' and
                     member['projection_sha256'] == digest(member_body) and
-                    member['cache_identity'] == Inputs.projection_key(item, recipe) and
+                    member['cache_identity'] == digest(dict(source=item, definition=Inputs.population_definition(recipe),
+                                                           code_sha256=code['projector_sha256'])) and
                     member['definition'] == receipt['definition'], 'bundle member provenance differs')
             count = member['rows']
             require(type(count) is int and count >= 0 and member['source_events'] == item['entries'] and
@@ -73,9 +94,10 @@ def load_bundle(folder, recipe, *, progress=None):
     return result
 
 
-def load_campaign(inputs, recipe, root, *, progress_path=None, progress_identity=None):
+def load_campaign(inputs, recipe, root, *, progress_path=None, progress_identity=None, code_manifest=None):
     """Require complete coverage, admitting either packed or legacy source caches."""
     expected = {item['logical_id']: item for item in inputs}; result = {}
+    code = projection_code(code_manifest) if code_manifest is not None else None
     tracker = WorkProgress(progress_path, len(expected), 'projection sources',
                            'projection-cache-' + recipe['system'].lower(), progress_identity) if progress_path else None
     verified_rows = 0
@@ -89,7 +111,7 @@ def load_campaign(inputs, recipe, root, *, progress_path=None, progress_identity
             ids = {part['projection']['source']['logical_id'] for part in header['parts']}
             if not ids.intersection(expected):
                 continue
-            for logical_id, part in load_bundle(path.parent, recipe, progress=tracker.beat if tracker else None).items():
+            for logical_id, part in load_bundle(path.parent, recipe, progress=tracker.beat if tracker else None, code=code).items():
                 if logical_id not in expected: continue
                 require(part['receipt']['source'] == expected[logical_id], 'bundle source population differs')
                 require(logical_id not in result, 'source appears in multiple projection bundles')
@@ -181,6 +203,7 @@ def project_shard(inputs, recipe, root, shard, *, scratch_root=None, progress_id
                 output.flush(); os.fsync(output.fileno())
             require(tracker.processed == tracker.total, 'bundle source coverage incomplete')
             body = dict(schema=SCHEMA, status='PASS', cache_identity=pin,
+                        projection_code=projection_code(),
                         definition=Inputs.population_definition(recipe), record_dtype=Inputs.projection_dtype(recipe).descr,
                         source_events=shard['events'], rows=rows, bytes=offset,
                         parts=members, rows_sha256=aggregate.hexdigest())
