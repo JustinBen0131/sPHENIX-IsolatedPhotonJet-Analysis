@@ -13,6 +13,7 @@ import argparse
 import datetime
 import fcntl
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -71,8 +72,12 @@ def arguments(argv=None):
         parser.error('verifyProjections requires --inputs from inspectCampaign')
     if args.command != 'projectCampaign' and (args.shard_index is not None or args.max_events != 100000):
         parser.error('--shard-index and --max-events apply only to projectCampaign')
-    if args.command != 'projectCampaign' and (args.scratch_root is not None or args.cache_layout != 'packed'):
-        parser.error('--scratch-root and --cache-layout apply only to projectCampaign')
+    if args.command != 'projectCampaign' and args.cache_layout != 'packed':
+        parser.error('--cache-layout applies only to projectCampaign')
+    if args.scratch_root is not None and args.command not in (
+            'projectCampaign', 'prepareCampaign', 'prepareCells', 'trainCampaign', 'reTrainNominal',
+            'trainNew', 'diagnoseCampaign', 'finalizeCampaign', 'collectQA'):
+        parser.error('--scratch-root applies only to extraction or population-consuming commands')
     if args.scratch_root is not None and args.cache_layout == 'source':
         parser.error('--scratch-root requires packed projection storage')
     if not 0 < args.max_events <= 100000 or (args.shard_index is not None and args.shard_index < 0):
@@ -162,10 +167,11 @@ def prepared_population(simulation, recipe, config, args, cache):
     with (work / '.preparation.lock').open('a') as preparation_lock:
         fcntl.flock(preparation_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         population = Inputs.prepare(simulation, recipe, work, split_reference=reference,
-                                    progress_identity=getattr(args, 'progress_identity', None), projections=projections)
+                                    progress_identity=getattr(args, 'progress_identity', None), projections=projections,
+                                    scratch_root=getattr(args, 'scratch_root', None) or os.environ.get('_CONDOR_SCRATCH_DIR'))
     paths = [work / name for name in population.receipt['arrays']]
     if projections is None: paths += [i['path'] for i in simulation]
-    paths += [work / 'events.sqlite', work / 'population.json']
+    paths += [work / 'population.json']
     cache[pin] = population, work, paths, file_snapshot(paths)
     return population, work
 

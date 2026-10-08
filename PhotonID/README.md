@@ -132,6 +132,17 @@ cache on writable analysis storage.
 Training consumes verified preparation, fits models, validates the saved artifacts,
 derives working points and saves diagnostics. Matching completed work is reused.
 Preparation computes the shared event split, weights and training arrays once.
+Identity checks and event assignments use these arrays directly; preparation
+creates no database or per-source bookkeeping files. Source bundles are checked
+at each pass boundary and mapped once for adjacent sources; preparation
+preserves the catalogue's original row order. Under Condor, temporary matrices
+and pp sample compaction use `_CONDOR_SCRATCH_DIR`. Outside Condor,
+add `--scratch-root /path/to/worker/storage` to select a physical staging
+directory. Only the twelve final arrays and their population receipt are
+published to `--models`; source caches are read without opening the trees.
+Routine progress is emitted at ten-second intervals, with immediate phase
+completion and error reports. Condor also places library temporaries and
+caches in its assigned scratch area.
 For each model cell, training then follows this order:
 
 1. Fit the configured learner.

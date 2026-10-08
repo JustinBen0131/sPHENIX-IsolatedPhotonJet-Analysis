@@ -491,12 +491,22 @@ class WorkProgress:
         require(self.skipped <= skipped <= self.skip_total and
                 self.processed - self.skipped <= processed - skipped <= self.total - self.skip_total,
                 'processed/skip progress regressed or exceeded its total')
+        # Keep every count in process, but serialize routine progress only at
+        # a time cadence. Source boundaries are not separate log records.
+        current_time = time.monotonic()
+        emit = (phase != self.phase_name or current_time - self.last_write >= 10 or
+                (processed == self.total and self.processed != self.total) or
+                extra.get('status') in ('PASS', 'ERROR') or bool(extra.get('latest_error')) or
+                ('phase_total' in extra and extra['phase_processed'] == extra['phase_total'] and
+                 self.extra.get('phase_processed') != extra['phase_processed']))
         self.skipped = skipped
         self.processed = processed
         self.extra.update(extra)
         elapsed = time.monotonic() - self.started
-        self.last_write = time.monotonic()
         self.phase_name = phase
+        if not emit:
+            return
+        self.last_write = current_time
         rate = processed / elapsed if elapsed else 0.
         row_rate = (processed - skipped) / elapsed if elapsed else 0.
         progress(self.path, phase, processed, self.total,
@@ -528,7 +538,7 @@ class WorkProgress:
                    phase_eta_seconds=(total-processed)/rate if rate else (0. if processed == total else None))
 
     def beat(self):
-        """Refresh from the processing invocation during a long SQLite call."""
+        """Refresh from the processing invocation during preparation work."""
         import time
         if time.monotonic() - self.last_write >= 30:
             self.write(self.phase_name)

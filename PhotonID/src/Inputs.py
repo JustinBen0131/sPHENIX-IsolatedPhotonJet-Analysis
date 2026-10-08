@@ -3,8 +3,8 @@
 Reuse TreeProduction's publication manifests and photon feature map through its
 installed ROOT-only eventTree library. A bounded source projection supplies
 both training ranges; cached rows build disk-backed matrices without another
-tree pass. SQLite checks identities and assigns an event-grouped
-split once for every learner. Isolation never enters the labels. Weights
+tree pass. Compact arrays check identities and assign the event-grouped
+split once for every learner, without a database. Isolation never enters the labels. Weights
 reproduce the existing class balance and spline ET/eta flattening.
 """
 from __future__ import annotations
@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import sqlite3
 
 import awkward as ak
 import numpy as np
@@ -26,13 +25,6 @@ import yaml
 from .Models import SYSTEMS, WorkProgress, digest, file_hash, read_json, require, save_json
 
 _EVENTTREE = None
-
-# Bound SQLite's page cache and group small sources into durable transactions.
-# Row order, uniqueness checks and split assignment are independent of these
-# I/O settings; an incomplete population is never reused.
-PREPARATION_CACHE_KIB = 64 * 1024
-PREPARATION_COMMIT_ROWS = 65536
-
 
 def eventtree():
     """TreeProduction's installed eventTree library, bound through PyROOT.
@@ -598,14 +590,27 @@ def require_projection_domain(projected, recipe):
             'projection does not contain the requested ET domain')
 
 
-def cached_rows(item, recipe, projection, tracker, phase):
+def cached_rows(item, recipe, projection, tracker, phase, *, mapped=None, verify=True):
     """Filter memory-mapped cached rows without reading or hashing TG trees."""
     receipt = projection['receipt']; require_projection_domain(receipt['definition'], recipe)
     index_file = projection.get('index_file', 'projection.json')
-    require(projection_witness(projection['folder'], index_file=index_file) == projection['witness'], 'verified projection changed')
+    if verify:
+        require(projection_witness(projection['folder'], index_file=index_file) == projection['witness'], 'verified projection changed')
     dtype = projection_dtype(recipe); n = receipt['rows']
-    data = np.memmap(projection['folder'] / 'rows.bin', dtype=dtype, mode='r', shape=(n,),
-                     offset=projection.get('byte_offset', 0)) if n else np.empty(0, dtype)
+    if mapped is not None and n:
+        key = str(projection['folder'])
+        if key not in mapped:
+            # Keep one bundle open, reusing it for adjacent logical sources.
+            # The public catalogue retains its original row order.
+            mapped.clear()
+            mapped[key] = np.memmap(projection['folder'] / 'rows.bin', dtype=dtype, mode='r')
+        offset = projection.get('byte_offset', 0)
+        require(offset % dtype.itemsize == 0 and offset // dtype.itemsize + n <= len(mapped[key]),
+                'cached source extends beyond its bundle')
+        data = mapped[key][offset // dtype.itemsize:offset // dtype.itemsize + n]
+    else:
+        data = np.memmap(projection['folder'] / 'rows.bin', dtype=dtype, mode='r', shape=(n,),
+                         offset=projection.get('byte_offset', 0)) if n else np.empty(0, dtype)
     tracker.write(phase, source_logical_id=item['logical_id'], source_processed=0,
                   source_total=n, source_remaining=n)
     domain = recipe.get('training_domain', recipe['domain'])
@@ -619,7 +624,8 @@ def cached_rows(item, recipe, projection, tracker, phase):
         field = 'eligible_photons' if phase == 'prepare-count' else 'matrix_rows_written'
         tracker.write(phase, tracker.processed + end - begin, source_processed=end, source_remaining=n - end,
                       **{field: tracker.extra.get(field, 0) + len(selected)})
-    require(projection_witness(projection['folder'], index_file=index_file) == projection['witness'], 'projection changed during preparation')
+    if verify:
+        require(projection_witness(projection['folder'], index_file=index_file) == projection['witness'], 'projection changed during preparation')
 
 
 @dataclass
@@ -734,46 +740,105 @@ def reference_split(work, inputs, recipe):
             'split reference must cover the same selection with a narrower ET range')
     require(population_identity(inputs, dict(recipe, training_domain=narrower)) == receipt['input_recipe_sha256'],
             'split reference belongs to different preparation code or settings')
-    require(file_hash(work / 'events.sqlite') == receipt['event_split_sha256'],
-            'reference event split changed')
+    for filename, h in receipt['arrays'].items():
+        require(file_hash(work / filename) == h, 'reference population array changed')
+    require(split_witness(receipt) == receipt['event_split_sha256'], 'reference event split changed')
     return work, receipt
 
 
-def assign_events(db, event_count, reference=None):
-    """Freeze nominal rank-based 90/10 membership; extend it without moving events.
+def split_witness(receipt):
+    """Bind event identities and assignments through the already sealed arrays."""
+    names = ('source_index', 'entry', 'photon', 'event_key', 'train', 'partition', 'split_rank')
+    return digest({name: receipt['arrays'][receipt['array_files'][name]] for name in names})
+
+
+def event_groups(data, tracker):
+    """Check source/entry/photon uniqueness without changing the saved row order.
+
+    The temporary sort indexes are ordinary arrays. All identity columns are
+    already part of the saved population; no separate event store is written.
+    """
+    n = len(data['y'])
+    order = np.lexsort((data['photon'], data['entry'], data['source_index']))
+    first = np.ones(n, np.bool_)
+    for begin in range(1, n, 65536):
+        end = min(n, begin + 65536)
+        current, previous = order[begin:end], order[begin - 1:end - 1]
+        same = (data['source_index'][current] == data['source_index'][previous]) & (
+                data['entry'][current] == data['entry'][previous])
+        require(not np.any(same & (data['photon'][current] == data['photon'][previous])),
+                'duplicate photon identity')
+        require(not np.any(same & (data['event_key'][current] != data['event_key'][previous])),
+                'one source entry has inconsistent event identities')
+        first[begin:end] = ~same
+        tracker.stage('prepare-check-identities', end, n, 'photons')
+    starts = np.flatnonzero(first)
+    return order, starts, order[starts]
+
+
+def assign_events(data, training, tracker, reference=None, *, historical=False):
+    """Freeze the existing rank-based 90/10 membership without a database.
 
     New wider-range events use the nominal last-held-out (hash,event_key)
     cutoff. Consequently the wider event fraction is recorded, not forced to
     exactly 10 percent at the cost of changing common event assignments.
     """
+    order, starts, event_rows = event_groups(data, tracker)
+    keys = data['event_key'][event_rows]
+    key_order = np.argsort(keys, kind='stable')
+    for begin in range(1, len(keys), 65536):
+        end = min(len(keys), begin + 65536)
+        require(not np.any(keys[key_order[begin:end]] == keys[key_order[begin - 1:end - 1]]),
+                'event identity belongs to multiple source entries')
+    nevents = len(keys)
+    if historical:
+        return nevents, None, None, None
+    prefix = '|'.join(('event50', str(training['seed']), training['split_identity'], ''))
+    hashes = np.empty(nevents, np.uint32)
+    for begin in range(0, nevents, 65536):
+        end = min(nevents, begin + 65536)
+        hashes[begin:end] = [int.from_bytes(hashlib.sha256(
+            (prefix + bytes(key).decode('ascii')).encode()).digest()[:4], 'big') for key in keys[begin:end]]
+        tracker.stage('prepare-event-hashes', end, nevents, 'events')
+    reference_receipt = None
     if reference is None:
-        count = max(1, min(event_count - 1, round(event_count * .1)))
-        db.execute('UPDATE events SET holdout=1 WHERE rowid IN '
-                   '(SELECT rowid FROM events ORDER BY hash,event_key LIMIT ?)', (count,))
-        db.commit()
-        return count, None
-    folder, receipt = reference
-    db.execute('ATTACH DATABASE ? AS nominal', ((folder / 'events.sqlite').as_uri() + '?mode=ro',))
-    shared = db.execute('SELECT COUNT(*) FROM nominal.events r JOIN events e '
-                        'ON r.source=e.source AND r.entry=e.entry AND r.hash=e.hash AND r.event_key=e.event_key').fetchone()[0]
-    require(shared == receipt['events'], 'wider population lost or changed a reference event')
-    cutoff = db.execute('SELECT hash,event_key FROM nominal.events WHERE holdout=1 '
-                        'ORDER BY hash DESC,event_key DESC LIMIT 1').fetchone()
-    require(cutoff is not None, 'reference has no held-out events')
-    db.execute('UPDATE events SET holdout = ((hash,event_key) <= (?,?))', cutoff)
-    db.execute('UPDATE events SET holdout = (SELECT r.holdout FROM nominal.events r '
-               'WHERE r.source=events.source AND r.entry=events.entry) '
-               'WHERE EXISTS (SELECT 1 FROM nominal.events r '
-               'WHERE r.source=events.source AND r.entry=events.entry)')
-    differences = db.execute('SELECT COUNT(*) FROM nominal.events r JOIN events e '
-                             'ON r.source=e.source AND r.entry=e.entry WHERE r.holdout<>e.holdout').fetchone()[0]
-    require(differences == 0, 'common event split changed')
-    count = db.execute('SELECT COUNT(*) FROM events WHERE holdout=1').fetchone()[0]
-    db.commit(); db.execute('DETACH DATABASE nominal')
-    return count, dict(input_recipe_sha256=receipt['input_recipe_sha256'],
-                       event_split_sha256=receipt['event_split_sha256'], shared_events=shared,
-                       additional_events=event_count - shared, common_assignment_differences=differences,
-                       method='inherit_nominal_and_extend_hash_cutoff', cutoff=list(cutoff))
+        count = max(1, min(nevents - 1, round(nevents * .1)))
+        ranked = np.lexsort((keys, hashes))
+        held = np.zeros(nevents, np.bool_); held[ranked[:count]] = True
+        last = ranked[count - 1]
+        cutoff = [f'{int(hashes[last]):08x}', bytes(keys[last]).decode('ascii')]
+        del ranked
+    else:
+        cutoff = reference[1]['event_split_cutoff']
+        threshold = int(cutoff[0], 16)
+        held = (hashes < threshold) | ((hashes == threshold) & (keys <= cutoff[1].encode('ascii')))
+        count = int(held.sum())
+    for begin in range(0, len(order), 65536):
+        end = min(len(order), begin + 65536)
+        groups = np.searchsorted(starts, np.arange(begin, end), side='right') - 1
+        data['train'][order[begin:end]] = ~held[groups]
+        tracker.stage('prepare-event-split', end, len(order), 'photons')
+    if reference is not None:
+        folder, receipt = reference
+        names = ('source_index', 'entry', 'event_key', 'train')
+        arrays = {name: np.load(folder / receipt['array_files'][name], mmap_mode='r', allow_pickle=False)
+                  for name in names}
+        sorted_keys = keys[key_order]
+        for begin in range(0, receipt['rows'], 65536):
+            end = min(receipt['rows'], begin + 65536); sl = slice(begin, end)
+            positions = np.searchsorted(sorted_keys, arrays['event_key'][sl])
+            require(np.all(positions < nevents), 'wider population lost a reference event')
+            rows = event_rows[key_order[positions]]
+            require(all(np.array_equal(data[name][rows], arrays[name][sl]) for name in names[:-1]),
+                    'wider population lost or changed a reference event')
+            require(np.array_equal(data['train'][rows], arrays['train'][sl]), 'common event split changed')
+            tracker.stage('prepare-reference-split', end, receipt['rows'], 'photons')
+        shared = receipt['events']
+        reference_receipt = dict(input_recipe_sha256=receipt['input_recipe_sha256'],
+            event_split_sha256=receipt['event_split_sha256'], shared_events=shared,
+            additional_events=nevents - shared, common_assignment_differences=0,
+            method='inherit_nominal_and_extend_hash_cutoff', cutoff=cutoff)
+    return nevents, count, reference_receipt, cutoff
 
 
 def ppg12_rows(data, inputs, recipe, tracker):
@@ -844,12 +909,15 @@ def tracked_rows(item, recipe, tracker, phase):
     require(seen == item['entries'], 'source event count differs from its admitted total')
 
 
-def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=None, projections=None):
+def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=None, projections=None, scratch_root=None):
     """Create/reuse a disk-backed population with duplicate-free source keys.
 
     A wider-range preparation may inherit a verified nominal event split;
     class balance and ET/eta weights still use its own eligible photon rows.
     """
+    if scratch_root is not None and not (Path(work) / 'population.json').exists():
+        return prepare_on_scratch(inputs, recipe, work, scratch_root, split_reference=split_reference,
+                                  progress_identity=progress_identity, projections=projections)
     reference = reference_split(split_reference, inputs, recipe) if split_reference is not None else None
     work = Path(work); work.mkdir(parents=True, exist_ok=True)
     pin = population_identity(inputs, recipe, reference[1]['input_recipe_sha256'] if reference else None)
@@ -871,9 +939,10 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                 require(file_hash(item['path']) == item['sha256'], 'training input changed')
         for filename, h in receipt['arrays'].items():
             require(file_hash(work / filename) == h, 'prepared matrix changed')
-        require(file_hash(work / 'events.sqlite') == receipt['event_split_sha256'], 'prepared event split changed')
+        require(split_witness(receipt) == receipt['event_split_sha256'], 'prepared event split changed')
         return load_population(work, receipt)
-    require(not (work / 'events.sqlite').exists(), 'incomplete population: retain evidence and use a fresh work directory')
+    require(not any(work.glob('*.npy')) and not (work / 'events.sqlite').exists(),
+            'incomplete population: retain evidence and use a fresh work directory')
     counted_inputs = [dict(item, entries=item.get('entries', None)) for item in inputs]
     for item in counted_inputs:
         if item['entries'] is None: item['entries'] = source_entries(metadata(item['path']))
@@ -883,48 +952,35 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
     tracker = WorkProgress(work / 'progress.json', visits,
                            'cached photon visits' if projections is not None else 'event visits', pin, progress_identity)
     tracker.write('prepare-start', input_events=input_events, input_files=len(inputs), eligible_photons=0)
-    db = None
-    total = 0; counts = [0, 0]
+    total = 0; counts = [0, 0]; mapped = {}; bundles = {}
+    if projections is not None:
+        for part in projections.values():
+            key = (str(part['folder']), part.get('index_file', 'projection.json'))
+            require(key not in bundles or bundles[key]['witness'] == part['witness'],
+                    'sources disagree about their shared bundle identity')
+            bundles[key] = part
+    def verify_bundles():
+        for (_, index_file), part in bundles.items():
+            require(projection_witness(part['folder'], index_file=index_file) == part['witness'],
+                    'verified projection changed')
     try:
-        db = sqlite3.connect(work / 'events.sqlite', uri=True)
-        db.execute(f'PRAGMA cache_size=-{PREPARATION_CACHE_KIB}')
-        db.set_progress_handler(lambda: (tracker.beat(), 0)[1], 100000)
-        db.execute('CREATE TABLE events(source TEXT,entry INTEGER,event_key TEXT NOT NULL UNIQUE,hash TEXT,holdout INTEGER DEFAULT 0,PRIMARY KEY(source,entry))')
-        db.execute('CREATE TABLE photons(source TEXT,entry INTEGER,photon INTEGER,PRIMARY KEY(source,entry,photon))')
         def rows(item, phase):
             if projections is not None:
-                return cached_rows(item, recipe, projections[item['logical_id']], tracker, phase)
+                return cached_rows(item, recipe, projections[item['logical_id']], tracker, phase,
+                                   mapped=mapped, verify=False)
             require(file_hash(item['path']) == item['sha256'], 'training input changed')
             return tracked_rows(item, recipe, tracker, phase)
-        committed_rows = 0
+        verify_bundles()
         for item in counted_inputs:
             for x, y, et, cent, entries, photons, keys in rows(item, 'prepare-count'):
-                for entry, photon, key in zip(entries, photons, keys):
-                    key = bytes(key).decode('ascii')
-                    require(len(key) == 32 and all(c in '0123456789abcdef' for c in key),
-                            'invalid historical event identity')
-                    hash_text = '|'.join(('event50', str(recipe['training']['seed']),
-                                          recipe['training']['split_identity'], key))
-                    h = hashlib.sha256(hash_text.encode()).hexdigest()[:8]
-                    db.execute('INSERT INTO events(source,entry,event_key,hash) VALUES(?,?,?,?) '
-                               'ON CONFLICT(source,entry) DO NOTHING', (item['logical_id'], int(entry), key, h))
-                    require(db.execute('SELECT event_key FROM events WHERE source=? AND entry=?',
-                                       (item['logical_id'], int(entry))).fetchone()[0] == key,
-                            'one source entry has inconsistent event identities')
-                    db.execute('INSERT INTO photons VALUES(?,?,?)', (item['logical_id'], int(entry), int(photon)))
                 total += len(y)
                 for klass in (0, 1): counts[klass] += int((y == klass).sum())
-            if total - committed_rows >= PREPARATION_COMMIT_ROWS:
-                db.commit()
-                committed_rows = total
-        db.commit()
+        verify_bundles(); mapped.clear()
         require(total > 0 and min(counts) >= 20, 'nominal training population is empty or missing a class')
         require(tracker.extra['eligible_photons'] == total, 'eligible photon telemetry differs from counted rows')
         tracker.write('prepare-event-split', phase_unit='eligible events')
-        nevents = db.execute('SELECT COUNT(*) FROM events').fetchone()[0]
         historical = recipe['training'].get('split_method') == 'row_stratified'
         require(not historical or reference is None, 'row split cannot inherit an event split')
-        nholdout, reference_receipt = (None, None) if historical else assign_events(db, nevents, reference)
         shapes = {'x': (total, len(recipe['features'])), 'y': (total,), 'et': (total,),
                   'centrality': (total,), 'weights': (total,), 'train': (total,), 'partition': (total,),
                   'source_index': (total,), 'entry': (total,), 'photon': (total,), 'event_key': (total,), 'split_rank': (total,)}
@@ -934,20 +990,25 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
         data = {name: np.lib.format.open_memmap(work / (name + '.npy'), mode='w+',
                                               dtype=types[name], shape=shape) for name, shape in shapes.items()}
         offset = 0
+        verify_bundles()
         for source_index, item in enumerate(counted_inputs):
             for x, y, et, cent, entries, photons, keys in rows(item, 'prepare-fill'):
                 n = len(y); sl = slice(offset, offset + n)
                 data['x'][sl] = x; data['y'][sl] = y; data['et'][sl] = et; data['centrality'][sl] = cent
                 data['source_index'][sl] = source_index; data['entry'][sl] = entries; data['photon'][sl] = photons
+                require(keys.dtype == np.dtype('S32'), 'invalid historical event identity dtype')
+                letters = np.ascontiguousarray(keys).view(np.uint8).reshape(-1, 32)
+                require(np.all(((letters >= ord('0')) & (letters <= ord('9'))) |
+                               ((letters >= ord('a')) & (letters <= ord('f')))), 'invalid historical event identity')
                 data['event_key'][sl] = keys
-                if not historical:
-                    data['train'][sl] = [not db.execute('SELECT holdout FROM events WHERE source=? AND entry=?',
-                                                      (item['logical_id'], int(e))).fetchone()[0] for e in entries]
                 offset += n
             if projections is None:
                 require(file_hash(item['path']) == item['sha256'], 'input changed during population preparation')
+        verify_bundles(); mapped.clear()
         require(offset == total, 'training population changed between passes')
         require(tracker.extra.get('matrix_rows_written', 0) == total, 'matrix photon telemetry differs from filled rows')
+        nevents, nholdout, reference_receipt, cutoff = assign_events(data, recipe['training'], tracker, reference,
+                                                                 historical=historical)
         flattening = None
         if historical:
             retained, flattening = ppg12_rows(data, counted_inputs, recipe, tracker)
@@ -961,6 +1022,11 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                     target[begin:end] = source[retained[begin:end]]
                     tracker.stage('prepare-ppg12-compact-' + name, end, len(retained), 'photons')
                 target.flush(); data[name] = target
+                # The unselected matrix is temporary and has no published
+                # consumer; keep only the compact scientific array.
+                original_file = Path(source.filename)
+                source._mmap.close()
+                original_file.unlink()
             total = len(retained); counts = [int((data['y'] == k).sum()) for k in (0, 1)]
             partition, rank = row_partition(data['y'], recipe['training'])
             data['partition'][:] = partition; data['split_rank'][:] = rank
@@ -986,7 +1052,7 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                        partition_counts=[int((data['partition'] == k).sum()) for k in (0, 1, 2)],
                        array_files=files, background_flattening=flattening,
                        definition=population_definition(recipe), split_reference=reference_receipt,
-                       event_split_sha256=sealed_hash(work / 'events.sqlite'),
+                       event_split_cutoff=cutoff,
                        event_key_convention='sha256_128(lane|sample|run|segment|producer_sequence)',
                        split_order='sha256_32(event50|seed|split_identity|event_key), then event_key',
                        arrays=array_hashes,
@@ -995,13 +1061,46 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                        event_visits=0 if projections is not None else visits,
                        cached_photon_visits=visits if projections is not None else 0,
                        projection_receipts=projection_pins)
+        receipt['event_split_sha256'] = split_witness(receipt)
         save_json(done, receipt)
         tracker.write('complete', tracker.total, status='PASS')
     except BaseException as error:
         tracker.fail(error)
         raise
-    finally:
-        if db is not None: db.close()
+    return load_population(work, receipt)
+
+
+def prepare_on_scratch(inputs, recipe, work, scratch_root, **options):
+    """Prepare on assigned worker storage, then publish only the final arrays.
+
+    The scientific receipt is written last. Interrupted publication remains
+    visibly incomplete and cannot be reused or overwritten by another attempt.
+    """
+    import tempfile
+    staging = Path(scratch_root).absolute(); work = Path(work)
+    require(staging.is_dir() and not staging.is_symlink() and staging.resolve() == staging,
+            'preparation scratch must be an existing physical directory')
+    work.mkdir(parents=True, exist_ok=True)
+    require(not any(work.glob('*.npy')) and not (work / 'events.sqlite').exists(),
+            'incomplete population: retain evidence and use a fresh work directory')
+    with tempfile.TemporaryDirectory(prefix='photonid-population-', dir=staging) as directory:
+        local = Path(directory)
+        population = prepare(inputs, recipe, local, **options)
+        receipt = population.receipt
+        total = sum((local / filename).stat().st_size for filename in receipt['arrays'])
+        tracker = WorkProgress(local / 'publication-progress.json', total, 'bytes',
+                               receipt['input_recipe_sha256'], options.get('progress_identity'))
+        tracker.write('prepare-publish', 0)
+        for filename in receipt['arrays']:
+            checksum = hashlib.sha256()
+            with (local / filename).open('rb') as source, (work / filename).open('xb') as destination:
+                while block := source.read(8 * 1024 * 1024):
+                    destination.write(block)
+                    checksum.update(block)
+                    tracker.write('prepare-publish', tracker.processed + len(block))
+            require(checksum.hexdigest() == receipt['arrays'][filename], 'prepared array changed during publication')
+        save_json(work / 'population.json', receipt)
+        tracker.write('complete', total, status='PASS')
     return load_population(work, receipt)
 
 
