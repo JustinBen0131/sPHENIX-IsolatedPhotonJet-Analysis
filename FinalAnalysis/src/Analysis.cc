@@ -9,6 +9,7 @@
    fit; every toy is refitted and unfolded, and the statistical uncertainty is the central 68% half width of the toy
    results. results.root holds every quantity the figures draw, so drawing never recomputes. */
 #include "FinalAnalysis.h"
+#include "Progress.h"
 
 #include <algorithm>
 #include <cmath>
@@ -142,17 +143,19 @@ struct Toys {
   int exceptions = 0, branchChanges = 0;
 };
 
-template <class Draw> Toys dataToys(Draw draw, const Window &w, const SystemSettings &sys, const Corrected &central, int n) {
+template <class Draw> Toys dataToys(Draw draw, const Window &w, const SystemSettings &sys, const Corrected &central, int n,
+                                  AnalysisProgress &progress) {
   Toys t;
   for (int i = 0; i < n; ++i) {
     try {
       const Corrected c = correct(draw(), w, sys);
-      if (c.physical != central.physical) { ++t.branchChanges; continue; }
+      if (c.physical != central.physical) { ++t.branchChanges; progress.advance(); continue; }
       t.photons.push_back(c.photons);
       t.pairs.push_back(matrixToCells(c.pairs));
     } catch (const std::exception &) {
       ++t.exceptions;
     }
+    progress.advance();
   }
   return t;
 }
@@ -239,7 +242,8 @@ struct ClosureMode {
    source hash within each sample and resampled independently. Uncertainty
    is the spread of unfolded minus truth across those resamples. */
 std::map<std::string, ClosureMode> estimatorClosure(const Settings &s, const SystemSettings &sys, const std::vector<SourceWindow> &sources,
-                                                    const TMatrixD &dataCovariance, const TVectorD &dataPhotons, const Window &w) {
+                                                    const TMatrixD &dataCovariance, const TVectorD &dataPhotons, const Window &w,
+                                                    AnalysisProgress &progress) {
   const Edges &xj = s.xjEdges;
   const int nX = xj.size() - 1, nPt = sys.photonEdges.size() - 1;
   std::map<int, std::vector<size_t>> bySample;
@@ -282,6 +286,7 @@ std::map<std::string, ClosureMode> estimatorClosure(const Settings &s, const Sys
   const std::vector<std::tuple<std::string, const std::vector<double> *, const std::vector<double> *>> modes = {
       {"full", &all, &all}, {"A_to_B", &a, &b}, {"B_to_A", &b, &a}};
   for (const auto &[name, train, test] : modes) {
+    progress.phase(sys.name + "/closure_" + name, s.closureToys);
     ClosureMode m;
     const auto central = onePass(*train, *test);
     m.unfolded.ResizeTo(central.first), m.unfolded = central.first;
@@ -295,6 +300,7 @@ std::map<std::string, ClosureMode> estimatorClosure(const Settings &s, const Sys
       } catch (const std::exception &) {  /* an unconverged fit or a resample the unfolding cannot take */
         ++m.failed;
       }
+      progress.advance();
     }
     m.toys = differences.size();
     m.sigma.ResizeTo(nPt + 1, nX), m.pull.ResizeTo(nPt + 1, nX);
@@ -336,7 +342,8 @@ TH2D *scanHistogram(const char *name, const IterationScan &scan, int selected) {
 
 /* One system's ordered calculation: checked inputs, corrections, prior/iteration selection, unfolding and toys.
    Event and source resampling preserve the correlations needed by the final per-photon uncertainty. */
-void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 &rng) {
+void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 &rng, AnalysisProgress &progress) {
+  progress.phase(sys.name + "/inputs", 1);
   resolveFromQA(s, sys);
   const bool events = s.dataToyModel == "event_bootstrap", dataDriven = s.combinatoricMethod == "data_dphi";
   const EventTable table = events ? readEvents(s, sys) : EventTable();
@@ -374,30 +381,36 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
         worst = std::max(worst, std::fabs(sum.pairResponse(i, j) - w.pairResponse(i, j))), scale = std::max(scale, std::fabs(w.pairResponse(i, j)));
     if (worst > 1e-9 * scale) throw std::runtime_error(sys.name + ": the per-source contributions do not add up to the package response");
   }
+  progress.advance();
 
   /* the frozen iteration rule, on its own data and response toys, with the simulated prior */
   std::unique_ptr<TH2D> rulePairs, rulePhotons;
   if (rule) {
     TRandom3 dataDraw(s.ruleDataSeed), responseDraw(s.ruleResponseSeed);
-    const Toys scanToys = dataToys([&]() { return dataToy(dataDraw); }, w, sys, c, s.ruleDataToys);
+    progress.phase(sys.name + "/rule_data_toys", s.ruleDataToys);
+    const Toys scanToys = dataToys([&]() { return dataToy(dataDraw); }, w, sys, c, s.ruleDataToys, progress);
     std::vector<ResponseToy> pairToys, photonToys;
     std::vector<TVectorD> responsePhotons;
+    progress.phase(sys.name + "/rule_response_toys", s.ruleResponseToys);
     for (int t = 0; t < s.ruleResponseToys; ++t) {
       try {
         const Window wt = combine(sources, occurrences(sources, responseDraw));
         const Corrected ct = correct(m, wt, sys);
-        if (ct.physical != c.physical) continue;
+        if (ct.physical != c.physical) { progress.advance(); continue; }
         pairToys.push_back(ResponseToy{pairProblem(wt), matrixToCells(ct.pairs)});
         photonToys.push_back(ResponseToy{photonProblem(wt), ct.photons});
         responsePhotons.push_back(ct.photons);
       } catch (const std::exception &) {
       }
+      progress.advance();
     }
+    progress.phase(sys.name + "/rule_scan", 1);
     std::vector<bool> pairMask(nPt * nX), photonMask(nPt, true);
     for (int i = 0; i < nPt * nX; ++i) pairMask[i] = xj[i % nX] >= sys.reportedLow - 1e-9 && xj[i % nX + 1] <= s.reportedHigh + 1e-9;
     const IterationScan pairScan = scanIterations(pairProblem(w), cells, scanToys.pairs, s.ruleDataToys, pairToys, s.ruleResponseToys, pairMask);
     const IterationScan photonScan = scanIterations(photonProblem(w), c.photons, scanToys.photons, s.ruleDataToys, photonToys, s.ruleResponseToys, photonMask);
     const int pairK = pairScan.selected, photonK = photonRefoldSelection(photonScan, c.photons, scanToys.photons, responsePhotons);
+    progress.advance();
     rulePairs.reset(scanHistogram("iteration_rule_pairs", pairScan, pairK));
     rulePhotons.reset(scanHistogram("iteration_rule_photons", photonScan, photonK));
     if (!pairK || !photonK) {
@@ -414,7 +427,8 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
   }
 
   /* the data toys and the covariance of the corrected pairs */
-  const Toys toys = dataToys([&]() { return dataToy(rng); }, w, sys, c, s.dataToys);
+  progress.phase(sys.name + "/data_toys", s.dataToys);
+  const Toys toys = dataToys([&]() { return dataToy(rng); }, w, sys, c, s.dataToys, progress);
   if (toys.pairs.size() < 2) throw std::runtime_error(sys.name + ": fewer than two accepted data toys");
   const TMatrixD cov = covariance(toys.pairs);
 
@@ -431,6 +445,7 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
     return start;
   };
 
+  progress.phase(sys.name + "/central_result", 1);
   const PriorFit fit = fitOf(w, cells, c.photons);
   const TVectorD weights = startWeights(fit);
   TVectorD refolded;
@@ -440,11 +455,13 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
   const TVectorD reco = perPhoton(cells, c.photons, xj);
   const TVectorD simulationPrior = perPhoton(unfoldPairsWithPrior(cells, w, sys.pairIterations, ones(nX), s.fakeModel),
                                              photons, xj);
+  progress.advance();
 
   /* every accepted toy refitted and unfolded: the central 68% half width */
   std::vector<std::vector<double>> spread(nX);
   std::vector<TVectorD> dataRows, responseRows;
   int finite = 0;
+  progress.phase(sys.name + "/data_unfolding", s.dataToys);
   for (size_t i = 0; i < toys.pairs.size(); ++i) {
     try {
       const TVectorD start = startWeights(fitOf(w, toys.pairs[i], toys.photons[i]));
@@ -452,13 +469,15 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
                                    unfoldPhotons(toys.photons[i], w, sys.photonIterations), xj);
       bool ok = true;
       for (int x = 0; x < nX; ++x) ok = ok && std::isfinite(r[x]);
-      if (!ok) continue;
+      if (!ok) { progress.advance(); continue; }
       for (int x = 0; x < nX; ++x) spread[x].push_back(r[x]);
       dataRows.push_back(r);
       ++finite;
     } catch (const std::exception &) {
     }
+    progress.advance();
   }
+  progress.advance(s.dataToys - static_cast<long long>(toys.pairs.size()), true);
   if (finite < 2) throw std::runtime_error(sys.name + ": fewer than two finite toy results");
   TVectorD dataHalf(nX), responseHalf(nX), statVariance(nX);
   for (int x = 0; x < nX; ++x) dataHalf[x] = 0.5 * (quantile(spread[x], 0.84) - quantile(spread[x], 0.16));
@@ -469,23 +488,25 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
   if (s.responseToys > 0) {
     TRandom3 draw(s.responseSeed);
     std::vector<std::vector<double>> rows(nX);
+    progress.phase(sys.name + "/response_toys", s.responseToys);
     for (int t = 0; t < s.responseToys; ++t) {
       try {
         const Window wt = combine(sources, occurrences(sources, draw));
         const Corrected ct = correct(m, wt, sys);
-        if (ct.physical != c.physical) continue;
+        if (ct.physical != c.physical) { progress.advance(); continue; }
         ++responseAccepted;
         const TVectorD cellsT = matrixToCells(ct.pairs);
         const TVectorD r = perPhoton(unfoldPairsWithPrior(cellsT, wt, sys.pairIterations, startWeights(fitOf(wt, cellsT, ct.photons)), s.fakeModel),
                                      unfoldPhotons(ct.photons, wt, sys.photonIterations), xj);
         bool ok = true;
         for (int x = 0; x < nX; ++x) ok = ok && std::isfinite(r[x]);
-        if (!ok) continue;
+        if (!ok) { progress.advance(); continue; }
         for (int x = 0; x < nX; ++x) rows[x].push_back(r[x]);
         responseRows.push_back(r);
         ++responseFinite;
       } catch (const std::exception &) {
       }
+      progress.advance();
     }
     if (responseFinite < 2) throw std::runtime_error(sys.name + ": fewer than two finite response toys");
     for (int x = 0; x < nX; ++x) responseHalf[x] = 0.5 * (quantile(rows[x], 0.84) - quantile(rows[x], 0.16));
@@ -496,16 +517,19 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
   const TMatrixD dataCovariance = robustCovariance(dataRows, reportedXj);
   const TMatrixD responseCovariance = responseRows.size() >= 2 ? robustCovariance(responseRows, reportedXj) : TMatrixD(nX, nX);
   const std::map<std::string, ClosureMode> closure =
-      s.closureToys > 0 ? estimatorClosure(s, sys, sources, cov, c.photons, w) : std::map<std::string, ClosureMode>();
+      s.closureToys > 0 ? estimatorClosure(s, sys, sources, cov, c.photons, w, progress) : std::map<std::string, ClosureMode>();
 
   /* iteration scans (joint: photons at their nominal iterations; photons alone) and the simulation closure */
   TMatrixD scanXj(s.scanIterations, nX), scanPhotons(s.scanIterations, nPt);
+  progress.phase(sys.name + "/iteration_scan", s.scanIterations);
   for (int k = 1; k <= s.scanIterations; ++k) {
     const TVectorD xk = perPhoton(unfoldPairsWithPrior(cells, w, k, weights, s.fakeModel), photons, xj);
     const TVectorD gk = unfoldPhotons(c.photons, w, k);
     for (int x = 0; x < nX; ++x) scanXj(k - 1, x) = xk[x];
     for (int i = 0; i < nPt; ++i) scanPhotons(k - 1, i) = gk[i];
+    progress.advance();
   }
+  progress.phase(sys.name + "/write_result", 1);
   const TVectorD closurePhotonReco = columnSums(w.photonResponse) + w.photonFakes;
   const TVectorD closurePairReco = columnSums(w.pairResponse) + w.pairFakes;
   const TVectorD closurePhotons = bayes(closurePhotonReco, w.photonResponse, w.photonMisses, sys.photonIterations,
@@ -567,6 +591,7 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
             << " finite)";
   if (fitted) std::cout << ", prior theta " << join(fit.theta) << " chi2/ndf " << fit.chi2 << "/" << fit.ndf;
   std::cout << ", reported xJ " << sys.reportedLow << "-" << s.reportedHigh << std::endl;
+  progress.advance();
 }
 
 }  /* namespace */
@@ -575,13 +600,22 @@ void runSystem(const Settings &s, SystemSettings sys, TDirectory *out, TRandom3 
    replaced. */
 int run(const Settings &s) {
   if (!gSystem->AccessPathName(s.output.c_str())) throw std::runtime_error(s.output + " exists; choose a new output");
+  long long work = 2;  // input binding and final publication
+  for (const auto &sys : s.systems) {
+    work += 2LL * s.dataToys + s.responseToys + 3LL * s.closureToys + s.scanIterations + 3;
+    if (sys.pairIterations == 0 || sys.photonIterations == 0) work += s.ruleDataToys + s.ruleResponseToys + 1;
+  }
+  AnalysisProgress progress(s.name, work);
+  progress.phase("input_binding", 1);
   const std::string coverage = inputCoverage(s);
   const std::string render = renderMetadata(s);
+  progress.advance();
   const std::string partial = s.output + ".partial";
   std::unique_ptr<TFile> out(TFile::Open(partial.c_str(), "RECREATE"));
   if (!out || out->IsZombie()) throw std::runtime_error("cannot write " + partial);
   TRandom3 rng(s.seed);
-  for (const auto &sys : s.systems) runSystem(s, sys, out->mkdir(sys.name.c_str()), rng);
+  for (const auto &sys : s.systems) runSystem(s, sys, out->mkdir(sys.name.c_str()), rng, progress);
+  progress.phase("publication", 1);
   out->cd();
   TObjString(s.name.c_str()).Write("analysis");
   TObjString(coverage.c_str()).Write("input_coverage");
@@ -589,6 +623,7 @@ int run(const Settings &s) {
   out->Close();
   if (gSystem->Rename(partial.c_str(), s.output.c_str()) != 0) throw std::runtime_error("cannot move results into place");
   renderProductReceipt(s.output, render);
+  progress.advance(); progress.finish();
   std::cout << "[FinalAnalysis] wrote " << s.output << std::endl;
   return 0;
 }
