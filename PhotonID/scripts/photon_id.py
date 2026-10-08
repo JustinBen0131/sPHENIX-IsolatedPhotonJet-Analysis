@@ -781,7 +781,7 @@ def train_release(inputs, config, system, name, args, *, simulation=None, popula
         # QA may finish before manifest hashing and native release loading.
         # Refresh its existing terminal counter only after publication passes.
         Models.WorkProgress(folder / 'progress.json', 1, 'QA products',
-            'qa-' + system.lower() + '-' + r['name'], identity).write('release-complete', 1, status='PASS')
+            'qa-' + system.lower() + '-' + r['name'], identity).write('complete', 1, status='PASS')
     return dict(status='PASS', calibration_quality=calibration_quality,
                 performance_quality=performance_quality, **plan)
 
