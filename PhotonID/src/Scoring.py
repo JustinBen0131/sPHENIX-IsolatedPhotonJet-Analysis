@@ -125,8 +125,13 @@ def score_metadata(old, item, manifest):
     return meta
 
 
-def prove(original, output, folder, manifest, *, model_predictors=None, input_item=None, tracker=None):
-    """One native preservation proof and one saved-score read for all selected models."""
+def prove(original, output, folder, manifest, *, model_predictors=None, input_item=None, tracker=None,
+          _written_proof=None):
+    """Check preservation and saved scores for every selected model.
+
+    A fresh writer supplies its just-completed native proof in-process. Reopened
+    candidates require a new proof; neither path skips saved-score verification.
+    """
     releases = selected_releases(folder, manifest)
     branches = [m['score_branch'] for _, m in releases]
     models = model_predictors if model_predictors is not None else [predictors(path, m) for path, m in releases]
@@ -142,8 +147,15 @@ def prove(original, output, folder, manifest, *, model_predictors=None, input_it
             require(receipt == expected['photon_models'][model['name']], 'saved score source/version receipt differs')
         expected.setdefault('photon_models', {})[model['name']] = receipt
     expected['schema']['counters'] = new_meta['schema']['counters']
-    preservation = json.loads(str(run(eventtree().provePreserved, json.dumps(dict(
-        original=str(original), candidate=str(output), added=branches, metadata=expected)))))
+    require(new_meta == expected, 'saved augmentation metadata differs from the declared change')
+    preservation = _written_proof if _written_proof is not None else json.loads(str(run(
+        eventtree().provePreserved, json.dumps(dict(original=str(original), candidate=str(output),
+                                                  added=branches, metadata=expected)))))
+    require(isinstance(preservation, dict) and
+            set(preservation) == {'status', 'entries', 'protected_branches'} and
+            preservation['status'] == 'PASS' and preservation['entries'] == old_meta['schema']['entries'] and
+            type(preservation['protected_branches']) is int and preservation['protected_branches'] > 0,
+            'native preservation proof is incomplete')
     with uproot.open(output) as after:
         tree = after['eventTree']
         for arrays, chunk_meta in event_chunks(original, branches=input_branches(releases)):
@@ -175,6 +187,7 @@ def augment_file(item, folder, manifest, candidate, *, code_root, model_predicto
     tracker = WorkProgress(candidate.parent / 'progress.json', 2 * total, 'scoring event visits',
                            item['logical_id'], progress_identity, skip_total=total if reused else 0)
     models = model_predictors if model_predictors is not None else [predictors(path, m) for path, m in releases]
+    written_proof = None
     try:
         tracker.write('reuse-candidate' if reused else 'copy-source', total if reused else 0,
                       skip_processed=total if reused else 0, models=[m['name'] for m in manifests])
@@ -195,10 +208,12 @@ def augment_file(item, folder, manifest, candidate, *, code_root, model_predicto
                     run(addition.append, branch, len(counts), flat, len(flat), counts)
                 run(addition.commit, len(arrays))
                 done += len(arrays); tracker.write('score', done)
-            run(addition.finish)
+            # finish already compares all protected payloads. Reuse that proof
+            # before closing this invocation instead of repeating the full scan.
+            written_proof = json.loads(str(run(addition.finish)))
         tracker.write('preserve-fields', total)
         proof = prove(item['path'], candidate, folder, manifest, model_predictors=models,
-                      input_item=item, tracker=tracker)
+                      input_item=item, tracker=tracker, _written_proof=written_proof)
         tracker.write('seal-artifact')
         require(file_hash(item['path']) == item['sha256'], 'input changed during scoring')
         receipt = dict(schema='PhotonIDAugmentationReceiptV1', status='PASS', logical_source_id=item['logical_id'],
