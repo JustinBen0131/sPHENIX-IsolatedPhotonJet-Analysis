@@ -241,7 +241,7 @@ def gain(folder, recipe, cells):
 
 
 def feature_table(population, recipe, gains, *, tracker=None):
-    """Save raw and weighted class moments; raw separation is Figure 41's default."""
+    """Save raw and learner-weighted class moments for explicit training-feature QA."""
     indices = {k: np.flatnonzero(population.y == k) for k in (0, 1)}
     rows = []
     for index, name in enumerate(recipe['features']):
