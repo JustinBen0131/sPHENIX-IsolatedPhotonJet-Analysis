@@ -208,7 +208,11 @@ def augment_file(item, folder, manifest, candidate, *, code_root, model_predicto
                 for branch, values in scores.items():
                     counts = np.ascontiguousarray(ak.to_numpy(ak.num(values)), dtype=np.longlong)
                     flat = np.ascontiguousarray(ak.to_numpy(ak.flatten(values)), dtype=np.float64)
-                    run(addition.append, branch, len(counts), flat, len(flat), counts)
+                    # PyROOT cannot convert a zero-length NumPy buffer to a
+                    # pointer. Supply addressable storage; valueCount remains
+                    # zero, so native append writes the unchanged empty rows.
+                    buffer = flat if len(flat) else np.zeros(1, dtype=np.float64)
+                    run(addition.append, branch, len(counts), buffer, len(flat), counts)
                 run(addition.commit, len(arrays))
                 done += len(arrays); tracker.write('score', done)
             # finish already compares all protected payloads. Reuse that proof
