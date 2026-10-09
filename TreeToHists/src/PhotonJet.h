@@ -749,6 +749,75 @@ inline Profile validateSelectionInput(TFile& file, Profile p) {
 /* The score has the same photon-aligned interface whether it is retained in
    eventTree or evaluated from a sealed ROOT model. H70 float32 inputs are
    already stored by TreeProduction; this reader adds no feature algorithm. */
+class NativeFeatureMetadata {
+  struct Range { Long64_t begin,end; SelectionJson metadata,maps; };
+  SelectionJson contract_;
+  std::vector<Range> ranges_;
+  mutable size_t range_=0,view_=0;
+  mutable bool checked_=false;
+
+  const Range &at(Long64_t entry) const {
+    if (entry<0 || ranges_.empty()) throw std::runtime_error("native model metadata has no source entry");
+    size_t next=range_;
+    if (entry<ranges_[next].begin) next=0;
+    while (next+1<ranges_.size() && entry>=ranges_[next].end) ++next;
+    if (entry<ranges_[next].begin || entry>=ranges_[next].end)
+      throw std::runtime_error("native model source metadata does not cover entry");
+    if (next!=range_) {range_=next;checked_=false;}
+    return ranges_[range_];
+  }
+ public:
+  NativeFeatureMetadata(SelectionJson contract,const SelectionJson &schema,const SelectionJson &constants,
+                        const SelectionJson &consolidation,Long64_t entries) : contract_(std::move(contract)) {
+    if (contract_.at("order").size()!=contract_.at("count").get<size_t>())
+      throw std::runtime_error("native model feature order/count differs");
+    if (consolidation.is_null()) {
+      ranges_.push_back({0,entries,{{"schema",schema},{"constants",constants}},SelectionJson::object()});
+      return;
+    }
+    Long64_t end=0;
+    for (const auto &chunk : consolidation.at("chunks")) {
+      const Long64_t begin=chunk.at("entry_begin"),stop=chunk.at("entry_end");
+      if (begin!=end || stop<begin || stop>entries)
+        throw std::runtime_error("native model source metadata ranges overlap or have gaps");
+      if (stop>begin) ranges_.push_back({begin,stop,chunk.at("original_meta"),
+                                       chunk.value("code_maps",SelectionJson::object())});
+      end=stop;
+    }
+    if (end!=entries || consolidation.at("expected_events")!=entries)
+      throw std::runtime_error("native model source metadata coverage differs");
+  }
+  size_t view(Long64_t entry) const {
+    const auto &meta=at(entry).metadata;
+    if (!checked_) {
+      const auto &constants=meta.at("constants");
+      const auto names=constants.at("showerViews.definition_name").get<std::vector<std::string>>();
+      const std::string view=contract_.at("view");
+      if (names.size()!=7 || std::count(names.begin(),names.end(),view)!=1)
+        throw std::runtime_error("native model shower-view dictionary differs");
+      view_=std::find(names.begin(),names.end(),view)-names.begin();
+      const auto &strides=meta.contains("strides") ? meta.at("strides") : meta.at("schema").at("strides");
+      if (strides.at("shv_features")!=contract_.at("count") ||
+          constants.at("showerViews.semantic_sha256").at(view_)!=contract_.at("view_semantic_sha256"))
+        throw std::runtime_error("native model feature count or semantics differ");
+      const uint64_t bits=constants.at("showerViews.floor_gev").at(view_).at("f64").get<uint64_t>();
+      double floor=0;std::memcpy(&floor,&bits,sizeof floor);
+      if (floor!=contract_.at("floor_gev").get<double>())
+        throw std::runtime_error("native model H70 tower floor differs");
+      checked_=true;
+    }
+    return view_;
+  }
+  int code(Long64_t entry,const char *name,int value) const {
+    const auto &maps=at(entry).maps;
+    if (!maps.contains(name)) return value;
+    const auto mapping=maps.at(name).get<std::vector<int>>();
+    if (std::count(mapping.begin(),mapping.end(),value)!=1)
+      throw std::runtime_error("native model source code mapping is missing or ambiguous");
+    return std::find(mapping.begin(),mapping.end(),value)-mapping.begin();
+  }
+};
+
 class PhotonScores {
 #if ROOT_VERSION_CODE >= ROOT_VERSION(6,32,0)
   using BDT=TMVA::Experimental::RBDT;
@@ -764,7 +833,8 @@ class PhotonScores {
   std::unique_ptr<TTreeReaderValue<int>> record_,ready_,vertexValid_,terminal_;
   std::vector<Cell> cells_;
   SelectionJson domain_;
-  size_t view_=0,stride_=0;
+  std::unique_ptr<NativeFeatureMetadata> metadata_;
+  size_t stride_=0;
   bool auau_=false;
   std::function<bool(size_t)> nativeCandidate_;
   mutable Long64_t entry_=-2;
@@ -773,12 +843,16 @@ class PhotonScores {
   void evaluate() const {
     if (entry_==reader_.GetCurrentEntry()) return;
     entry_=reader_.GetCurrentEntry(); const size_t n=et_->GetSize();
+    values_.assign(n,std::numeric_limits<double>::quiet_NaN());
+    if (!n) return;  // photon-free chunks need no shower-view dictionary
+    const size_t view=metadata_->view(entry_);
     if (eta_->GetSize()!=n || features_->GetSize()!=n*7*stride_ || finite_->GetSize()!=n*7)
       throw std::runtime_error("native H70 photon/features alignment differs");
     const double z=**vertex_,cent=**centrality_;
     if (auau_ && std::isfinite(cent) && cent!=std::round(cent)) throw std::runtime_error("native model centrality is not an integer bin");
-    values_.assign(n,std::numeric_limits<double>::quiet_NaN());
-    const bool event=**record_==0 && **ready_==1 && **vertexValid_==1 && **terminal_==0;
+    const bool event=metadata_->code(entry_,"evt_record",**record_)==0 &&
+      metadata_->code(entry_,"evt_nodes_ready",**ready_)==1 && metadata_->code(entry_,"vtx_valid",**vertexValid_)==1 &&
+      metadata_->code(entry_,"evt_terminal_status",**terminal_)==0;
     std::vector<float> input(stride_);
     for (size_t i=0;i<n;++i) {
       if (nativeCandidate_ && !nativeCandidate_(i)) continue;
@@ -786,9 +860,10 @@ class PhotonScores {
       if (!event || !(et>=domain_.at("et_min").get<double>() && et<domain_.at("et_max_exclusive").get<double>() &&
           std::abs(eta)<domain_.at("eta_abs_max").get<double>() && std::abs(z)<domain_.at("vertex_abs_max_cm").get<double>()) ||
           (auau_ && !(cent>=domain_.at("centrality_min").get<double>() && cent<domain_.at("centrality_max_exclusive").get<double>()))) continue;
-      if ((*finite_)[7*i+view_]!=1) throw std::runtime_error("native model has invalid features inside its domain");
+      if (metadata_->code(entry_,"shv_finite_feature_state",(*finite_)[7*i+view])!=1)
+        throw std::runtime_error("native model has invalid features inside its domain");
       for (size_t j=0;j<stride_;++j) {
-        input[j]=(*features_)[(7*i+view_)*stride_+j];
+        input[j]=(*features_)[(7*i+view)*stride_+j];
         if (!std::isfinite(input[j])) throw std::runtime_error("nonfinite native model feature");
       }
       const Cell *selected=nullptr;
@@ -815,16 +890,11 @@ class PhotonScores {
     const auto &contract=native.at("feature_contract"); domain_=native.at("domain"); auau_=profile.system==System::auau;
     const auto constants=SelectionJson::parse(metaText(file,"meta/constants"));
     const auto schema=SelectionJson::parse(metaText(file,"meta/schema"));
-    const auto names=constants.at("showerViews.definition_name").get<std::vector<std::string>>();
-    const std::string view=contract.at("view");
-    if (names.size()!=7 || std::count(names.begin(),names.end(),view)!=1) throw std::runtime_error("native model shower-view dictionary differs");
-    view_=std::find(names.begin(),names.end(),view)-names.begin();stride_=contract.at("count");
-    if (schema.at("strides").at("shv_features")!=stride_ || contract.at("order").size()!=stride_ ||
-        constants.at("showerViews.semantic_sha256").at(view_)!=contract.at("view_semantic_sha256"))
-      throw std::runtime_error("native model feature count or semantics differ");
-    const uint64_t bits=constants.at("showerViews.floor_gev").at(view_).at("f64").get<uint64_t>();double floor=0;
-    std::memcpy(&floor,&bits,sizeof floor);
-    if (floor!=contract.at("floor_gev").get<double>()) throw std::runtime_error("native model H70 tower floor differs");
+    const auto consolidation=file.Get("meta/consolidation") ?
+      SelectionJson::parse(metaText(file,"meta/consolidation")) : SelectionJson();
+    metadata_=std::make_unique<NativeFeatureMetadata>(contract,schema,constants,consolidation,
+                                                    reader.GetTree()->GetEntries());
+    stride_=contract.at("count");
     eta_=std::make_unique<TTreeReaderArray<double>>(reader,"pho_eta");
     features_=std::make_unique<TTreeReaderArray<float>>(reader,"shv_features");finite_=std::make_unique<TTreeReaderArray<int>>(reader,"shv_finite_feature_state");
     vertex_=std::make_unique<TTreeReaderValue<double>>(reader,"vtx_z");centrality_=std::make_unique<TTreeReaderValue<double>>(reader,"cent_value");

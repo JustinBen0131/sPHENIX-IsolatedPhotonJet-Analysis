@@ -146,7 +146,10 @@ def prove(original, output, folder, manifest, *, model_predictors=None, input_it
         if input_item:
             require(receipt == expected['photon_models'][model['name']], 'saved score source/version receipt differs')
         expected.setdefault('photon_models', {})[model['name']] = receipt
-    expected['schema']['counters'] = new_meta['schema']['counters']
+    # Only the selected score counters may be added. Adopting the saved map
+    # wholesale would also accept drift in source or fraction declarations.
+    for branch in branches:
+        expected['schema']['counters'][branch] = 'n_' + branch
     require(new_meta == expected, 'saved augmentation metadata differs from the declared change')
     preservation = _written_proof if _written_proof is not None else json.loads(str(run(
         eventtree().provePreserved, json.dumps(dict(original=str(original), candidate=str(output),
