@@ -1,38 +1,140 @@
-# The same sources as systematics.yaml, bound to the declared pipeline variations.
-# Existing manual systematics.yaml commands still take ordinary results-file paths.
+# Results are bound by the native pipeline's existing @variation mechanism.
+# Components are independent boundary prescriptions within a displayed source, with
+# alternatives enveloped inside each prescription and components summed in quadrature.
+# pp tight/non-tight: PPG12 sections5.3.1/5.3.2; one-sided absolute deviation symmetrized.
+# AuAu non-tight lower0.2/upper90 are delegated choices, not prescriptions quoted from PPG12.
+# Isolation remains independent of photon ID. EMR no-extra/wider are envelope alternatives.
+# Purity_nonclosure stays diagnostic; background_correlation is the sole photon-purity source.
+# Timing and AuAu JES are deferred by Justin; they are unmeasured, never numerical zero.
+# The pipeline binds the coverage template @nominal marker to the produced nominal.root hash.
+# Its reference-to-page comparison remains a separate acceptance check.
 Systematics:
   Nominal: '@nominal'
   Output: systematics.root
-  Sources: [prior_power, prior_form, iterations, combinatoric_shape, background_correlation, purity_nonclosure, jet_energy_scale]
-  Ratios: [auau_cent0_20/pp, auau_cent20_50/pp, auau_cent50_80/pp]
-prior_power:
+  Coverage: pipeline_coverage.json
+  Sources:
+  - prior
+  - iterations
+  - combinatoric_sideband
+  - background_correlation
+  - jet_energy_scale
+  - jet_energy_resolution
+  - electromagnetic_scale
+  - electromagnetic_resolution
+  - photon_id_selection
+  - isolation_selection
+  - centrality_weight
+  Ratios:
+  - auau_cent0_20/pp
+  - auau_cent20_50/pp
+  - auau_cent50_80/pp
+prior:
   Family: unfolding
   Correlated: 1
-  Up: '@prior_p15'
-  Down: '@prior_p05'
-prior_form:
-  Family: unfolding
-  Correlated: 1
-  Alternative: '@prior_exp2'
+  Alternative: '@prior_half'
 iterations:
   Family: unfolding
   Correlated: 0
-  Alternatives: [minus=@k_minus, plus=@k_plus]
+  Alternatives:
+  - minus=@k_minus
+  - plus=@k_plus
   Representative: plus
-combinatoric_shape:
+combinatoric_sideband:
   Family: combinatoric
   Correlated: 0
-  Alternative: '@combinatoric_flat'
+  Alternatives:
+  - low=@sideband_low
+  - mid=@sideband_mid
+  Representative: low
 background_correlation:
   Family: purity
   Correlated: 0
   Alternative: '@rbkg'
-purity_nonclosure:
-  Family: purity
-  Correlated: 0
-  Alternative: '@purity_nonclosure'
 jet_energy_scale:
   Family: jet_response
   Correlated: 1
+  Systems:
+  - pp
   Up: '@jes_up'
   Down: '@jes_down'
+jet_energy_resolution:
+  Family: jet_response
+  Correlated: 1
+  Up: '@smjer_high'
+  Down: '@smjer_low'
+electromagnetic_scale:
+  Family: electromagnetic_response
+  Correlated: 1
+  Up: '@smems_high'
+  Down: '@smems_low'
+electromagnetic_resolution:
+  Family: electromagnetic_response
+  Correlated: 1
+  Alternatives:
+  - no_extra=@smemr_low
+  - wider=@smemr_high
+  Representative: wider
+photon_id_selection:
+  Family: photon_selection
+  Correlated: 0
+  Components:
+  - pp_tight
+  - pp_non_tight
+  - auau_tight
+  - auau_non_tight
+  pp_tight:
+    Systems:
+    - pp
+    Alternative: '@pp_tight_plus005'
+  pp_non_tight:
+    Systems:
+    - pp
+    Alternative: '@pp_lower_minus010'
+  auau_tight:
+    Systems:
+    - auau_cent0_20
+    - auau_cent20_50
+    - auau_cent50_80
+    Alternatives:
+    - eff60=@auau_tight60
+    - eff80=@auau_tight80
+    Representative: eff60
+  auau_non_tight:
+    Systems:
+    - auau_cent0_20
+    - auau_cent20_50
+    - auau_cent50_80
+    Alternatives:
+    - lower02=@auau_lower02
+    - upper90=@auau_upper90
+    Representative: lower02
+isolation_selection:
+  Family: photon_selection
+  Correlated: 0
+  Components:
+  - pp_gap
+  - auau_efficiency
+  pp_gap:
+    Systems:
+    - pp
+    Alternatives:
+    - gap01=@pp_gap01
+    - gap10=@pp_gap10
+    Representative: gap01
+  auau_efficiency:
+    Systems:
+    - auau_cent0_20
+    - auau_cent20_50
+    - auau_cent50_80
+    Alternatives:
+    - eff70=@auau_iso70
+    - eff90=@auau_iso90
+    Representative: eff70
+centrality_weight:
+  Family: normalization
+  Correlated: 1
+  Systems:
+  - auau_cent0_20
+  - auau_cent20_50
+  - auau_cent50_80
+  Alternative: '@centralityoff'

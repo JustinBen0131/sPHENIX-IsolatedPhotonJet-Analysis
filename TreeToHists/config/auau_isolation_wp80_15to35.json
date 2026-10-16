@@ -1,0 +1,25 @@
+{
+ "schema": "CanonicalIsolationFreezeV1",
+ "system": "auau",
+ "witness": {
+  "radius": 0.3,
+  "stride_index": 0,
+  "subtraction_method": 2,
+  "reconstructed": true
+ },
+ "threshold": {
+  "intercept_gev": 3.059196113029283,
+  "slope_gev_per_percent": -0.02356487430593699,
+  "variable": "cent_value",
+  "efficiency": 0.8
+ },
+ "sideband_gap_gev": 0.8,
+ "domain": {
+  "centrality_min": 0.0,
+  "centrality_max_exclusive": 80.0
+ },
+ "derivation": {
+  "file": "AUAU_WORKING_POINTS.json",
+  "package_sha256": "7d8c9c8d481e6a9d78e89bafee446c397bfc9066918521a1c08947ccb5242d31"
+ }
+}

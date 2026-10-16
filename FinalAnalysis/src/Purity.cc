@@ -10,7 +10,20 @@
    non-closure systematic) multiplies the signal and re-derives k from it; an efficiency scale (DATA/simulation photon
    efficiency) divides the corrected photons and jets of its bin. Both are 1 in the nominal. */
 
-/* The data-driven alternative (combinatoricFromDphi) measures the combinatoric jets from the data: jets that do not come
+/* The data-driven estimate measures the level of the combinatoric jets in the data, in a Delta-phi sideband away from
+   the photon and from its recoil (Combinatoric.Sideband, nominal 0.8 < Delta phi < 2.5), per photon bin and xJ bin.
+   Combinatoric.Shape simulation (nominal) carries that level into the recoil window with the simulation:
+     combinatoric jets in the window = (DATA jets in the sideband) x T,
+     T = (simulated jets without a truth jet nearby in the window) / (every simulated jet in the sideband),
+   both of matched region-A photons (Window::combinatoric and Window::sidebandJets). T is not the ratio of the two
+   Delta-phi ranges: where the real recoil jet stands, fewer jets of the underlying event are found, so in the embedded
+   simulation of central Au+Au the density of jets without a truth jet nearby falls to 0.6-0.7 of the sideband inside
+   the window at low xJ. An estimate that takes the sideband density there removes 1.2-1.4 times the true combinatoric
+   jets and most of the real recoil jets at low xJ. With T the estimate returns the simulated combinatoric jets exactly
+   when it is applied to the simulation, in p+p (where T is near zero) as in Au+Au, and the response toys carry its
+   statistical uncertainty. The same T is used for the region A and region C photons.
+   Shape flow and flat (combinatoricFromDphi) are the earlier estimate, which assumes the sideband density under the
+   recoil peak: jets that do not come
    from the photon's hard scattering populate every Delta phi with a flow-modulated shape. The Delta-phi distribution of
    the jets at |Delta eta| > 0.8, free of the photon's own scattering, is fitted over 0 < Delta phi < 2.5 with
    f = a0 + a2 cos(2 Delta phi) + a3 cos(3 Delta phi)   (flow; flat: a constant)
@@ -72,7 +85,9 @@ Corrected correct(const Measured &m, const Window &w, const SystemSettings &sys)
   Corrected c;
   c.photons.ResizeTo(nPt); c.purity.ResizeTo(nPt); c.transfer.ResizeTo(nPt);
   c.physical.assign(nPt, false);
-  for (TMatrixD *x : {&c.pairs, &c.pairsVariance, &c.scaledC, &c.purityCorrected, &c.combinatoric}) x->ResizeTo(nPt, nX);
+  for (TMatrixD *x : {&c.pairs, &c.pairsVariance, &c.scaledC, &c.scaledCVariance, &c.purityCorrected, &c.purityCorrectedVariance,
+                      &c.combinatoric})
+    x->ResizeTo(nPt, nX);
   for (int pt = 0; pt < nPt; ++pt) {
     const double counts[4] = {m.abcd(0, pt), m.abcd(1, pt), m.abcd(2, pt), m.abcd(3, pt)};
     const double leak[4] = {w.leakage(0, pt), w.leakage(1, pt), w.leakage(2, pt), w.leakage(3, pt)};
@@ -95,11 +110,19 @@ Corrected correct(const Measured &m, const Window &w, const SystemSettings &sys)
     c.transfer[pt] = s.transfer;
     const double normalisation = w.leakage(0, pt);  /* truth-matched region-A photons of the template */
     for (int x = 0; x < nX; ++x) {
-      c.scaledC(pt, x) = s.transfer * m.pairsC(pt, x);
-      c.pairs(pt, x) = (m.pairsA(pt, x) - s.transfer * m.pairsC(pt, x)) / denominator;
-      c.pairsVariance(pt, x) = (m.pairsAVariance(pt, x) + s.transfer * s.transfer * m.pairsCVariance(pt, x)) /
-                               (denominator * denominator);
+      double jetsA = m.pairsA(pt, x), varianceA = m.pairsAVariance(pt, x), jetsC = m.pairsC(pt, x), varianceC = m.pairsCVariance(pt, x);
+      if (sys.subtractSideband) {
+        /* the sideband jets of the data times the simulated transfer (see the header); the variance of a count is the count */
+        const double transfer = w.sidebandJets(pt, x) > 0 ? w.combinatoric(pt, x) / w.sidebandJets(pt, x) : 0.0;
+        jetsA -= transfer * m.sidebandA(pt, x), varianceA += transfer * transfer * m.sidebandA(pt, x);
+        jetsC -= transfer * m.sidebandC(pt, x), varianceC += transfer * transfer * m.sidebandC(pt, x);
+      }
+      c.scaledC(pt, x) = s.transfer * jetsC;
+      c.scaledCVariance(pt, x) = s.transfer * s.transfer * varianceC;
+      c.pairs(pt, x) = (jetsA - s.transfer * jetsC) / denominator;
+      c.pairsVariance(pt, x) = (varianceA + s.transfer * s.transfer * varianceC) / (denominator * denominator);
       c.purityCorrected(pt, x) = c.pairs(pt, x);
+      c.purityCorrectedVariance(pt, x) = c.pairsVariance(pt, x);
       if (sys.subtractTemplate && normalisation > 0) {
         const double scale = s.signal / normalisation;
         const double slope = -s.signal * w.combinatoric(pt, x) / (normalisation * normalisation);
@@ -121,7 +144,7 @@ Corrected correct(const Measured &m, const Window &w, const SystemSettings &sys)
 
 namespace {
 
-const double kSidebandLow = 0.8, kSidebandHigh = 2.5, kWindowLow = 7 * M_PI / 8, kWindowHigh = M_PI;
+const double kWindowLow = 7 * M_PI / 8, kWindowHigh = M_PI;
 
 double integral(const double a[3], double lo, double hi) {
   return a[0] * (hi - lo) + a[1] * (std::sin(2 * hi) - std::sin(2 * lo)) / 2 + a[2] * (std::sin(3 * hi) - std::sin(3 * lo)) / 3;
@@ -130,7 +153,8 @@ double integral(const double a[3], double lo, double hi) {
 bool inside(const Edges &e, int d, double lo, double hi) { return e[d] >= lo - 1e-12 && e[d + 1] <= hi + 1e-12; }
 
 /* The flow form fitted to far-side counts over 0 < Delta phi < 2.5; returns the window / sideband integral ratio. */
-double windowOverSideband(const std::vector<double> &counts, const std::vector<double> &variance, const std::string &shape) {
+double windowOverSideband(const std::vector<double> &counts, const std::vector<double> &variance, const std::string &shape,
+                          double sidebandLow, double sidebandHigh) {
   double a[3] = {1, 0, 0};
   if (shape == "flow") {
     const Edges &e = dphiEdges();
@@ -138,7 +162,7 @@ double windowOverSideband(const std::vector<double> &counts, const std::vector<d
     TVectorD rhs(3);
     double total = 0;
     for (size_t d = 0; d + 1 < e.size(); ++d) {
-      if (!inside(e, d, 0.0, kSidebandHigh)) continue;
+      if (!inside(e, d, 0.0, sidebandHigh)) continue;
       const double basis[3] = {e[d + 1] - e[d], (std::sin(2 * e[d + 1]) - std::sin(2 * e[d])) / 2,
                                (std::sin(3 * e[d + 1]) - std::sin(3 * e[d])) / 3};
       const double weight = 1.0 / std::max(variance[d], 1.0);
@@ -153,7 +177,7 @@ double windowOverSideband(const std::vector<double> &counts, const std::vector<d
     if (!lu.Solve(rhs)) throw std::runtime_error("singular Delta-phi fit");
     for (int i = 0; i < 3; ++i) a[i] = rhs[i];
   }
-  const double sideband = integral(a, kSidebandLow, kSidebandHigh);
+  const double sideband = integral(a, sidebandLow, sidebandHigh);
   if (!(sideband > 0)) throw std::runtime_error("the fitted shape is not positive in the sideband");
   return integral(a, kWindowLow, kWindowHigh) / sideband;
 }
@@ -164,8 +188,8 @@ const Edges &dphiEdges() {  /* pi/32 steps with 0.8 and 2.5 rad added (TreeToHis
   static const Edges edges = [] {
     Edges e;
     for (int i = 0; i <= 32; ++i) e.push_back(i * M_PI / 32);
-    e.push_back(kSidebandLow);
-    e.push_back(kSidebandHigh);
+    e.push_back(0.8);
+    e.push_back(2.5);
     std::sort(e.begin(), e.end());
     return e;
   }();
@@ -173,7 +197,7 @@ const Edges &dphiEdges() {  /* pi/32 steps with 0.8 and 2.5 rad added (TreeToHis
 }
 
 Background combinatoricFromDphi(const std::vector<double> dphi[2], const std::vector<double> variance[2], int nPt, int nXj,
-                                const std::string &shape, const std::string &scope) {
+                                const std::string &shape, const std::string &scope, double sidebandLow, double sidebandHigh) {
   const Edges &e = dphiEdges();
   const int nD = e.size() - 1;
   auto at = [&](int p, int x, int d, int side) { return ((p * nXj + x) * nD + d) * 2 + side; };
@@ -187,7 +211,7 @@ Background combinatoricFromDphi(const std::vector<double> dphi[2], const std::ve
       std::vector<double> sideband(nXj), sidebandVariance(nXj);
       for (int x = 0; x < nXj; ++x)
         for (int d = 0; d < nD; ++d)
-          if (inside(e, d, kSidebandLow, kSidebandHigh))
+          if (inside(e, d, sidebandLow, sidebandHigh))
             for (int side = 0; side < 2; ++side) {
               sideband[x] += dphi[r][at(p, x, d, side)];
               sidebandVariance[x] += variance[r][at(p, x, d, side)];
@@ -200,7 +224,7 @@ Background combinatoricFromDphi(const std::vector<double> dphi[2], const std::ve
             far[d] += dphi[r][at(p, y, d, 1)];
             farVariance[d] += variance[r][at(p, y, d, 1)];
           }
-        const double fraction = windowOverSideband(far, farVariance, shape);
+        const double fraction = windowOverSideband(far, farVariance, shape, sidebandLow, sidebandHigh);
         for (int y = scope == "pt" ? 0 : x; y < (scope == "pt" ? nXj : x + 1); ++y) {
           out.counts[r](p, y) = fraction * sideband[y];
           out.variance[r](p, y) = fraction * fraction * sidebandVariance[y];

@@ -21,6 +21,15 @@ Measurement:
   # derived for every result, never typed in (5/17 -> 0.35 here). Only its upper edge is a setting.
   XjEdges: [0, 0.2, 0.24, 0.29, 0.35, 0.41, 0.5, 0.6, 0.72, 0.86, 1.03, 1.24, 1.49, 1.78, 2.14, 3.0]
   ReportedXjMax: 1.49
+Association:
+
+  # Optional: the reconstructed-to-truth association figure (IAN Figure 25) on finer bins than the results', for the
+  # listed results: saved as association_pairs_A, association_pairs_reco_simulation and
+  # association_pairs_reco_matched_simulation. Both lists are unions of the package bins, the xJ list over the package
+  # range. Leave the block out and the figure is drawn on the result's own bins.
+  Systems: [pp]
+  PhotonEdges: [16, 18, 20, 22, 24, 26, 35]
+  XjEdges: [0, 0.2, 0.3, 0.41, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.78, 2.0, 3.0]
 Uncertainty:
 
   # Statistical uncertainty: data toys, a Poisson(1) multiplier per event of the DATA event records (event_bootstrap), so
@@ -40,12 +49,18 @@ Closure:
   Seed: 35200200
 IterationRule:
 
-  # The frozen iteration rule (PairIterations or PhotonIterations: rule): its own data and response toys, k = 2..4 by the
-  # smallest Q_k passing every gate (FinalAnalysis/src/Unfolding.cc).
+  # The iteration scan of every result: for each k the statistical terms, the change from k - 1 and their quadrature
+  # sum Q_k, on its own data and response toys. It is the stability figure, and it gives the iterations of every
+  # unfolding set to `scan` below: the k with the smallest Q_k (FinalAnalysis/src/Unfolding.cc). A number instead of
+  # `scan` fixes the iterations. The k below and above the nominal is the systematic.
   DataToys: 2000
   DataSeed: 35200002
   ResponseToys: 1000
   ResponseSeed: 35200001
+
+  # The prior of the joint scan: fitted, the prior the measurement itself starts from (the simulated truth
+  # reweighted to the data, Prior.Form and Prior.Fraction), or simulation, the unreweighted simulated truth.
+  Prior: fitted
 Unfolding:
   ScanIterations: 8  # iterations shown in the stability figures
 Prior:
@@ -53,21 +68,32 @@ Prior:
   # The joint unfolding's prior: the simulated truth reweighted in xJ, w = exp(t0 + t1 (xJ - 0.8) [+ t2 (xJ - 0.8)^2]),
   # fitted to the corrected data with the data-toy covariance (exp1, exp2, or simulation for no reweighting). Detector
   # fakes follow the reweighted signal (scaled) or stay fixed; the fit uses all measured bins or the reported ones. The
-  # unfolding starts from w^Power (1 nominal; 0.5 and 1.5 bracket the prior dependence).
+  # unfolding starts from 1 + Fraction (w - 1): 1 nominal; 0.5, half the reweighting, is the prior systematic (PPG14).
   Form: exp1
   FakeModel: scaled
   FitRange: all
-  Power: 1
+  Fraction: 1
 Combinatoric:
 
-  # Combinatoric jets: data_dphi measures them in the data (the flow-shaped Delta-phi sideband fit of the jets at
-  # |Delta eta| > 0.8, normalised per xJ bin in 0.8 < Delta phi < 2.5, integrated over the recoil window) and removes them
-  # before the purity correction; simulation subtracts the embedded-simulation template. Shape flow or flat (systematic);
-  # scope pt (one shape per photon bin) or pt_xj.
+  # Combinatoric jets: data_dphi measures their level in the data, the jets in the Delta-phi sideband per photon and xJ
+  # bin, and removes them before the purity correction; simulation subtracts the embedded-simulation template per photon.
+  # Shape simulation (nominal) carries the sideband level into the recoil window with the simulated ratio of the
+  # combinatoric jets in the window to all jets in the sideband, which holds the depletion under the recoil jet.
+  # Shape flow or flat take the sideband density under the recoil peak (a flow shape fitted at |Delta eta| > 0.8, or a
+  # constant), with Scope pt (one shape per photon bin) or pt_xj. Sideband: two Delta-phi bin edges [rad] (0.8, 2.5 or
+  # multiples of pi/32, to three decimals); its range is varied as a systematic.
   Method: data_dphi
-  Shape: flow
+  Shape: simulation
+  Sideband: [0.8, 2.5]
   Scope: pt
 QA:
+  # QA projections and drawing windows, in GeV. TruthIsolation is consecutive low/high pairs.
+  AbcdEdges: [15, 17, 19, 21, 23, 25, 35]
+  Windows:
+    ShowerShapes: [15, 20]
+    IsolationOverlay: [14, 16]
+    TruthIsolation: [15, 20, 25, 30]
+    NcbScore: [16, 35]
   PP:
 
     # QA: the inclusive-jet samples of each package for the background QA and the purity closure (the photon samples are
@@ -93,8 +119,8 @@ pp:
   PhotonEdges: [17, 23, 33]
   RecoEdges: [10, 15, 17, 23, 33, 35, 40]
   TruthEdges: [5, 10, 15, 17, 23, 33, 35, 40]
-  PairIterations: rule
-  PhotonIterations: rule
+  PairIterations: scan
+  PhotonIterations: scan
   BackgroundCorrelation: [1, 1]
   PurityScale: [1, 1]
   EfficiencyScale: [1, 1]
@@ -108,8 +134,8 @@ auau_cent0_20:
   PhotonEdges: [17, 23, 33]
   RecoEdges: [10, 15, 17, 23, 33, 35, 40]
   TruthEdges: [5, 10, 15, 17, 23, 33, 35, 40]
-  PairIterations: rule
-  PhotonIterations: rule
+  PairIterations: scan
+  PhotonIterations: scan
   BackgroundCorrelation: [1, 1]
   PurityScale: [1, 1]
   EfficiencyScale: [1, 1]
@@ -123,8 +149,8 @@ auau_cent20_50:
   PhotonEdges: [17, 23, 33]
   RecoEdges: [10, 15, 17, 23, 33, 35, 40]
   TruthEdges: [5, 10, 15, 17, 23, 33, 35, 40]
-  PairIterations: rule
-  PhotonIterations: rule
+  PairIterations: scan
+  PhotonIterations: scan
   BackgroundCorrelation: [1, 1]
   PurityScale: [1, 1]
   EfficiencyScale: [1, 1]
@@ -138,8 +164,8 @@ auau_cent50_80:
   PhotonEdges: [17, 23, 33]
   RecoEdges: [10, 15, 17, 23, 33, 35, 40]
   TruthEdges: [5, 10, 15, 17, 23, 33, 35, 40]
-  PairIterations: rule
-  PhotonIterations: rule
+  PairIterations: scan
+  PhotonIterations: scan
   BackgroundCorrelation: [1, 1]
   PurityScale: [1, 1]
   EfficiencyScale: [1, 1]

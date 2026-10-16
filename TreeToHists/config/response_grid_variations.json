@@ -1,0 +1,23 @@
+{
+  "PP": [
+    {"name": "nominal", "variation": ""},
+    {"name": "smnom", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480"},
+    {"name": "smjer_low", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_low seed=480"},
+    {"name": "smjer_high", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_high seed=480"},
+    {"name": "smemr_low", "variation": "photon_resolution=ppg18_low photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480"},
+    {"name": "smemr_high", "variation": "photon_resolution=ppg18_high photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480"},
+    {"name": "smems_low", "variation": "photon_resolution=ppg18_nominal photon_selection=ems_selection_response jet_resolution=sphenix_pp2026_nominal seed=480 em_scale=0.9852"},
+    {"name": "smems_high", "variation": "photon_resolution=ppg18_nominal photon_selection=ems_selection_response jet_resolution=sphenix_pp2026_nominal seed=480 em_scale=1.0148"}
+  ],
+  "AuAu": [
+    {"name": "nominal", "variation": ""},
+    {"name": "smnom", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480"},
+    {"name": "smjer_low", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_low seed=480"},
+    {"name": "smjer_high", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_high seed=480"},
+    {"name": "smemr_low", "variation": "photon_resolution=ppg18_low photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480"},
+    {"name": "smemr_high", "variation": "photon_resolution=ppg18_high photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480"},
+    {"name": "smems_low", "variation": "photon_resolution=ppg18_nominal photon_selection=ems_selection_response jet_resolution=sphenix_pp2026_nominal seed=480 em_scale=0.9852"},
+    {"name": "smems_high", "variation": "photon_resolution=ppg18_nominal photon_selection=ems_selection_response jet_resolution=sphenix_pp2026_nominal seed=480 em_scale=1.0148"},
+    {"name": "centralityoff", "variation": "photon_resolution=ppg18_nominal photon_selection=response_only jet_resolution=sphenix_pp2026_nominal seed=480 centrality_weight=off"}
+  ]
+}

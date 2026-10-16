@@ -5,7 +5,8 @@
    range, until the folded simulation, scaled to the measured photons of each reconstructed photon bin, describes the
    corrected pairs (generalized least squares with the data-toy covariance). P(reco | truth) is untouched: the weights
    change the prior, the boundary migration and, with the "scaled" model, the detector fakes in proportion to the
-   signal. The unfolding starts from w^power. */
+   signal. The unfolding starts from 1 + f (w - 1), f = Prior.Fraction: 1 nominal, 0.5 for the prior systematic, the
+   linear blend of PPG14 (target = truth + f (unfolded - truth)). */
 #include "FinalAnalysis.h"
 
 #include <cmath>
@@ -71,6 +72,15 @@ struct FitProblem {
 };
 
 }  /* namespace */
+
+Problem pairProblemWithPrior(const Window &w, const TVectorD &weights, const std::string &fakeModel) {
+  const int nX = weights.GetNrows();
+  TVectorD prior(w.pairTruth), fakes = detectorFakes(w, weights, fakeModel) + w.boundaryFixed;
+  for (int t = 0; t < prior.GetNrows(); ++t) prior[t] *= weights[t % nX];
+  for (int x = 0; x < nX; ++x)
+    for (int r = 0; r < fakes.GetNrows(); ++r) fakes[r] += weights[x] * w.boundaryByXj(x, r);
+  return {w.pairResponse, w.pairMisses, prior, fakes};
+}
 
 TVectorD priorWeights(const TVectorD &theta, const Edges &xj, double low, double high) {
   const int nX = xj.size() - 1;

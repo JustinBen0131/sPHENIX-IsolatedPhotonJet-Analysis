@@ -1,0 +1,38 @@
+# Source-bound cut variations, read by selection-plan --prescriptions.
+# Persisted variant names remain pp_tight_plus005, pp_lower_minus010,
+# pp_gap01, pp_gap10, auau_iso70/90, auau_tight60/80,
+# auau_lower02 and auau_upper90. NPB stays fixed.
+# Au+Au lines are retained fits in centrality percent: intercept + slope*c.
+# Their QA input, derivation and historical provenance hashes are in the
+# pinned sibling table; no local analysis checkout is needed to resolve it.
+schema: PhotonJetSelectionVariationsV1
+sources:
+  ppg12:
+    version: PPG12 IAN v4 live snapshot 2026-09-14
+    text_sha256: 3aea339f4e1b7a7e1f8b91d7383ee80bffc048dc6699e4e2216f9d81642fc79f
+    pdf_sha256: 4ff0c15e324955dd110100833114d4482972e09e2189d1aabbf1107b02111677
+  auau_pass_lines:
+    path: selection_variations/auau_pass_lines.json
+    sha256: c675b0ca3e8da5f7c21ba69383cece556a37468f603c51356c950205654e3d82
+prescriptions:
+  # PPG12 5.3.1, PDF p51, printed lines727-730: add to tight intercept.
+  pp_tight_intercept_up:
+    value: 0.05
+  # PPG12 5.3.2, PDF p51, printed lines731-735: add to non-tight lower.
+  pp_non_tight_lower_down:
+    value: -0.1
+  # PPG12 5.3.3, PDF pp51-52: GeV above the effective isolation threshold.
+  # A stored nominal gap is checked on each retained witness during filling.
+  pp_nonisolated_gap:
+    nominal: 0.8
+    values: [0.1, 1.0]
+  # Our choice under Justin's delegation, October13, 2026; not a note value.
+  auau_non_tight_lower:
+    nominal: 0.1
+    value: 0.2
+  # Our choice under the same delegation: tight70 stays fixed, upper80 ->90.
+  # Tight alternatives use bdt60/bdt80 about bdt70; isolation alternatives
+  # use isolation70/isolation90 about isolation80, all from the pinned table.
+  auau_non_tight_upper:
+    nominal_efficiency: 0.8
+    value_efficiency: 0.9

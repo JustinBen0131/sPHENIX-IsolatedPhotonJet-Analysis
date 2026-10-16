@@ -1,0 +1,501 @@
+{
+  "schema": "NativePlotFamilyRosterV1",
+  "families": {
+    "ian.purityCorrection": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "purityCorrection",
+      "line": 1443,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.combinatoric": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "combinatoric",
+      "line": 1468,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.beforeAfter": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "beforeAfter",
+      "line": 1518,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.statisticalBudget": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "statisticalBudget",
+      "line": 1555,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.detectorLevel": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "detectorLevel",
+      "line": 1622,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.recoTruthAssociation": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "recoTruthAssociation",
+      "line": 1744,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.ppVsCentral": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "ppVsCentral",
+      "line": 2242,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.centralityOverlay": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "centralityOverlay",
+      "line": 2267,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.auauCentralities": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "auauCentralities",
+      "line": 2334,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.radiusOverlay": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "radiusOverlay",
+      "line": 2367,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.systematicSources": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "systematicSources",
+      "line": 2487,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.priorReweighting": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "priorReweighting",
+      "line": 2610,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.iterationOverlay": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "iterationOverlay",
+      "line": 2642,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.systematicVariations": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "systematicVariations",
+      "line": 2696,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.atlasOverlay": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "atlasOverlay",
+      "line": 2824,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.photonResponse": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "photonResponse",
+      "line": 2997,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.jointResponse": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "jointResponse",
+      "line": 3077,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.iterationRule": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "iterationRule",
+      "line": 3250,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.photonClosure": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "photonClosure",
+      "line": 3490,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.photonYield": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "photonYield",
+      "line": 3539,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.pairClosure": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "pairClosure",
+      "line": 3604,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.jointRefold": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "jointRefold",
+      "line": 3650,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "ian.photonJetDphi": {
+      "source": "plots/IANFigures.C",
+      "entrypoint": "photonJetDphi",
+      "line": 3767,
+      "save_routes": [
+        "save"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.ncbScore": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "ncbScore",
+      "line": 1069,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.drawEtaTimeMap": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "drawEtaTimeMap",
+      "line": 1207,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.ncbTimeSelections": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "ncbTimeSelections",
+      "line": 1290,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.showerShapes": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "showerShapes",
+      "line": 1356,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.widthClassFigure": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "widthClassFigure",
+      "line": 1515,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.widthDataPanels": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "widthDataPanels",
+      "line": 1579,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.widthSummary": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "widthSummary",
+      "line": 1697,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.bdtPerClass": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "bdtPerClass",
+      "line": 1899,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.e11Flow": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "e11Flow",
+      "line": 2117,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.truthIsolation": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "truthIsolation",
+      "line": 2254,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.truthPtAfterIsolation": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "truthPtAfterIsolation",
+      "line": 2361,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.isolationOverlays": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "isolationOverlays",
+      "line": 2559,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.isolationStacks": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "isolationStacks",
+      "line": 2683,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.abcdCounts": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "abcdCounts",
+      "line": 2766,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.purityPanels": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "purityPanels",
+      "line": 2891,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.efficiency": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "efficiency",
+      "line": 3076,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.minimumBias": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "minimumBias",
+      "line": 3148,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.reweightingClosure": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "reweightingClosure",
+      "line": 3244,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.eventDistribution": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "eventDistribution",
+      "line": 3534,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.etaPhiMap": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "etaPhiMap",
+      "line": 3653,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.stitching": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "stitching",
+      "line": 3895,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.triggerStudy": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "triggerStudy",
+      "line": 4295,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.workingPoints": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "workingPoints",
+      "line": 5101,
+      "save_routes": [
+        "savePhysicsQA",
+        "saveReleasedWorkingPoints"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.workingPointCentralityComparison": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "workingPointCentralityComparison",
+      "line": 5316,
+      "save_routes": [
+        "saveReleasedWorkingPoints"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.savedWorkingPointFits": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "savedWorkingPointFits",
+      "line": 5432,
+      "save_routes": [
+        "saveReleasedWorkingPoints"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.trainingReweighting": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "trainingReweighting",
+      "line": 5580,
+      "save_routes": [
+        "saveTrainingDiagnostic"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.featureDiagnostics": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "featureDiagnostics",
+      "line": 5743,
+      "save_routes": [
+        "saveTrainingDiagnostic"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.routingDiagnostics": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "routingDiagnostics",
+      "line": 5922,
+      "save_routes": [
+        "saveTrainingDiagnostic"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.depthDiagnostics": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "depthDiagnostics",
+      "line": 6120,
+      "save_routes": [
+        "saveTrainingDiagnostic"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.ppg12ModelComparison": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "ppg12ModelComparison",
+      "line": 6290,
+      "save_routes": [
+        "saveTrainingDiagnostic"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.savedScoreReview": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "savedScoreReview",
+      "line": 6467,
+      "save_routes": [
+        "saveModelQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    },
+    "qa.scoreSeparation": {
+      "source": "plots/QAFigures.C",
+      "entrypoint": "scoreSeparation",
+      "line": 6784,
+      "save_routes": [
+        "savePhysicsQA"
+      ],
+      "qualification": "REQUIRES_EXECUTED_NATIVE_FAMILY_FIXTURE"
+    }
+  }
+}

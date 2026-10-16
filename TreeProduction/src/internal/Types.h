@@ -1484,6 +1484,10 @@ struct ShowerShapeRecord
   // Tower energy floor of this definition, GeV. Towers at or below it do not
   // enter the sums.
   double energyFloorGeV = 0.0;
+  // Actual arguments observed at the builder invocation, separately from
+  // the configured label/floor used by the legacy branch dictionary.
+  double calculationFloorGeV = std::numeric_limits<double>::quiet_NaN();
+  std::int32_t calculationAlgorithm = -1;
 
   // Rectangular sums, GeV.
   double e11 = std::numeric_limits<double>::quiet_NaN();
@@ -1759,6 +1763,8 @@ struct PhotonRecord
       "weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx",
       "weta35_cogx", "wphi53_cogx", "et1", "et2", "et3", "et4",
       "e11", "e33", "e32", "e35", "bdt_score"}};
+  double primaryShowerFloorGeV = std::numeric_limits<double>::quiet_NaN();
+  int primaryShowerEnergy = -1, primaryShowerSums = -1, primaryShowerMoments = -1, primaryShowerAlgorithm = -1;
   std::array<double, primaryShapeNames.size()> primaryShapes{};
 
   // The vertex the reconstruction used to turn cluster position into

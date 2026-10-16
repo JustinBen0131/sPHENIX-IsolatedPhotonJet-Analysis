@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from . import Models, Validation
+from . import ScientificMetadata as Scientific
 
 
 def training_weight_provenance(weights):
@@ -30,7 +31,7 @@ def training_weight_provenance(weights):
 WORKING_POINT_ET_EDGES = (15, 17, 19, 21, 23, 26, 30, 35)
 
 
-def working_point_centrality_comparison(directory, population, scores, provenance):
+def working_point_centrality_comparison(directory, population, scores, provenance, *, recipe=None, model=None):
     """Save pooled signal calibration parameters below an application QA directory.
 
     The 0-10% and 75-80% views use exact weighted score quantiles per ET bin;
@@ -73,6 +74,12 @@ def working_point_centrality_comparison(directory, population, scores, provenanc
                 grid.SetBinContent(c+1, j+1, value)
                 if np.isfinite(value): values.append(value)
             median.SetBinContent(c+1, float(np.median(values)) if values else float('nan'))
+        scientific=Scientific.calibration_definition(population,'pooled_signal_score_quantiles',recipe=recipe,model=model,
+            selection={'signal_class':1,'et':[15.,35.],'centrality_slices':[[0.,10.],[75.,80.]]},
+            extra={'efficiency':level/100.,'et_edges':list(WORKING_POINT_ET_EDGES),
+                'quantile':'stable score order; observed score at left cumulative-weight crossing',
+                'reference':'median of finite ET-bin thresholds'})
+        Scientific.attach(grid,scientific);Scientific.attach(median,scientific)
         grid.Write(); median.Write()
     info = dict(schema='PhotonIDCentralityCalibrationComparisonV1', status='PASS',
                 origin='calibration-only parameters from pooled prepared signal rows; no released-cut change',
@@ -81,11 +88,13 @@ def working_point_centrality_comparison(directory, population, scores, provenanc
                 reference='median of finite ET-bin thresholds in each slice',
                 weight_provenance=training_weight_provenance(population.weights), provenance=provenance)
     ROOT.TObjString(json.dumps(info, sort_keys=True)).Write('derivation')
+    Scientific.record(target,'derivation',Scientific.calibration_definition(population,'centrality_calibration_comparison',recipe=recipe,model=model,
+        selection={'signal_class':1,'et':[15.,35.]},extra={'et_edges':list(WORKING_POINT_ET_EDGES),'slices':[[0.,10.],[75.,80.]]}))
     directory.cd()
     return info
 
 
-def working_point_review(directory, population, scores, working_points, provenance):
+def working_point_review(directory, population, scores, working_points, provenance, *, recipe=None, model=None):
     """Save calibration QA from a released model's complete population.
 
     The fine centrality/ET grid describes score quantiles; it never replaces
@@ -123,6 +132,11 @@ def working_point_review(directory, population, scores, working_points, provenan
                 grid.SetBinContent(c+1, j+1, value)
                 if np.isfinite(value): values.append(value)
             median.SetBinContent(c+1, float(np.median(values)) if values else float('nan'))
+        scientific=Scientific.calibration_definition(population,'signal_score_quantiles',recipe=recipe,model=model,
+            selection={'signal_class':1,'domain':domain},extra={'efficiency':level/100.,'centrality_edges':list(range(0,81,5)),
+                'et_edges':list(WORKING_POINT_ET_EDGES),'quantile':'stable score order; observed score at left cumulative-weight crossing',
+                'reference':'median of finite ET-bin thresholds'})
+        Scientific.attach(grid,scientific);Scientific.attach(median,scientific)
         grid.Write(); median.Write()
     regions = classify(scores, population.centrality, cell)
     counts = []
@@ -136,6 +150,8 @@ def working_point_review(directory, population, scores, working_points, provenan
             # ROOT's last bin is half-open; include exactly-one scores in it.
             values = np.minimum(scores[selected], np.nextafter(1., 0.))
             hist = histogram(f'score_{i}_{label}', values, population.weights[selected], 50, 0, 1)
+            Scientific.attach(hist,Scientific.calibration_definition(population,'calibration_score_histogram',recipe=recipe,model=model,
+                selection={'class':klass,'centrality':[low,high],'domain':domain},extra={'bins':50,'range':[0.,1.],'exact_one':'nextafter(1,0)'}))
             hist.Write()
             row[label] = int(selected.sum())
         counts.append(row)
@@ -147,7 +163,9 @@ def working_point_review(directory, population, scores, working_points, provenan
                 cuts='unchanged released working points evaluated at each candidate centrality',
                 classes=counts, working_points=working_points, provenance=provenance)
     ROOT.TObjString(json.dumps(info, sort_keys=True)).Write('review')
-    working_point_centrality_comparison(directory, population, scores, provenance)
+    Scientific.record(directory,'review',Scientific.calibration_definition(population,'calibration_region_counts',recipe=recipe,model=model,
+        selection={'domain':domain},extra={'cuts':cell['cuts'],'centrality_classes':[[0.,20.],[20.,50.],[50.,80.]]}))
+    working_point_centrality_comparison(directory, population, scores, provenance,recipe=recipe,model=model)
     return info
 
 
@@ -309,7 +327,7 @@ def holdout_grid(population, scores, recipe, config):
     return rows
 
 
-def write_table(root, name, fields, rows, *, tracker=None, total=None):
+def write_table(root, name, fields, rows, *, tracker=None, total=None, scientific=None, columns=None):
     """Write scalar ROOT columns; unavailable float metrics use NaN plus a validity flag."""
     import ROOT
     root.cd(); tree = ROOT.TTree(name, name)
@@ -327,10 +345,12 @@ def write_table(root, name, fields, rows, *, tracker=None, total=None):
     if tracker:
         Models.require(count == total, 'QA table row count changed')
         tracker.stage('qa-table-' + name, count, total, 'rows')
+    if scientific is not None:Scientific.attach(tree,scientific)
+    if columns is not None:Scientific.attach_columns(tree,columns)
     tree.Write(); tree.SetDirectory(0)
 
 
-def score_diagnostics(root, population, scores, selected, directory):
+def score_diagnostics(root, population, scores, selected, directory, *, recipe=None, model=None, selection=None):
     """Class score densities and weighted ROC from the same labelled holdout."""
     from sklearn.metrics import roc_curve
     folder = root.mkdir(directory); rows = np.flatnonzero(selected)
@@ -340,14 +360,19 @@ def score_diagnostics(root, population, scores, selected, directory):
         indices = rows[population.y[rows] == klass]
         for weighting, weights in [('raw', np.ones(len(indices))), ('weighted', population.weights[indices])]:
             h = histogram(label + '_' + weighting, scores[indices], weights, 50, 0., float(np.nextafter(1., np.inf)))
+            if recipe is not None:Scientific.attach(h,Scientific.definition(population,recipe,'class_score_histogram',
+                weighted=weighting=='weighted',model=model,selection={'subset':selection,'class':klass},
+                extra={'bins':50,'range':[0.,float(np.nextafter(1.,np.inf))]}))
             folder.cd(); h.Write()
     fpr, tpr, thresholds = roc_curve(population.y[rows], scores[rows], sample_weight=population.weights[rows], drop_intermediate=False)
     write_table(folder, 'roc', dict(false_positive_rate='D', true_positive_rate='D', threshold='D'),
-                (dict(false_positive_rate=f, true_positive_rate=t, threshold=s) for f, t, s in zip(fpr, tpr, thresholds)))
+                (dict(false_positive_rate=f, true_positive_rate=t, threshold=s) for f, t, s in zip(fpr, tpr, thresholds)),
+                scientific=Scientific.definition(population,recipe,'weighted_roc_curve',weighted=True,model=model,
+                    selection=selection,extra={'drop_intermediate':False}) if recipe is not None else None)
     return report
 
 
-def original_comparison(root, folder, population, recipe, scores, tracker):
+def original_comparison(root, folder, population, recipe, scores, tracker, *, model=None):
     """Pair frozen PPG12 and retrained predictions on exactly the new test rows.
 
     Both scores use the same H70 float32 vector. No stored producer sentinel or
@@ -367,17 +392,22 @@ def original_comparison(root, folder, population, recipe, scores, tracker):
     files = population.receipt['array_files']; work = Path(population.x.filename).parent
     identities = {key: np.load(work / files[key], mmap_mode='r') for key in ('source_index', 'entry', 'photon')}
     comparison = root.mkdir('original_comparison')
+    original_function=__import__('json').loads(str(Scientific.native().photonid_scientific.model(str(reference),'myBDT',Models.canonical(recipe['features']))))
+    scientific=Scientific.definition(population,recipe,'paired_original_and_retrained_scores',weighted=True,
+        model={'reference':original_function,'candidate':model},selection={'split':'holdout'},
+        extra={'difference':'candidate-reference'})
     fields = dict(source_index='I', entry='L', photon='I', label='I', et='D', weight='D', original_score='D', retrained_score='D', difference='D')
     def paired_rows():
         for index, row in enumerate(rows):
             yield dict(source_index=identities['source_index'][row], entry=identities['entry'][row], photon=identities['photon'][row],
                        label=population.y[row], et=population.et[row], weight=population.weights[row],
                        original_score=originals[index], retrained_score=scores[row], difference=scores[row]-originals[index])
-    write_table(comparison, 'paired_scores', fields, paired_rows(), tracker=tracker, total=len(rows))
+    write_table(comparison, 'paired_scores', fields, paired_rows(), tracker=tracker, total=len(rows),scientific=scientific)
     for klass, label in ((1, 'signal'), (0, 'background')):
         selected = population.y[rows] == klass; weights = population.weights[rows[selected]]
         delta = scores[rows[selected]] - originals[selected]
         h = histogram(label + '_difference', delta, weights, 100, -1., float(np.nextafter(1., np.inf)))
+        Scientific.attach(h,scientific)
         comparison.cd(); h.Write()
     return dict(reference_model_sha256=recipe['reference_model_sha256'], reference='bundled frozen PPG12 RBDT',
                 rows=len(rows), split='test only; validation excluded', score_difference='retrained minus original',
@@ -458,6 +488,12 @@ def save(folder, population, recipe, scores, cells, config, request_sha256, *, p
                     grid_et_edges=grid_edges(recipe, config), grid_centrality_edges=config['bins']['centrality_coarse'] if recipe['system'] == 'AuAu' else [],
                     split_method=population.receipt.get('split_method', 'event_grouped_90_10'),
                     qualification='saved training QA; downstream physics acceptance is separate')
+    model=Scientific.model_function(folder,recipe,cells) if cells else Scientific.unknown('no loaded model cell supplied to diagnostics')
+    for relative,digest in model_artifacts.items():
+        Models.require(Models.file_hash(folder/relative)==digest,'model changed between score binding and scientific readback')
+    def scientific(observable,*,weighted=False,uses_model=False,selection=None,extra=None):
+        return Scientific.definition(population,recipe,observable,weighted=weighted,model=model if uses_model else None,
+                                     selection=selection,extra=extra)
     root = ROOT.TFile.Open(str(path), 'CREATE')
     Models.require(root and not root.IsZombie(), 'cannot create model QA ROOT output')
     try:
@@ -470,19 +506,36 @@ def save(folder, population, recipe, scores, cells, config, request_sha256, *, p
                 for weighting, weights in [('raw', np.ones(len(selected))), ('weighted', population.weights[selected])]:
                     name = f'{variable}_{label}_{weighting}'
                     hist = histogram(name, values, weights, recipe['weights']['bins'], low, high)
+                    Scientific.attach(hist,scientific('training_'+variable,weighted=weighting=='weighted',selection={'class':klass},
+                        extra={'bins':recipe['weights']['bins'],'range':[low,high]}))
                     training.cd(); hist.Write()
-        write_table(root, 'features', FEATURE_FIELDS, features)
-        write_table(root, 'performance', dict(split='I', **METRIC_FIELDS), metrics)
+        feature_columns={key:scientific('feature_'+key,weighted=key.startswith('weighted_') or key in ('total_gain','total_gain_fraction','gain_valid'),
+            uses_model=key in ('total_gain','total_gain_fraction','gain_valid'),extra={'feature_order':recipe['features']}) for key in FEATURE_FIELDS}
+        write_table(root, 'features', FEATURE_FIELDS, features,scientific=scientific('feature_table',weighted=True,uses_model=True),columns=feature_columns)
+        write_table(root, 'performance', dict(split='I', **METRIC_FIELDS), metrics,
+            scientific=scientific('weighted_performance',weighted=True,uses_model=True,
+                selection={'split_method':population.receipt.get('split_method'),
+                    'split_definition':population.receipt.get('scientific_split',Scientific.unknown('split algorithm parameters not recorded'))}))
         fields = dict(et_low='D', et_high='D', centrality_low='D', centrality_high='D', **METRIC_FIELDS)
-        write_table(root, 'holdout_et_c3', fields, grid)
-        metadata['heldout_scores'] = score_diagnostics(root, population, scores, population.holdout, 'holdout_scores')
+        write_table(root, 'holdout_et_c3', fields, grid,scientific=scientific('heldout_grid_performance',weighted=True,uses_model=True,
+            selection={'split':'holdout','split_definition':population.receipt.get('scientific_split',Scientific.unknown('split algorithm parameters not recorded'))},
+            extra={'et_edges':grid_edges(recipe,config),'centrality_edges':config['bins']['centrality_coarse'] if recipe['system']=='AuAu' else []}))
+        holdout={'split':'holdout','split_definition':population.receipt.get('scientific_split',Scientific.unknown('split algorithm parameters not recorded'))}
+        metadata['heldout_scores'] = score_diagnostics(root, population, scores, population.holdout, 'holdout_scores',recipe=recipe,model=model,selection=holdout)
         if recipe['system'] == 'AuAu':
             peripheral = population.holdout & (population.centrality >= 50.) & (population.centrality < 80.) & (population.et >= 15.) & (population.et < 35.)
             if all(np.any(peripheral & (population.y == k)) for k in (0, 1)):
-                metadata['peripheral_15to35_scores'] = score_diagnostics(root, population, scores, peripheral, 'peripheral_15to35_scores')
+                metadata['peripheral_15to35_scores'] = score_diagnostics(root, population, scores, peripheral, 'peripheral_15to35_scores',
+                    recipe=recipe,model=model,selection=dict(holdout,centrality=[50.,80.],et=[15.,35.]))
         if recipe['name'].startswith('ppg12_retrained_'):
-            metadata['original_comparison'] = original_comparison(root, folder, population, recipe, scores, tracker)
-        root.mkdir('meta').cd(); ROOT.TObjString(Models.canonical(metadata)).Write('diagnostics')
+            metadata['original_comparison'] = original_comparison(root, folder, population, recipe, scores, tracker,model=model)
+        meta=root.mkdir('meta');meta.cd(); ROOT.TObjString(Models.canonical(metadata)).Write('diagnostics')
+        working=folder/'working_points.json'
+        if working.is_file():
+            saved=Models.read_json(working)
+            Scientific.record(meta,'working_points',scientific('released_working_point_calibration',weighted=True,uses_model=True,
+                selection={'population':'all eligible signal'},extra={'cells':{key:{k:v for k,v in value.items() if k in ('axis','bounds','cuts')}
+                    for key,value in saved.get('cells',{}).items()},'calibration_domain':saved.get('calibration_domain')}))
         root.Write()
     finally:
         root.Close()

@@ -5,13 +5,21 @@
 #   tree_to_hists.sh build
 #   tree_to_hists.sh plan   --settings YAML --inputs INPUTS.yaml --work DIR [--sample SYSTEM/NAME]...
 #   tree_to_hists.sh fill   --work DIR --job N
+#   tree_to_hists.sh fill-data-jes --work NOMINAL --up-work UP --down-work DOWN --job N
+#   tree_to_hists.sh fill-data-jes-group --work NOMINAL --up-work UP --down-work DOWN --group G0 --scratch DIR
+#   tree_to_hists.sh selection-groups --work REF
+#   tree_to_hists.sh selection-plan --work REF --out VIEW --variant NAME --prescriptions JSON
+#   tree_to_hists.sh fill-selection-group --work REF --view-work VIEW --group G0 --scratch DIR
+#   tree_to_hists.sh validate-selection-group --work REF --view-work VIEW --group G0
 #   tree_to_hists.sh merge  --work DIR --sample SYSTEM/NAME --out DIR
 #   tree_to_hists.sh centrality --settings YAML --inputs INPUTS.yaml --data AuAu/data.root --out weights.json
 #   tree_to_hists.sh vertex population --config YAML --out population.root
 #   tree_to_hists.sh vertex derive --config YAML --population population.root --out DIR
 #   tree_to_hists.sh local  --settings YAML --inputs INPUTS.yaml --work DIR --out DIR [--parallel N] [--sample ...]
 #   tree_to_hists.sh campaign --config CAMPAIGN.yaml [--prepare-only|--submit]
+#   tree_to_hists.sh campaign-finish --work DIR --out DIR [--parallel N]   (the last job of a flat submission)
 #   tree_to_hists.sh collection --work DIR --out DIR
+#   tree_to_hists.sh collection --from COLLECTION.yaml [--from COLLECTION.yaml]... --out DIR
 #   tree_to_hists.sh isolation population --out population.root EVENTTREE...
 #   tree_to_hists.sh isolation derive --out package.json POPULATION...
 #   tree_to_hists.sh isolation freeze --out freeze.json PACKAGE [--efficiency 0.8] [--gap 0.8]
@@ -41,13 +49,13 @@ value() {  # value NAME ARGS...: the argument after NAME
 
 command=${1:-}; [ $# -gt 0 ] && shift
 case "$command" in
-  fill|fill-group|merge-group|campaign-inspect|campaign-plan|collection)
+  selection-groups|selection-plan|fill-selection-group|validate-selection-group|fill|fill-data-jes|fill-data-jes-group|fill-group|merge-group|campaign-inspect|campaign-plan|campaign-finish|collection)
     if [ -n "${TREETOHISTS_SETUP:-}" ]; then set +u; source ${TREETOHISTS_SETUP}; set -u; fi ;;
 esac
 case "$command" in
   build) build ;;
   plan) current; exec "$binary" plan --home "$package" "$@" ;;
-  fill|fill-group)
+  fill|fill-data-jes|fill-data-jes-group)
     [ -x "$binary" ] || { echo "tree_to_hists.sh: no build/tree_to_hists; run tree_to_hists.sh build first" >&2; exit 1; }
     exec "$binary" "$command" "$@" ;;
   merge) current; exec "$binary" merge "$@" ;;
@@ -68,9 +76,14 @@ case "$command" in
       launch_work=$("$binary" campaign-submit-check --config "$cfg" --home "$package")
       (cd "$launch_work/condor"; condor_submit_dag campaign.dag)
     fi ;;
-  campaign-inspect|campaign-plan|merge-group|collection)
+  selection-groups|selection-plan|fill-selection-group|validate-selection-group|campaign-inspect|campaign-plan|merge-group|collection)
     [ -x "$binary" ] || { echo 'TreeToHists must be built before launching farm workers' >&2; exit 1; }
     exec "$binary" "$command" "$@" ;;
+  campaign-finish)
+    # Where the campaign graph cannot go to DAGMan: the fill groups are queued as plain jobs together with this one,
+    # which waits for them, then merges and writes the validated collection (campaign_finish.py).
+    [ -x "$binary" ] || { echo 'TreeToHists must be built before launching farm workers' >&2; exit 1; }
+    exec python3 "$package/campaign_finish.py" "$binary" "$@" ;;
   local)
     current
     work=$(value --work "$@"); out=$(value --out "$@"); parallel=1
@@ -83,5 +96,5 @@ case "$command" in
     fi
     while IFS= read -r sample; do "$binary" merge --work "$work" --sample "$sample" --out "$out"; done < "$work/samples.txt"
     "$binary" collection --work "$work" --out "$out" ;;
-  *) sed -n '2,23p' "$0" >&2; exit 2 ;;
+  *) sed -n '2,28p' "$0" >&2; exit 2 ;;
 esac

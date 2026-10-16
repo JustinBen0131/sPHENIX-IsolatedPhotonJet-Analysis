@@ -615,6 +615,12 @@ bool PhotonClusterBuilder::calculate_shower_shapes(RawCluster* rc, RawCluster* p
   };
   set_shape("shower_shape_valid", 0.0F);
   set_shape("shower_shape_floor_gev", tower_floor);
+  // Capture the actual arguments used by the primary/named calculation.
+  // These witnesses do not choose a threshold or alter any tower arithmetic.
+  set_shape("shower_shape_energy_source", static_cast<float>(energy_source));
+  set_shape("shower_shape_sum_membership", static_cast<float>(sums));
+  set_shape("shower_shape_moment_membership", static_cast<float>(moments));
+  set_shape("shower_shape_algorithm", 1.0F);
 
   const auto leadtowerindex = rc->get_lead_tower();
   const int lead_ieta = leadtowerindex.first;

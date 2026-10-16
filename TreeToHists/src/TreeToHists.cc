@@ -1,3 +1,4 @@
+#include "NativeModelDefinition.h"
 /* TreeToHists: eventTree v1 files -> one histogram package per DATA collection or simulated sample. */
 
 /* tree_to_hists plan       --settings CFG --inputs INPUTS.yaml --work DIR [--sample SYSTEM/NAME]...
@@ -10,11 +11,15 @@
    one fill job; the Au+Au centrality weights; main. The physics lives in the fills (FillPhotonJet.C,
    FillPhotonJetResponse.C, FillPhotonQA.C) and PhotonJet.h. */
 #include "TreeToHists.h"
+#include "CandidateCachePackage.h"
 #include "BuildInfo.h"
+#include "ScientificProducerEvidence.h"
 #include "Configuration.h"
 #include "FillPhotonQA.C"
 #include "FillPhotonJet.C"
 #include "FillPhotonJetResponse.C"
+#include "EmsComposition.h"
+#include "NativeResponseGrid.h"
 
 #include <array>
 #include <chrono>
@@ -32,6 +37,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <unistd.h>
 
 #include "TEnv.h"
 #include "TFile.h"
@@ -55,9 +61,15 @@ struct Settings {
   std::string path;                 /* the settings file */
   std::string home;                 /* the TreeToHists directory (the canonical packages are found from it) */
   Json selection;                   /* resolved selection (PhotonJetSelectionV1), written to every product and package */
+  Json emsSelectionContract;
+  Json responseGrid;                /* opt-in response components, outside common histogram settings */
   Json axes;                        /* native_xj_edges, native_reco_response_edges_gev, native_truth_response_edges_gev */
-  bool extensions = true, requireStage3Fractions = false;
+  bool extensions = true, requireStage3Fractions = false, candidateCache = false;
+  long candidateCacheMaxRows = 2000000;
+  double candidateCacheMinEt = 0.;
   std::string responseVariation;    /* "" nominal, or the reco energy scale and resolution variation of a systematic run */
+  double jetRadius = 0.4;           /* Fill.JetRadius: the jet collection of the fill, 0.2, 0.3 or 0.4 (photonjet::configureJetRadius) */
+  double dataJetScalePp = 1.0, dataJetScaleAuAu = 1.0;  /* Fill.DataJetScale.pp, .auau: photonjet::configuredDataJetScale */
   static Settings read(const std::string &path, const std::string &home);
 };
 /* Plans and timing receipts bind the same resolved histogram settings. */
@@ -79,7 +91,13 @@ static Json histogramSettings(const Settings &s) {
   std::sort(edges.begin(),edges.end());edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
   histograms.update(Json{{"native_measurement_et_edges_gev",edges}, {"jet_thresholds_gev",photonjet::kJetThresholds},
     {"reported_photon_et_edges_gev",{17,23,33}}, {"require_stage3_fractions",s.requireStage3Fractions},
-    {"response_variation",s.responseVariation}});
+    {"candidate_records",s.candidateCache}, {"candidate_records_max_rows",s.candidateCacheMaxRows}, {"candidate_records_min_et",s.candidateCacheMinEt}, {"response_variation",s.responseVariation}, {"jet_radius",s.jetRadius},
+    {"data_jet_scale",{{"pp",s.dataJetScalePp},{"auau",s.dataJetScaleAuAu}}}});
+  if(!s.emsSelectionContract.is_null()){
+    histograms["ems_selection_contract"]=s.emsSelectionContract;
+    histograms["ems_qa_extensions"]="nominal_archival_only";
+    histograms["ems_candidate_archive"]="original_nominal_inputs_replay_unqualified";
+  }
   return histograms;
 }
 std::string sha256Text(const std::string &text);
@@ -95,7 +113,7 @@ Json reductionCode() {
 #else
   const std::filesystem::path src = std::filesystem::path(__FILE__).parent_path();
 #endif
-  for (const char *name : {"TreeToHists.cc", "TreeToHists.h", "Campaign.cc", "Package.cc", "Isolation.cc", "Corrections.cc", "Configuration.h", "PhotonJet.h", "FillPhotonJet.C", "FillPhotonQA.C", "FillPhotonJetResponse.C"})
+  for (const char *name : {"TreeToHists.cc", "TreeToHists.h", "CandidateCache.h", "CandidateCachePackage.h", "MeasurementAccumulator.h", "CandidateMeasurementReplay.h", "CandidateResponseReplay.h", "ResponseMatching.h", "Campaign.cc", "Package.cc", "Isolation.cc", "Corrections.cc", "Configuration.h", "PhotonJet.h", "Preselection.h", "MbdTimeReference.h", "LeadingAssociation.h", "FillPhotonJet.C", "FillPhotonQA.C", "FillPhotonJetResponse.C", "EnergyVariation.h", "CentralityWeightSource.h", "CentralityReplay.h", "PhotonEnergySelection.h", "PhotonEnergyInputs.h", "NativeEnergyVariation.h", "PurityInputs.h", "SelectionReplay.h", "ResponseOnlyResolution.h", "CollectionContract.h", "EmsComposition.h", "EmsNativeSelection.h", "NativeResponseGrid.h", "SelectionViewContract.h", "SelectionEfficiency.h", "SelectionFanout.cc", "ScientificTrace.h", "HistogramScientificDefinitions.h", "QAScientificContext.h", "MeasurementScientificDefinitions.h", "CandidateScientificContext.h", "ReplayScientificContext.h", "NativeModelDefinition.h", "ScoreReviewScientific.h", "ScoreReview.C", "ScientificProducerEvidence.h"})
     code[name] = sha256File((src / name).string());
   code["TreeProduction/Configuration.h"] = sha256File((src / "../../TreeProduction/src/internal/Configuration.h").lexically_normal().string());
   return code;
@@ -148,9 +166,12 @@ void checkVertexFit(const Json &sample) {
 /* The p+p simulation periods (photonjet::configurePpPeriods, the PPG12 two-period sum): TreeProduction's ppg12_weights,
    the constants and truth-vertex fits the producer used for each source's own period. Mode all (the default) sums
    every period per event; mode source keeps w_event as written. */
-Json ppSimulationPeriods(const std::filesystem::path &home, const std::string &mode) {
+Json ppSimulationPeriods(const std::filesystem::path &home, const std::string &mode,const std::string &fitDirectory="") {
   if (mode != "all" && mode != "source") throw std::runtime_error("pp.SimulationPeriods is all or source");
-  if (mode == "source") return Json{{"mode", mode}};
+  if (mode == "source") {
+    if(!fitDirectory.empty())throw std::runtime_error("pp.VertexFitDirectory requires SimulationPeriods: all");
+    return Json{{"mode", mode}};
+  }
   const std::filesystem::path config = (home / "../TreeProduction/config/tree_production.yaml").lexically_normal();
   const Json w = photonjet_config::readYaml(config.string()).at("ppg12_weights");
   const double total = w.at("total_luminosity_pb_inv").get<double>();
@@ -163,6 +184,8 @@ Json ppSimulationPeriods(const std::filesystem::path &home, const std::string &m
     shares += share;
     periods[name] = {{"share", share}, {"double_fraction", p.at("double_fraction")}, {"luminosity_pb_inv", p.at("luminosity_pb_inv")},
                      {"runs", p.at("runs")}, {"fit", {{"path", fit.at("file")}, {"sha256", fit.at("sha256")}, {"histogram", fit.at("histogram")}}}};
+    // A portable location override changes neither the fit bytes nor its expected hash.
+    if(!fitDirectory.empty())periods[name]["fit"]["path"]=(std::filesystem::path(fitDirectory)/name/"reweight.root").string();
   }
   if (periods.empty() || std::abs(shares - 1.0) > 1e-9) throw std::runtime_error("the p+p period luminosities do not add up to the total");
   return Json{{"mode", mode}, {"rule", "w = w_slice x sum_p share_p x mix_p x v_p(z_truth)"}, {"total_luminosity_pb_inv", total},
@@ -429,7 +452,10 @@ Json optionalSelection(const std::filesystem::path &path, const std::string &sys
           relativeModel.empty() || relativeModel.rfind("..",0)==0 || !release.at("artifacts").contains(relativeModel))
         throw std::runtime_error("native model artifact is not bound to the released H70 inputs");
       Json row=cells.at(i);row["file"]=std::filesystem::canonical(filename).string();row["key"]=evaluation.at("key");
-      row["sha256"]=release.at("artifacts").at(relativeModel);nativeCells.push_back(row);
+      row["sha256"]=release.at("artifacts").at(relativeModel);
+      if(sha256File(filename.string())!=row.at("sha256").get<std::string>())throw std::runtime_error("native model bytes changed before scientific capture");
+      row["scientific_function"]=photonjet_science::readRBDTDefinition(filename.string(),evaluation.at("key"),features.at("order"));
+      nativeCells.push_back(row);
     }
     if (native) result["native_evaluation"]={{"type","ROOT_RBDT"},{"feature_contract",features},{"domain",d},{"cells",nativeCells}};
   }
@@ -518,7 +544,8 @@ Settings Settings::read(const std::string &path, const std::string &home) {
   s.path = std::filesystem::absolute(path).string();
   s.home = root.string();
   std::set<std::string> known = {"Selection.Name", "Selection.PhotonIDPackage", "Selection.AuAuIsolationPackage", "Selection.PhotonIDModels", "Axes.XjEdges",
-                                 "Axes.RecoResponseEdges", "Axes.TruthResponseEdges", "Fill.RequireStage3Fractions", "Fill.ResponseVariation"};
+                                 "Axes.RecoResponseEdges", "Axes.TruthResponseEdges", "Fill.Preselection", "Fill.RequireStage3Fractions", "Fill.ResponseVariation", "Fill.EMSContract", "Fill.PhotonJetRecords", "Fill.RecordMaxRows", "Fill.RecordMinEt", "Fill.PhotonJetRecordsMatchMode", "Fill.JetRadius",
+                                 "Fill.DataJetScale.pp", "Fill.DataJetScale.auau", "Fill.OutputMode", "Fill.ResponseGrid"};
 
   /* the frozen packages */
   const auto canonicalId = (root / "../PhotonID/models/nominal.json").lexically_normal(), canonicalIso = root / "config/auau_isolation_wp80.json";
@@ -535,7 +562,7 @@ Settings Settings::read(const std::string &path, const std::string &home) {
     const std::string prefix = system + ".";
     for (const char *k : {"ScoreBranch", "StateBranch", "ScoreMetadata", "Tight", "NonTightLow", "NonTightHigh", "IsolationRadius",
                           "IsolationThreshold", "IsolationSidebandGap", "PhotonIDSelection", "Model", "ScoreMode",
-                          "TightWP", "NonTightWP", "NonTightMinimum", "DataTrigger", "SimulationPeriods"})
+                          "TightWP", "NonTightWP", "NonTightMinimum", "DataTrigger", "SimulationPeriods", "VertexFitDirectory"})
       known.insert(prefix + k);
     auto has = [&](const char *k) { return !value(env, prefix + k).empty(); };
     const Json &spec = pid.at(system);
@@ -564,7 +591,8 @@ Settings Settings::read(const std::string &path, const std::string &home) {
                 {"non_tight_high", {{"intercept", 0.684375}, {"slope", 0.0015625}}}};
       }
       isolation = {{"radius", 0.4}, {"subtraction_method", 1}, {"threshold", "stored"}, {"sideband_gap_gev", nullptr},
-                   {"centrality_min", 0.0}, {"centrality_max", 80.0}, {"package_sha256", nullptr}};
+                   {"centrality_min", 0.0}, {"centrality_max", 80.0}, {"package_sha256", nullptr},
+                   {"simulation_scale",1.2},{"simulation_shift_gev",0.1},{"non_isolated_max_gev",20.0}};
     }
     const Json originalCuts = cuts, originalIsolation = isolation;
     const std::string trigger = has("DataTrigger") ? value(env, prefix + "DataTrigger") : system == "auau" ? "photon12" : "photon4";
@@ -607,10 +635,12 @@ Settings Settings::read(const std::string &path, const std::string &home) {
                       {"event_selection",
                        {{"vertex_abs_z_max_cm", system == "auau" ? 10.0 : 60.0}, {"require_minimum_bias", system == "auau"},
                         {"trigger_word", "scaled"},
-                        {"trigger_name", system == "auau" ? "Photon 12 GeV + MBD NS >= 2, vtx < 150 cm" : "Photon 4 GeV + MBD NS >= 1"},
+                        {"trigger_name", system == "auau" ? "Photon 12 GeV + MBD NS >= 2, vtx < 150 cm" : "Photon 4 GeV"},
                         {"data_run_periods", system == "auau" ? Json::object() : Json{{"0mrad", {47289, 51274}}, {"1p5mrad", {51274, 54000}}}}}},
                       {"verify_nominal_id", nominalScore && cuts == originalCuts && pidSha == sha256File(canonicalId.string())},
-                      {"verify_nominal_isolation", isolation == originalIsolation && (system == "pp" || isoSha == sha256File(canonicalIso.string()))}});
+                      // pp stored classes precede the SIM transform and20GeV end;
+                      // derive the requested classes from raw witnesses at fill time.
+                      {"verify_nominal_isolation", system == "auau" && isolation == originalIsolation && isoSha == sha256File(canonicalIso.string())}});
     if (has("Model") && has("PhotonIDSelection"))
       throw std::runtime_error("choose Model or the explicit PhotonIDSelection path, not both");
     std::filesystem::path modelSelection;
@@ -627,7 +657,7 @@ Settings Settings::read(const std::string &path, const std::string &home) {
         throw std::runtime_error("selected model release is unavailable: "+modelSelection.string());
     }
     if (!modelSelection.empty()) {
-      for (const char *k : {"ScoreBranch", "StateBranch", "ScoreMetadata", "Tight", "NonTightLow", "NonTightHigh"})
+      for (const char *k : {"ScoreBranch", "StateBranch", "ScoreMetadata", "NonTightLow"})
         if (has(k)) throw std::runtime_error("an optional release owns its score and working points; do not override " + prefix + k);
       const std::string tight=has("TightWP") ? value(env,prefix+"TightWP") : "WP70";
       const std::string high=has("NonTightWP") ? value(env,prefix+"NonTightWP") : "WP80";
@@ -638,6 +668,29 @@ Settings Settings::read(const std::string &path, const std::string &home) {
         low=values[0];
       }
       Json optional = optionalSelection(modelSelection, system,spec.at("features"),tight,high,low);
+      const bool explicitLines=has("Tight") || has("NonTightHigh");
+      if (explicitLines) {
+        if (system!="auau" || !has("Tight") || !has("NonTightHigh") || has("TightWP") || has("NonTightWP"))
+          throw std::runtime_error("explicit release working points need AuAu Tight and NonTightHigh together and no WP aliases");
+        // The non-tight lower edge is a selection nuisance. optionalSelection
+        // validates its finite score range; each explicit band must still be disjoint.
+        const Json tightLine=cuts.at("tight"), highLine=cuts.at("non_tight_high");
+        for (auto &cell : optional["cells"]) {
+          for (const auto &x : cell.at("centrality")) {
+            const double t=tightLine.at("intercept").get<double>()+tightLine.at("slope").get<double>()*x.get<double>();
+            const double h=highLine.at("intercept").get<double>()+highLine.at("slope").get<double>()*x.get<double>();
+            if (!(low<h && h<=t && t<=1.0)) throw std::runtime_error("explicit AuAu working-point bands overlap or are invalid");
+          }
+          cell["tight"]=tightLine;cell["non_tight_high"]=highLine;
+        }
+        if(optional.contains("native_evaluation")) for(auto &cell : optional["native_evaluation"]["cells"]) {
+          cell["tight"]=tightLine;cell["non_tight_high"]=highLine;
+        }
+        optional["release_working_points_sha256"]=optional.at("working_points_sha256");
+        optional.erase("working_points_sha256");
+        optional["working_point_choice"]={{"mode","explicit"},{"variable","cent_value"},
+          {"tight",tightLine},{"non_tight_upper",highLine},{"non_tight_lower",low}};
+      }
       // Named models use stored scores normally. The explicit selection-path
       // interface retains native evaluation for pinned production recipes.
       const std::string mode=has("ScoreMode") ? value(env,prefix+"ScoreMode") : (has("Model") ? "stored" : "native");
@@ -661,10 +714,23 @@ Settings Settings::read(const std::string &path, const std::string &home) {
       throw std::runtime_error("model/working-point options require a selected Model or PhotonIDSelection");
     }
     /* p+p simulation: the PPG12 sum over crossing-angle periods (photonjet::configurePpPeriods) */
-    if (system == "pp") entry["simulation_periods"] = ppSimulationPeriods(root, has("SimulationPeriods") ? value(env, prefix + "SimulationPeriods") : "all");
-    else if (has("SimulationPeriods")) throw std::runtime_error("SimulationPeriods applies to p+p simulation only");
+    if (system == "pp") {
+      const auto directory=value(env,prefix+"VertexFitDirectory");
+      const std::string fitDirectory=directory.empty()?"":std::filesystem::weakly_canonical(std::filesystem::path(path).parent_path()/directory).string();
+      entry["simulation_periods"] = ppSimulationPeriods(root, has("SimulationPeriods") ? value(env, prefix + "SimulationPeriods") : "all",fitDirectory);
+    } else if (has("SimulationPeriods") || has("VertexFitDirectory")) throw std::runtime_error("simulation-period and vertex-fit locations apply to p+p only");
     resolved["systems"][system] = entry;
   }
+  const auto preselection=value(env,"Fill.Preselection");
+  if(!preselection.empty() && preselection!="newPPG12")throw std::runtime_error("Fill.Preselection must be canonical newPPG12");
+  resolved["preselection"]=photonjet::canonicalPreselection();
+  resolved["timing_reference"]=photonjet::timingReferenceContract();
+  resolved["fill_diagnostics"]={
+    {"data_timecut",{{"formula","isfinite(pho_time_ns) && abs(pho_time_ns+2)<6"},{"units","ns"},{"scope","DATA_only_both_systems"},{"nominal_changed",false},{"leader_recomputed",true},{"event_records",true}}},
+    {"leading_global",{{"chronology","global_stored_leading_after_finite_pt_overlap_then_eta_recoil_veto_no_fallback"},{"match","matched_signal_photon_and_direct_leading_jet_deltaR_le_0.3"},{"response_grid_restriction",false},{"et_bins_gev",1},{"xj_bins",0.05}}},
+    {"reco_pair_truth_reason",{{"schema","RecoPairTruthReasonV1"},{"bit_semantics","independent_positive_facts"},{"truth_fa_et_window_gev",{17,33}},
+      {"bits",{"photon_matched_to_response_truth","final_analysis_jet_link","truth_photon_in_native_response_grid","valid_response_truth_photon","linked_truth_jet_pt_pass","linked_truth_jet_eta_pass","linked_truth_jet_overlap_pass","linked_truth_jet_recoil_pass","linked_truth_xj_in_native_grid","linked_partner_available","linked_partner_already_taken","any_stored_truth_jet_nearby","above_threshold_stored_truth_jet_nearby","stored_truth_jet_collection_empty","linked_truth_jet_nonfinite","truth_photon_in_17_33"}}}}
+  };
   resolved["selection_sha256"] = digest(resolved);
   resolved["profile"] = "selection:" + resolved["selection_sha256"].get<std::string>();
   resolved["name"] = required(env, "Selection.Name");
@@ -692,6 +758,47 @@ Settings Settings::read(const std::string &path, const std::string &home) {
   if (stage3 != "0" && stage3 != "1") throw std::runtime_error("Fill.RequireStage3Fractions is 0 or 1");
   s.requireStage3Fractions = stage3 == "1";
   s.responseVariation = value(env, "Fill.ResponseVariation");
+  const auto selectedVariation=photonjet::response::parseVariation(s.responseVariation.c_str());
+  const auto emsPath=value(env,"Fill.EMSContract");
+  if(photonjet::response::emsSelectionResponse(selectedVariation)){
+    if(emsPath.empty())throw std::runtime_error("EMS requires explicit Fill.EMSContract");
+    s.emsSelectionContract=readJson(relative(emsPath).string());
+    photonjet::ems_native::validateContract(s.emsSelectionContract);
+    if(s.emsSelectionContract.at("selection")!=s.selection)throw std::runtime_error("EMS contract selection differs");
+  }else if(!emsPath.empty())throw std::runtime_error("Fill.EMSContract requires explicit EMS composition mode");
+  photonjet::response::requireRunnableVariation(selectedVariation,!s.emsSelectionContract.is_null());
+  const auto cache=value(env,"Fill.PhotonJetRecords");
+  const auto gridPath=value(env,"Fill.ResponseGrid");
+  if(!gridPath.empty()) {
+    if(!s.responseVariation.empty() || !s.emsSelectionContract.is_null())throw std::runtime_error("Fill.ResponseGrid owns its response recipes; leave Fill.ResponseVariation/EMSContract empty");
+    s.responseGrid=readJson(relative(gridPath).string());
+    photonjet::response::native_grid::validateSettings(s.responseGrid);
+  }
+  if(!cache.empty() && cache!="0" && cache!="1")throw std::runtime_error("Fill.PhotonJetRecords is 0 or 1");
+  s.candidateCache=cache=="1";
+  const auto cacheRows=value(env,"Fill.RecordMaxRows");
+  if(!cacheRows.empty()){if(cacheRows.find_first_not_of("0123456789")!=std::string::npos)throw std::runtime_error("invalid candidate cache row limit");s.candidateCacheMaxRows=std::stol(cacheRows);}
+  if(s.candidateCacheMaxRows<1 || s.candidateCacheMaxRows>10000000)throw std::runtime_error("candidate cache row limit outside 1..10000000");
+  const auto cacheEt=value(env,"Fill.RecordMinEt");
+  if(!cacheEt.empty()){size_t used=0;s.candidateCacheMinEt=std::stod(cacheEt,&used);if(used!=cacheEt.size())throw std::runtime_error("invalid candidate cache ET floor");}
+  if(!std::isfinite(s.candidateCacheMinEt)||s.candidateCacheMinEt<0||s.candidateCacheMinEt>12)throw std::runtime_error("candidate cache ET floor outside 0..12 GeV");
+  /* The jet radius is a choice of the fill, not of the photon selection: the selection identity, the weights bound
+     to it and the header inspection stay valid for every radius. A package records its radius in its histogram
+     settings, so a collection cannot mix radii. */
+  if (!value(env, "Fill.JetRadius").empty()) {
+    const auto radius = numbers("Fill.JetRadius", value(env, "Fill.JetRadius"));
+    if (radius.size() != 1 || (radius[0] != 0.2 && radius[0] != 0.3 && radius[0] != 0.4))
+      throw std::runtime_error("Fill.JetRadius is 0.2, 0.3 or 0.4");
+    s.jetRadius = radius[0];
+  }
+  /* The in-situ jet energy scale of DATA, per system: a calibration applied to DATA jets when they are read. */
+  for (const auto &[key, target] : {std::pair<const char *, double *>{"Fill.DataJetScale.pp", &s.dataJetScalePp},
+                                    {"Fill.DataJetScale.auau", &s.dataJetScaleAuAu}}) {
+    if (value(env, key).empty()) continue;
+    const auto scale = numbers(key, value(env, key));
+    if (scale.size() != 1 || !(scale[0] > 0.8 && scale[0] < 1.25)) throw std::runtime_error(std::string(key) + " is one factor between 0.8 and 1.25");
+    *target = scale[0];
+  }
   TIter next(env.GetTable());
   while (auto *record = static_cast<TEnvRec *>(next()))
     if (!known.count(record->GetName())) throw std::runtime_error(path + ": unknown setting " + record->GetName());
@@ -727,13 +834,16 @@ Json inventory(const std::string &system, const std::string &family) {
   const std::vector<std::string> labels = !sim ? std::vector<std::string>{"data"}
                                           : family == "photonjet" ? std::vector<std::string>{"sig", "phoother"} : std::vector<std::string>{"bkg", "jetprompt"};
   const std::string F = !sim ? "data" : family == "photonjet" ? "phosim" : "jetsim";
-  const std::vector<std::string> shapes = {"e11_over_e33", "e32_over_e35", "bdt", "weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx", "et1", "et2", "et3", "et4"};
-  const std::vector<std::string> widths = {"weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx"};
+  const std::vector<std::string> shapes = {"e11_over_e33", "e32_over_e35", "bdt", "weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx", "weta35_cogx", "wphi53_cogx", "et1", "et2", "et3", "et4"};
+  const std::vector<std::string> widths = {"weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx", "weta35_cogx", "wphi53_cogx"};
   const std::vector<std::pair<std::string, std::string>> response = {
       {"photon_reco", "reco_et"}, {"photon_truth", "truth_et"}, {"photon_response_truth_x_reco", "truth_et,reco_et"},
       {"photon_fakes", "reco_et"}, {"photon_misses", "truth_et"}, {"xj_reco", "reco_et,xj"}, {"xj_truth", "truth_et,xj"},
       {"xj_response_truth_global_x_reco_global", "truth_cell,reco_cell"}, {"xj_fakes", "reco_et,xj"}, {"xj_fake_photon_reco", "reco_et,xj"},
       {"xj_detector_fakes_reco", "reco_et,xj"}, {"xj_misses", "truth_et,xj"}, {"xj_combinatoric_reco", "reco_et,xj"},
+      {"xj_leading_reco", "reco_et,xj"}, {"xj_leading_matched_reco", "reco_et,xj"},
+      {"xj_leading_global_reco","reco_et_1gev,xj_005"},{"xj_leading_global_matched_reco","reco_et_1gev,xj_005"},
+      {"reco_pair_truth_reason","reco_et,xj,reason_bitmask"},
       {"signal_leakage_truth_matched_abcd", "region_abcd,reco_et"}, {"dphi_truthjet_near", "reco_et,xj,dphi"},
       {"dphi_truthjet_far", "reco_et,xj,dphi"}, {"dphi_combinatoric_near", "reco_et,xj,dphi"}, {"dphi_combinatoric_far", "reco_et,xj,dphi"}};
   Json rows = Json::array();
@@ -748,19 +858,22 @@ Json inventory(const std::string &system, const std::string &family) {
     add("measurement/" + c + "/abcd", "region_abcd,et", "spectra", "abcd_" + c);
     for (int t : {5, 7, 10, 12}) {
       const std::string jet = "jet" + std::to_string(t);
+      add("measurement/"+c+"/"+jet+"/leading_global","reco_et_1gev,xj_005","spectra","leading_global_"+c+"_"+jet);
       add("measurement/" + c + "/" + jet + "/recoil", "region_ac,et,xj", "spectra", "recoil_" + c + "_" + jet);
       for (const char *region : {"A", "C"})
         for (const char *side : {"near", "far"})
           add("measurement/" + c + "/" + jet + "/dphi" + region + "_" + side, "et,xj,dphi", "spectra",
               std::string("dphi") + region + "_" + c + "_" + jet + "_" + side);
       if (sim) for (const auto &[n, axes] : response) add("response/" + c + "/" + jet + "/" + n, axes, "response", n + "_" + c + "_" + jet);
+      if(sim && !auau)for(const std::string n:{"xj_leading_reco_u","xj_leading_matched_reco_u","xj_leading_matched_any_reco_u"})
+        add("response/"+c+"/"+jet+"/"+n,"reco_et_1gev,xj_005","response",n+"_"+c+"_"+jet);
     }
     for (const auto &label : labels) {
       const std::string dest = "qa/photons/" + c + "/" + label, tag = label + "_" + c;
       for (const auto &v : shapes) add(dest + "/shape_" + v, v + ",et,stage", "qa", "ss_" + v + "_" + tag);
       for (const auto &[n, axes] : std::vector<std::pair<std::string, std::string>>{
-               {"ncb", "npb,et"}, {"iso", "iso,et,id"}, {"abcd", "region_abcd,et"}, {"recoil", "region_ac,et,xj"},
-               {"scoreiso", "score,iso,et"}, {"clu_et", "wide_et,stage"}, {"clu_etaphi", "eta,phi,stage"}})
+               {"preselection_compare", "stored_flag,canonical_npb,et"}, {"ncb", "npb,et"}, {"iso", "iso,et,id"}, {"abcd", "region_abcd,et"}, {"recoil", "region_ac,et,xj"},
+               {"scoreiso", "score,iso,et"}, {"scoreiso_fine", "score,iso,et"}, {"clu_et", "wide_et,stage"}, {"clu_etaphi", "eta,phi,stage"}})
         add(dest + "/" + n, axes, "qa", n + "_" + tag);
       if (auau) add(dest + "/isonoue", "iso,et,id", "qa", "isonoue_" + tag);
       if (sim) {
@@ -771,9 +884,14 @@ Json inventory(const std::string &system, const std::string &family) {
     for (const auto &[n, axes] : std::vector<std::pair<std::string, std::string>>{
              {"evt_vz", "vz"}, {"jet_pt", "jet_pt,event_selection"}, {"jet_etaphi", "jet_eta,jet_phi,event_selection"}})
       add("qa/events/" + c + "/" + n, axes, "qa", n + "_" + F + "_" + c);
+    if (auau && sim) add("qa/events/"+c+"/evt_vz_novertexweight","vz","qa","evt_vz_novertexweight_"+F+"_"+c);
     if (!sim) {
       add("qa/photons/" + c + "/data/e11e33_dt", "e11_over_e33,et,time_minus_mbd", "qa", "e11e33_dt_data_" + c);
       add("qa/photons/" + c + "/data/etatime", "eta,time_minus_mbd", "qa", "etatime_data_" + c);
+      add("qa/photons/"+c+"/data/time_stage","corrected_time,et,stage","qa","clu_time_stage_data_"+c);
+      add("qa/photons/"+c+"/data/etatime_stage","eta,corrected_time,stage","qa","clu_etatime_stage_data_"+c);
+      add("qa/photons/"+c+"/data/etatime_npb","eta,corrected_time,npb_score","qa","clu_etatime_npb_data_"+c);
+      add("qa/photons/"+c+"/data/rawtime_stage","raw_time,et,stage","qa","clu_rawtime_stage_data_"+c);
     }
     if (family == "photonjet") {
       add("qa/truth/" + c + "/truth_iso", "truth_iso,truth_et,prompt_class", "qa", "truth_iso_" + c);
@@ -796,10 +914,19 @@ Json inventory(const std::string &system, const std::string &family) {
   add("qa/events/calo_total", "calo_total,centrality,mb_state", "qa", "evt_calo_" + F);
   if (auau) {
     add("qa/events/centrality", "centrality,weight_mode", "qa", "evt_cent_" + F);
-    if (!sim) add("qa/events/centrality_scaled_bits", "centrality,scaled_bit", "qa", "cent_bits_data");
+    if(sim)add("qa/events/vertex","vz,weight_mode","qa","evt_vzw_"+F);
+    if (!sim) {
+      add("qa/events/centrality_scaled_bits", "centrality,scaled_bit", "qa", "cent_bits_data");
+      add("qa/events/vertex_selected", "vz", "qa", "evt_vz_selected_data");
+      add("qa/events/vertex_selected_wide","vz","qa","evt_vz_selected_wide_data");
+    }
   }
   if (sim) {
     add("qa/generator/leading_pt", "generator_pt,generator_kind", "qa", "gen_" + F);
+    add("qa/generator/raw_leading_pt", "generator_pt,generator_kind", "qa", "gen_raw_" + F);
+    if (!auau) {
+      add("qa/stitching/reco_tag_vz30", "photon_et", "qa", "reco_tag_vz30_" + F);
+    }
     add("qa/photon_id/score_roles", "score,et,centrality_slice,truth_role", "extensions");
   } else {
     add("qa/events/trigger_bits_raw", "max_cluster_energy,scaled_bit,live_bit", "qa", "trig_data");
@@ -813,6 +940,20 @@ Json inventory(const std::string &system, const std::string &family) {
   for (const std::string d : {"emcal", "ihcal", "ohcal", "total"}) {
     add("qa/events/" + d + "_vs_mbd_charge", "calo_" + d + ",mbd_charge,mb_state", "extensions");
     if (d != "total") add("qa/events/" + d + "_vs_centrality", "calo_" + d + ",centrality,mb_state", "extensions");
+  }
+  if(!sim){const Json original=rows;for(const auto&row:original)if(row.at("kind")=="spectra")
+    add("variations/data_timecut/"+row.at("path").get<std::string>(),row.at("axes"),"spectra","timecut/"+row.at("key").get<std::string>());}
+  return rows;
+}
+
+Json packageInventory(const Json &plan,const Json &sample) {
+  Json rows=inventory(sample.at("system"),sample.at("family"));
+  if(sample.at("family")=="data" || !plan.contains("response_component_grid"))return rows;
+  const auto &config=plan.at("response_component_grid");photonjet::response::native_grid::validateSettings(config);
+  const Json nominal=rows;
+  for(const auto &variant:config.at("variants"))if(variant.at("name")!="nominal")for(auto row:nominal)if(row.at("kind")=="response") {
+    const std::string name=variant.at("name");row["path"]="response_components/"+name+"/"+row.at("path").get<std::string>();
+    row["kind"]="response__"+name;rows.push_back(row);
   }
   return rows;
 }
@@ -915,7 +1056,7 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
     progress.finish(); return;
   }
   fs::remove(partial);
-  const Json rows = inventory(system, family);
+  const Json rows = packageInventory(plan,sample);
   const std::string selectionText = plan.at("selection").dump(), profile = plan.at("selection").at("profile");
   std::unique_ptr<TFile> out(TFile::Open(partial.c_str(), "CREATE"));
   if (!out || out->IsZombie()) throw std::runtime_error("cannot create " + partial.string());
@@ -938,12 +1079,17 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
   sources.Branch("contribution_end", &contributionEnd);
   std::map<std::string, std::unique_ptr<TH1>> sums;
   std::map<std::string, std::unique_ptr<THnSparse>> sparse;
-  RecordTable events, photons, jets;
-  Long64_t eventOffset = 0;
+  RecordTable events, photons, jets, timeEvents, timePhotons, timeJets;
+  CandidateCachePackage candidateCache;
+  Long64_t eventOffset = 0, timeEventOffset = 0;
   Json available = Json::object();
+  Json nativeAncestry=Json::array();
   std::string grids;
+  Json dataJesFusion;
   std::vector<std::string> kinds = {"spectra", "qa", "extensions"};
   if (family != "data") kinds.push_back("response");
+  if(family!="data" && plan.contains("response_component_grid"))for(const auto &v:plan.at("response_component_grid").at("variants"))
+    if(v.at("name")!="nominal")kinds.push_back("response__"+v.at("name").get<std::string>());
   long long denominator = 0, missing = 0;  /* the canonical Au+Au embedded stitching: the events the fill jobs counted */
   for (const auto &src : sample.at("sources")) {
     const long sourceIndex = src.value("index", source);
@@ -981,8 +1127,39 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
           throw std::runtime_error("filled product hash differs: " + product.string());
         std::unique_ptr<TFile> in(TFile::Open(product.c_str(), "READ"));
         if (!in || in->IsZombie()) throw std::runtime_error("cannot open product " + product.string());
+        nativeAncestry.push_back(photonjet_science::producerInput(*in));
         if (text(*in, "profile") != profile || text(*in, "selection") != selectionText)
           throw std::runtime_error("product selection differs: " + dir.string());
+        if(plan.contains("response_component_grid") && (kind=="response" || kind.rfind("response__",0)==0)) {
+          const std::string label=kind=="response"?"nominal":kind.substr(10);
+          const auto provenance=Json::parse(text(*in,"native_response_grid"));
+          const auto &spec=provenance.at("grid");
+          if(spec.value("ems_selection_contract",Json())!=plan.at("response_component_grid").value("ems_selection_contract",Json()))
+            throw std::runtime_error("response component EMS contract differs from planned configuration");
+          const Json expectedSource={{"path",src.at("path")},{"sha256",src.at("expected_sha256")},{"input_file_sha256",src.at("identity")},{"entries",src.at("metadata").at("entries")},{"entry_begin",begin},{"entry_end",end}};
+          if(spec.at("sources")!=Json::array({expectedSource}))throw std::runtime_error("response component original source/range differs");
+          Json resolved=Json::array();for(const auto &v:plan.at("response_component_grid").at("variants")) {
+            Json row=v;row["plan"]=photonjet::response::native_grid::resolvedPlan(spec,row);row["plan_sha256"]=digest(row["plan"]);resolved.push_back(row);
+          }
+          if(spec.at("variants")!=resolved)throw std::runtime_error("response component resolved plan roster differs");
+          if(provenance.at("scope")!="RESPONSE_COMPONENT_ONLY" || provenance.at("grid_sha256")!=digest(spec) ||
+             spec.at("producer_code")!=plan.at("producer_code") || spec.at("limits")!=plan.at("response_component_grid").at("limits"))
+            throw std::runtime_error("response component code/configuration binding differs");
+          bool matched=false;
+          for(const auto &v:plan.at("response_component_grid").at("variants"))if(v.at("name")==label) {
+            matched=provenance.at("variant").at("variation")==v.at("variation") &&
+              Json::parse(text(*in,"variation"))==Json::parse(photonjet::response::variationJson(photonjet::response::parseVariation(v.at("variation").get<std::string>().c_str())));
+          }
+          if(!matched)throw std::runtime_error("response component variant binding differs");
+        }
+        if(kind=="spectra" && in->Get("data_jes_fusion")) {
+          const auto provenance=Json::parse(text(*in,"data_jes_fusion"));
+          if(!done.contains("data_jes_fusion") || done.at("data_jes_fusion").at("science_traversals")!=1 || provenance.at("qa_extensions")!="nominal_reused" || provenance.at("scale")!=plan.at("histograms").at("data_jet_scale").at("pp"))
+            throw std::runtime_error("DATA JES spectrum lacks shared-traversal lineage");
+          auto binding=provenance;binding.erase("science_readers");binding.erase("original_entries");
+          if(!dataJesFusion.is_null() && dataJesFusion!=binding)throw std::runtime_error("DATA JES view lineage differs");
+          dataJesFusion=binding;
+        }
         if (kind == "response") {
           const std::string g = text(*in, "grids");
           if (!grids.empty() && grids != g) throw std::runtime_error("response grids differ between sources");
@@ -1005,12 +1182,12 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
           }
           if (auto *h = dynamic_cast<TH1 *>(obj)) {
             if (h->GetSumw2N() != h->GetNcells()) throw std::runtime_error("histogram without explicit Sumw2: " + path);
-            const bool runQA = kind == "qa" && (path == "qa/events/centrality_scaled_bits" || path == "qa/events/trigger_bits_raw" || path == "qa/events/trigger_study_bits_raw" || path == "qa/events/centrality");
+            const bool runQA = kind == "qa" && (path == "qa/events/centrality_scaled_bits" || path == "qa/events/trigger_bits_raw" || path == "qa/events/trigger_study_bits_raw" || path == "qa/events/centrality" || path == "qa/events/vertex_selected" || path == "qa/events/vertex_selected_wide" || path == "qa/events/vertex");
             for (int cell = 0; cell < h->GetNcells(); ++cell) {
               if (cell%10000==0) ReductionProgress::pulse("merging_histograms");
               const double v = h->GetBinContent(cell), e = h->GetSumw2()->At(cell);
               if (!std::isfinite(v) || !std::isfinite(e) || e < 0) throw std::runtime_error("invalid histogram cell in " + path);
-              if ((kind == "response" || kind == "spectra" || runQA) && (v != 0 || e != 0)) {
+              if ((kind == "response" || kind.rfind("response__",0)==0 || kind == "spectra" || runQA) && (v != 0 || e != 0)) {
                 auto &sum = cells[{path, cell}];
                 sum.first += v, sum.second += e;
               }
@@ -1020,6 +1197,7 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
             } else {
               sameAxes(*sums[path], *h);
               if (!sums[path]->Add(h)) throw std::runtime_error("histogram addition failed: " + path);
+              photonjet_science::mergeDefinitions(*sums[path],*h);
             }
           } else if (auto *h = dynamic_cast<THnSparse *>(obj)) {
             if (!sparse.count(path)) sparse[path].reset(static_cast<THnSparse *>(h->Clone()));
@@ -1034,7 +1212,19 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
           events.append(*ev, "events", source, eventOffset, records);
           photons.append(*ph, "photons", source, eventOffset, records);
           jets.append(*jt, "jets", source, eventOffset, records);
+          if(plan.at("histograms").value("candidate_records",false))candidateCache.append(*in,"table_candidates_",source,records);
           eventOffset += ev->GetEntries();
+          if (family == "data") {
+            auto *te = dynamic_cast<TTree *>(in->Get("timecut/table_events"));
+            auto *tp = dynamic_cast<TTree *>(in->Get("timecut/table_photons"));
+            auto *tj = dynamic_cast<TTree *>(in->Get("timecut/table_jets"));
+            if (!te || !tp || !tj) throw std::runtime_error("timing event records missing from " + dir.string());
+            auto *timing = directory(*out, "variations/data_timecut/records");
+            timeEvents.append(*te, "events", source, timeEventOffset, timing);
+            timePhotons.append(*tp, "photons", source, timeEventOffset, timing);
+            timeJets.append(*tj, "jets", source, timeEventOffset, timing);
+            timeEventOffset += te->GetEntries();
+          }
         }
       }
     }
@@ -1058,7 +1248,51 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
       }
       cells.insert(derived.begin(),derived.end());
     }
+    // DATA readers use only these QA cells. Filter after the full raw study has
+    // built its corrected aggregate above; changing that input would change physics.
+    // Keep all study cells for unavailable run metadata (conservative fallback).
+    const auto study=sample.value("data_run",Json::object()).value("trigger_study",Json::object());
+    const bool studyAvailable=study.value("status","")=="AVAILABLE";
+    const auto *studyShape=sums.count("qa/events/trigger_study_bits_raw")
+      ? dynamic_cast<TH3 *>(sums.at("qa/events/trigger_study_bits_raw").get()) : nullptr;
+    std::set<int> readerBits;
+    if (family=="data" && studyAvailable && studyShape) {
+      // Match FinalAnalysis sourceStudies: exact name, else FIRST preferred prefix.
+      // dataRunRecord's factor lookup has different duplicate-prefix precedence.
+      const auto &names=sample.at("data_run").at("trigger_record").at("name");
+      const std::vector<std::string> targets=system=="AuAu"
+        ? std::vector<std::string>{"MBD N&S >= 2, vtx < 150 cm","Photon 10 GeV + MBD NS >= 2","Photon 12 GeV + MBD NS >= 2"}
+        : std::vector<std::string>{"MBD N&S >= 1","Photon 3 GeV + MBD NS >= 1","Photon 4 GeV + MBD NS >= 1","Photon 5 GeV + MBD NS >= 1"};
+      for (const auto &target : targets) {
+        int bit=-1,first=-1,preferred=-1;
+        for (size_t i=0;i<names.size();++i) if (names[i]==target) {bit=i;break;}
+        if (bit<0) {
+          for (size_t i=0;i<names.size();++i) {
+            const std::string name=names[i];
+            if (name.rfind(target,0)!=0) continue;
+            if (first<0) first=i;
+            if (preferred<0 && name.find("vtx < 150 cm")!=std::string::npos) preferred=i;
+          }
+          bit=preferred>=0 ? preferred : first;
+        }
+        if (bit<0) throw std::runtime_error("AVAILABLE trigger study lacks its reader bit");
+        readerBits.insert(bit);
+      }
+    }
     for (const auto &[cell, sum] : cells) {
+      if (family=="data") {
+        const auto &path=cell.first;
+        bool keep=path=="qa/events/centrality_scaled_bits" || path=="qa/events/vertex_selected" || path=="qa/events/centrality";
+        if (path=="qa/events/trigger_bits_raw" && !studyShape) keep=true;
+        if (path=="qa/events/trigger_study_bits_raw") {
+          keep=true;
+          if (studyAvailable && studyShape) {
+            int x,y,z;studyShape->GetBinXYZ(cell.second,x,y,z);
+            keep=readerBits.count(y-1) && (z==65 || readerBits.count(z-1));
+          }
+        }
+        if (!keep) continue;
+      }
       histogram = cell.first, bin = cell.second, value = sum.first, variance = sum.second;
       contributions.Fill();  /* one cell per original source, independent of job partitioning */
     }
@@ -1080,6 +1314,8 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
   contributions.Write("", TObject::kOverwrite);
   sources.Write("", TObject::kOverwrite);
   events.write(), photons.write(), jets.write();
+  timeEvents.write(), timePhotons.write(), timeJets.write();
+  candidateCache.write();
   out->cd();
   TObjString(profile.c_str()).Write("profile");
   TObjString(selectionText.c_str()).Write("selection");
@@ -1099,10 +1335,15 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
                {"vertex_reweighting", sample.at("vertex_reweighting")}, {"plan_sha256", plan.at("plan_sha256")},
                {"runtime", {{"root_version", gROOT->GetVersion()}}}, {"histograms_written", sums.size() + sparse.size()},
                {"availability", available}, {"coverage", sample.value("coverage", Json::object())}, {"source_count", source}, {"event_records", eventOffset},
-               {"acceptance", "LOCAL_STRUCTURE_ONLY_REQUIRES_PHYSICS_QUALIFICATION"}};
+               {"acceptance", "STRUCTURE_VALIDATED_PHYSICS_NOT_EVALUATED"}};
+  if(plan.contains("selection_fanout"))meta["selection_fanout"]=plan.at("selection_fanout");
+  if(family!="data" && plan.contains("response_component_grid"))meta["response_components"]={{"scope","RESPONSE_COMPONENT_ONLY"},{"configuration",plan.at("response_component_grid")},{"ems_measurement_qa_fanout","UNQUALIFIED"}};
+  if(!dataJesFusion.is_null())meta["data_jes_fusion"]=dataJesFusion;
+  if(plan.at("histograms").value("candidate_records",false))meta["candidate_records"]=candidateRecordMetadata(candidateCache,plan,system);
   meta["package_binding_sha256"]=packageBinding(plan,sample);
   /* These values come from the same resolved Profile used by every fill. They are descriptive metadata,
      not a second selection: changing a cut changes the fill and this record together. */
+  photonjet::configureJetRadius(plan.at("histograms").at("jet_radius").get<double>());
   const auto cuts = photonjet::configuredProfile("nominal", system == "PP" ? photonjet::System::pp : photonjet::System::auau,
                                                 (fs::path(work) / "selection.json").c_str());
   Json qaClasses = Json::array();
@@ -1119,12 +1360,13 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
       {"collision", {{"system", system}, {"sqrt_s_nn_gev", 200.0}, {"contract", "sPHENIX_eventTree_v1_200GeV"}}},
       {"photon", {{"et_min_gev", cuts.photonEtMin}, {"et_max_gev", cuts.photonEtMax}, {"abs_eta_max", cuts.photonAbsEtaMax}}},
       {"event", plan.at("selection").at("systems").at(sys).at("event_selection")},
-      {"jet", {{"collection", "jet04"}, {"radius", 0.4}, {"abs_eta_max", cuts.jetAbsEtaMax},
+      {"jet", {{"collection", cuts.jetCollection("jet")}, {"radius", cuts.jetRadius}, {"abs_eta_max", cuts.jetAbsEtaMax},
+               {"data_pt_scale", family == "data" ? plan.at("histograms").at("data_jet_scale").at(sys).get<double>() : 1.0},
                {"pt_min_gev", cuts.jetPtMin}, {"overlap_delta_r", cuts.overlapDeltaR}, {"delta_phi_min_rad", cuts.deltaPhiMin},
                {"delta_phi_pi_fraction",angle}, {"pt_operator",">="}, {"delta_phi_operator",">="}, {"overlap_operator",">="}}},
       {"truth_photon", {{"isolation_radius", 0.3}, {"abs_eta_max", photonjet::kTruthPhotonAbsEtaMax},
                         {"isolation_max_gev", photonjet::kTruthIsolationMaxGeV}, {"signal_source_role", photonjet::kSignalSourceRole}}},
-      {"qa", {{"et_min_gev", photonjet::qa::kQaEtMin}, {"et_max_gev", photonjet::qa::kQaEtMax},
+      {"qa", {{"cluster_map_et_min_gev",12.0}, {"et_min_gev", photonjet::qa::kQaEtMin}, {"et_max_gev", photonjet::qa::kQaEtMax},
               {"classes",qaClasses}, {"stored_abs_eta_max", photonjet::qa::kStoredAbsEtaMax}, {"jet_map_pt_min_gev", photonjet::qa::kQaJetMapPtMin}}},
       {"photon_id", plan.at("selection").at("systems").at(sys)},
       {"histogram_settings", plan.at("histograms")}};
@@ -1142,6 +1384,7 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
   if (family != "data" && !normalization.at("pb_per_generated_event").is_null())  /* FinalAnalysis applies it once */
     TParameter<double>("pb_per_generated_event", normalization.at("pb_per_generated_event").get<double>()).Write();
   TObjString(rows.dump().c_str()).Write("inventory");
+  photonjet_science::writeProducerEvidence(*out,nativeAncestry);
   contributions.SetDirectory(nullptr);
   sources.SetDirectory(nullptr);
   out->Close();
@@ -1162,10 +1405,51 @@ void merge(const Json &plan, const Json &sample, const std::string &work, const 
    sums the jobs of one sample into OUT/<system>/<sample>.root (above). */
 namespace treetohists {
 namespace fs = std::filesystem;
+/* Minimal, idempotent sourceInfo contract. Fill cuts, model evaluator bytes,
+   timing and histogram choices cannot invalidate already-read headers. */
+Json inspectionSelection(const Json &selection) {
+  Json systems=Json::object();
+  for(const auto &[system,spec] : selection.at("systems").items()) {
+    const bool native=spec.contains("optional_model") && spec.at("optional_model").contains("native_evaluation");
+    Json out={{"state_branch",spec.at("state_branch")},{"verify_nominal_isolation",false}};
+    if(native) out["optional_model"]={{"native_evaluation",Json::object()}};
+    else {
+      out["score_branch"]=spec.at("score_branch");out["score_metadata"]=spec.at("score_metadata");
+      if(spec.contains("optional_model")) {
+        Json model=Json::object();
+        for(const char *key : {"model_name","release_sha256","score_branch","domain"}) model[key]=spec.at("optional_model").at(key);
+        out["optional_model"]=model;
+      } else {
+        out["model_sha256"]=spec.at("model_sha256");out["photon_id_package_sha256"]=spec.at("photon_id_package_sha256");
+      }
+    }
+    if(system=="pp")out["simulation_periods"]={{"mode",spec.value("simulation_periods",Json::object()).value("mode","")=="all" ? "all" : "single"}};
+    if(system=="auau" && spec.at("verify_nominal_isolation")==true) {
+      out["verify_nominal_isolation"]=true;out["isolation"]={{"package_sha256",spec.at("isolation").at("package_sha256")}};
+    }
+    systems[system]=out;
+  }
+  return {{"systems",systems}};
+}
+bool inspectionCompatible(const Json &oldSnapshot,const Json &newSnapshot) {
+  if(oldSnapshot.value("root_version",Json())!=newSnapshot.at("root_version"))return false;
+  Json old=inspectionSelection(oldSnapshot.at("selection"));const Json now=inspectionSelection(newSnapshot.at("selection"));
+  // A previous successful nominal-isolation check also satisfies a new cut
+  // override that no longer requires that check. The reverse is forbidden.
+  for(const auto &[system,spec] : now.at("systems").items())
+    if(spec.at("verify_nominal_isolation")==false && old.at("systems").contains(system)) {
+      old["systems"][system]["verify_nominal_isolation"]=false;old["systems"][system].erase("isolation");
+    }
+  return old==now;
+}
+
 namespace {
 
 void writeText(const fs::path &path, const std::string &text) {  /* atomic: a reader never sees a partial file */
-  const fs::path partial = path.string() + ".partial";
+  char host[256] = "host";
+  ::gethostname(host, sizeof(host) - 1);
+  /* this writer's own temporary name: two jobs that write one file (a repeat of a slow fill group) never share it */
+  const fs::path partial = path.string() + ".partial." + host + "." + std::to_string(::getpid());
   {
     std::ofstream out(partial);
     out << text;
@@ -1398,9 +1682,12 @@ Json plan(const Settings &s, const std::string &catalogue, const std::vector<std
     throw std::runtime_error("expected PhotonJetInputCollectionV1 with samples");
   const fs::path base = fs::absolute(catalogue).parent_path();
   const bool bounded=!sourceDirectory.empty();
-  const Json common={{"selection",s.selection},{"histograms",histogramSettings(s)},
+  Json common={{"selection",s.selection},{"histograms",histogramSettings(s)},
     {"producer_code",reductionCode()},{"root_version",gROOT->GetVersion()}};
-  InspectedSources inspected(inspections,common);
+  if(!s.responseGrid.is_null())common["response_component_grid"]=s.responseGrid;
+  /* a header inspection is bound to the selection and ROOT only (Campaign.cc inspectionSnapshot) */
+  const Json inspectionBinding={{"selection",inspectionSelection(s.selection)},{"root_version",gROOT->GetVersion()}};
+  InspectedSources inspected(inspections,inspectionBinding);
   if (inspected.enabled() && !only.empty()) throw std::runtime_error("campaign inspection requires its complete frozen input order");
   Json samples = Json::array(), jobs = Json::array();
   std::set<std::string> keys, identities;
@@ -1545,6 +1832,14 @@ Json plan(const Settings &s, const std::string &catalogue, const std::vector<std
       normalization["generated_events"]=generated; normalization["denominator_events"]=generated;
       normalization["denominator"]= "all_selected_eventTree_entries";
       normalization["pb_per_generated_event"]=numerator/generated; normalization["applied_in_histograms"]=false;
+      const std::string sliceName=producer.at("samples").at(name);
+      const Json &slice=producer.at("slices").at(sliceName);
+      normalization["generator_diagnostic"]={{"source_moment","raw_counts"},
+        {"cross_section_pb",slice.at("cross_section_pb")},{"generated_events",generated},
+        {"window_gev",slice.at("window_gev")},{"sample_slice",sliceName},
+        {"photon_definition","maximum finite positive truthpho_pt with truthpho_source_role == 1"},
+        {"jet_definition","maximum finite positive truthjet04_pt"},
+        {"reco_comparison_vertex_abs_z_max_cm",30.0}};
     } else if (family != "data" && normalization.value("source_factor", "") == "auau_embedded_stitching") {
       /* the fill jobs count the events of the denominator and the merge sets the normalisation */
       normalization = stitchingNormalization(s.home, system, name, family);
@@ -1646,12 +1941,22 @@ Json plan(const Settings &s, const std::string &catalogue, const std::vector<std
   inspected.finish();
   if (samples.empty()) throw std::runtime_error("no catalogued sample matches");
   const Json histograms = histogramSettings(s);
-  photonjet::response::parseVariation(s.responseVariation.c_str());  /* a malformed variation fails here, before any job */
+  const auto responseVariation = photonjet::response::parseVariation(s.responseVariation.c_str());
+  photonjet::response::requireRunnableVariation(responseVariation,!s.emsSelectionContract.is_null());
+  for (const auto& sample : samples) if (sample.at("family") != "data")
+    photonjet::response::validateVariationSystem(responseVariation,
+        sample.at("system") == "PP" ? photonjet::System::pp : photonjet::System::auau);
   Json out = {{"schema", "TreeToHistsPlanV1"}, {"settings", s.path}, {"catalogue", fs::absolute(catalogue).string()},
               {"catalogue_sha256", sha256File(catalogue)}, {"selection", s.selection}, {"histograms", histograms},
               {"root_version", gROOT->GetVersion()}, {"producer_code", reductionCode()}, {"max_events_per_job", maxEvents},
               {"samples", std::move(samples)}, {"jobs", std::move(jobs)}};
   if (bounded) out["source_inventory_layout"]="TreeToHistsSourceInventoryV1";
+  if(!s.responseGrid.is_null()) {
+    photonjet::response::native_grid::validateSettings(s.responseGrid);
+    for(const auto &sample:out.at("samples"))if(sample.at("family")!="data")for(const auto &variant:s.responseGrid.at("variants"))
+      photonjet::response::validateVariationSystem(photonjet::response::parseVariation(variant.at("variation").get<std::string>().c_str()),sample.at("system")=="PP"?photonjet::System::pp:photonjet::System::auau);
+    out["response_component_grid"]=s.responseGrid;
+  }
   out["plan_sha256"] = digest(out);
   return out;
 }
@@ -1727,7 +2032,9 @@ namespace {
 /* Execute one source job from the sealed plan. Each product kind sees the
    same resolved selection, source ownership and event-weight context.
    done.json is reusable only while those bindings and input bytes match. */
-void fill(const fs::path &work, int index) {
+void fill(const fs::path &work, int index, const char* jesUp=nullptr,const char* jesDown=nullptr) {
+  // Preflight hashes precede this row's counters. They must not pulse a prior row.
+  photonjet::progressPath.clear();
   const fs::path descriptor = work / "rows" / std::to_string(index / 1000) / (std::to_string(index) + ".json");
   Json p = readJson((fs::exists(descriptor) ? descriptor : work / "plan.json").string());
   if (fs::exists(descriptor)) {
@@ -1748,6 +2055,7 @@ void fill(const fs::path &work, int index) {
   checkPpPeriodFits(ppPeriods);
   const Json &source = sample.at("sources").at(job.at("source").get<size_t>());
   const fs::path dir = jobDirectory(work.string(), job);
+  if(p.contains("selection_fanout") && !fs::exists(dir/"done.json"))throw std::runtime_error("selection view requires fill-selection-group to preserve parent/source composition and gap witnesses");
   fs::create_directories(dir);
   photonjet::entryBegin = job.value("range_begin", 0LL);
   photonjet::entryEnd = job.value("range_end", source.at("metadata").at("entries").get<long long>());
@@ -1763,9 +2071,12 @@ void fill(const fs::path &work, int index) {
   photonjet::progressStart = std::chrono::steady_clock::now();
   photonjet::progressPhase = "checking_input";
   photonjet::reportProgress(photonjet::entryBegin);
-  const std::string input = job.at("input"), sha = sha256File(input);
+  /* The tree file is not hashed: its embedded identity and its metadata are compared with the plan below, and its
+     size and modification time must be the same after the reduction as before. `sha` is the planned label. */
+  const std::string input = job.at("input"), sha = source.at("expected_sha256");
+  const auto stamp = [&]() { return std::make_pair(fs::file_size(input), fs::last_write_time(input)); };
+  const auto before = stamp();
   checkNativeModelFiles(p,sample.at("system"));
-  if (sha != source.at("expected_sha256").get<std::string>()) throw std::runtime_error("published input differs from the snapshot: " + input);
   std::string fileFamily,fileSystem;
   const Json inspected=sourceInfo(input,p.at("selection"),fileFamily,fileSystem);
   if (inspected.at("identity")!=source.at("identity") || inspected.at("metadata")!=source.at("metadata"))
@@ -1777,8 +2088,11 @@ void fill(const fs::path &work, int index) {
         saved.value("producer_code_sha256", "") != codeSha || saved.at("range_begin") != photonjet::entryBegin ||
         saved.at("range_end") != photonjet::entryEnd || saved.at("root_version").get<std::string>() != gROOT->GetVersion())
       throw std::runtime_error("completed fill differs from its input, range, runtime or plan");
-    for (const auto &kind : kinds)
-      if (saved.at("products").at(kind).get<std::string>() != sha256File((dir / (kind + ".root")).string()))
+    for(const auto &kind:kinds)if(!saved.at("products").contains(kind))throw std::runtime_error("completed fill lacks a required product");
+    if(p.contains("response_component_grid") && sample.at("family")!="data")for(const auto &v:p.at("response_component_grid").at("variants"))
+      if(v.at("name")!="nominal" && !saved.at("products").contains("response__"+v.at("name").get<std::string>()))throw std::runtime_error("completed fill lacks a response component");
+    for (const auto &[kind,hash] : saved.at("products").items())
+      if (hash.get<std::string>() != sha256File((dir / (kind + ".root")).string()))
         throw std::runtime_error("completed product hash differs");
     photonjet::progressOffset = photonjet::progressTotal - photonjet::progressRowTotal;
     photonjet::progressPhase = "reused"; photonjet::reportProgress(photonjet::entryEnd);
@@ -1787,7 +2101,12 @@ void fill(const fs::path &work, int index) {
   const auto start = std::chrono::steady_clock::now();
   const std::string selection = (work / "selection.json").string(), weights = listed(sample.at("weights"));
   photonjet::configuredXjEdges = p.at("histograms").at("native_xj_edges").get<std::vector<double>>();
+  photonjet::configureJetRadius(p.at("histograms").at("jet_radius").get<double>());
+  photonjet::configuredDataJetScale = p.at("histograms").at("data_jet_scale").at(sample.at("system") == "PP" ? "pp" : "auau").get<double>();
   photonjet::configuredMeasurementEtEdges=p.at("histograms").at("native_measurement_et_edges_gev").get<std::vector<double>>();
+  photonjet::candidate_cache::enabled=p.at("histograms").value("candidate_records",false);
+  photonjet::candidate_cache::maxRows=p.at("histograms").value("candidate_records_max_rows",2000000L);
+  photonjet::candidate_cache::minRecoEt=p.at("histograms").value("candidate_records_min_et",0.);
   photonjet::strictReduction = true;
   photonjet::configureVertexFit(sample.at("vertex_reweighting").is_null() ? Json::object() : sample.at("vertex_reweighting"));
   photonjet::auauReceiptSha=sample.at("vertex_reweighting").is_null() ? "" : sample.at("vertex_reweighting").at("evidence_sha256").get<std::string>();
@@ -1796,7 +2115,10 @@ void fill(const fs::path &work, int index) {
   photonjet::configuredOwnership = ownershipOf(sample.at("normalization"));
   if (readJson(selection) != p.at("selection")) throw std::runtime_error("resolved selection differs from plan");
   const Json &h = p.at("histograms");
+  const std::string emsContractText=h.contains("ems_selection_contract")?h.at("ems_selection_contract").dump():"";
+  const std::string variationText=h.at("response_variation").get<std::string>();
   Json products = Json::object();
+  Json gridReceipt;
   for (const auto &kind : kinds) {
     const fs::path out = dir / (kind + ".root"), partial = dir / (kind + ".root.partial");
     const fs::path checkpoint = dir / (kind + ".json");
@@ -1810,12 +2132,48 @@ void fill(const fs::path &work, int index) {
     } else {
       fs::remove(partial);
       int code = 0;
-      if (kind == "spectra") code = FillPhotonJet(input.c_str(), partial.c_str(), "nominal", selection.c_str(), weights.c_str());
-      else if (kind == "qa") code = FillPhotonQA(input.c_str(), partial.c_str(), "nominal", weights.c_str(), selection.c_str());
-      else if (kind == "extensions") code = FillExtensions(input.c_str(), partial.c_str(), selection.c_str(), weights.c_str(), h.at("require_stage3_fractions").get<bool>());
+      if (kind == "spectra") code = FillPhotonJet(input.c_str(), partial.c_str(), "nominal", selection.c_str(), weights.c_str(),variationText.c_str(),emsContractText.c_str(),sha256File,jesUp,jesDown);
+      else if (kind == "qa") code = FillPhotonQA(input.c_str(), partial.c_str(), "nominal", weights.c_str(), selection.c_str(),variationText.c_str(),emsContractText.c_str(),sha256File);
+      else if (kind == "extensions") code = FillExtensions(input.c_str(), partial.c_str(), selection.c_str(), weights.c_str(), h.at("require_stage3_fractions").get<bool>(), photonjet::response::parseVariation(variationText.c_str()).centralityOff);
+      else if(p.contains("response_component_grid")) {
+        namespace ng=photonjet::response::native_grid;
+        const auto &config=p.at("response_component_grid");ng::validateSettings(config);
+        const auto system=sample.at("system")=="PP"?photonjet::System::pp:photonjet::System::auau;
+        const auto profile=photonjet::configuredProfile("nominal",system,selection.c_str());
+        photonjet::response::ResponseGrids grids;grids.reco=h.at("native_reco_response_edges_gev").get<std::vector<double>>();
+        grids.truth=h.at("native_truth_response_edges_gev").get<std::vector<double>>();grids.xj=h.at("native_xj_edges").get<std::vector<double>>();
+        const auto cw=photonjet::centralityWeights(weights,system);
+        Json spec={{"schema","PhotonJetNativeResponseGridV1"},{"identity",{{"task","maintained-campaign"},{"workstream","response-components"},{"campaign",p.at("plan_sha256")},{"row",std::to_string(index)}}},
+          {"sources",Json::array({{{"path",input},{"sha256",sha},{"input_file_sha256",source.at("identity")},
+            {"entries",source.at("metadata").at("entries")},{"entry_begin",photonjet::entryBegin},{"entry_end",photonjet::entryEnd}}})},
+          {"variants",config.at("variants")},{"producer_code",p.at("producer_code")},{"runtime_context",ng::context(profile,grids,cw)},
+          {"limits",config.at("limits")},{"output_directory",fs::absolute(dir/"response_grid").lexically_normal().string()}};
+        ng::copyEmsContract(config,spec);
+        for(auto &v:spec["variants"]){v["plan"]=ng::resolvedPlan(spec,v);v["plan_sha256"]=digest(v["plan"]);}
+        const auto previousObserver=photonjet::progressObserver;
+        photonjet::progressObserver=[&](const Json &value) {
+          if(!previousObserver)return;
+          Json mapped=value;
+          if(value.value("schema","")=="PhotonJetNativeResponseGridProgressV1") {
+            mapped["processed"]=photonjet::progressOffset+value.at("processed").get<Long64_t>();
+            mapped["total"]=photonjet::progressTotal;mapped["remaining"]=photonjet::progressTotal-mapped.at("processed").get<Long64_t>();
+          }
+          previousObserver(mapped);
+        };
+        try {gridReceipt=ng::run(spec,profile,grids,cw);}catch(...){photonjet::progressObserver=previousObserver;throw;}
+        photonjet::progressObserver=previousObserver;
+        if(gridReceipt.at("original_entries").get<Long64_t>()!=photonjet::progressRowTotal)throw std::runtime_error("native grid did not finish the public row");
+        photonjet::reportProgress(photonjet::entryEnd);
+        for(const auto &product:gridReceipt.at("products")) {
+          const std::string name=product.at("name"),key=name=="nominal"?"response":"response__"+name;
+          const auto from=dir/"response_grid"/product.at("path").get<std::string>();
+          const auto to=name=="nominal"?partial:dir/(key+".root");fs::create_hard_link(from,to);
+          if(name!="nominal")products[key]=product.at("sha256");
+        }
+      }
       else code = FillPhotonJetResponse(input.c_str(), partial.c_str(), "nominal", listed(h.at("native_reco_response_edges_gev")).c_str(),
         listed(h.at("native_truth_response_edges_gev")).c_str(), listed(h.at("native_xj_edges")).c_str(),
-        weights.c_str(), h.at("response_variation").get<std::string>().c_str(), selection.c_str());
+        weights.c_str(), variationText.c_str(), selection.c_str(),emsContractText.c_str(),sha256File);
       if (code) throw std::runtime_error("the " + kind + " filler failed on " + input);
       if (photonjet::progressRowProcessed != photonjet::progressRowTotal) throw std::runtime_error("filler stopped before the end of its range");
       fs::rename(partial, out);
@@ -1825,14 +2183,29 @@ void fill(const fs::path &work, int index) {
     photonjet::reportProgress(photonjet::entryEnd);
     photonjet::progressOffset += photonjet::progressRowTotal;
   }
+  if(p.contains("response_component_grid") && sample.at("family")!="data") {
+    if(gridReceipt.is_null())gridReceipt=readJson((dir/"response_grid/receipt.json").string());
+    if(gridReceipt.at("status")!="PASS_RESPONSE_COMPONENT_ONLY")throw std::runtime_error("response grid did not publish a PASS component receipt");
+    for(const auto &product:gridReceipt.at("products")) {
+      const std::string name=product.at("name"),key=name=="nominal"?"response":"response__"+name;
+      if(sha256File((dir/(key+".root")).string())!=product.at("sha256").get<std::string>())throw std::runtime_error("response component differs from its receipt");
+      products[key]=product.at("sha256");
+    }
+  }
   Json done = {{"input", input}, {"sha256", sha}, {"root_version", gROOT->GetVersion()}, {"plan_sha256", p.at("plan_sha256")},
     {"producer_code_sha256", codeSha}, {"range_begin", photonjet::entryBegin}, {"range_end", photonjet::entryEnd}, {"products", products}};
+  if(!gridReceipt.is_null())done["response_grid"]=gridReceipt;
   if (countDenominator) {
     photonjet::progressPhase = "stitching_denominator"; photonjet::reportProgress(photonjet::entryBegin);
     done["stitching_denominator"] = stitchingDenominator(input, sample.at("normalization"));
     photonjet::reportProgress(photonjet::entryEnd);
   }
-  if (sha256File(input) != sha) throw std::runtime_error("input changed while it was being reduced: " + input);
+  // Hash heartbeats include progressRowProcessed: retain the last pass's start,
+  // rather than the next-pass offset left by the product loop.
+  photonjet::progressOffset = photonjet::progressTotal - photonjet::progressRowTotal;
+  photonjet::progressPhase = "validating_input_and_models";
+  photonjet::reportProgress(photonjet::entryEnd);
+  if (stamp() != before) throw std::runtime_error("input changed while it was being reduced: " + input);
   checkNativeModelFiles(p,sample.at("system"));
   checkVertexFit(sample); checkPpPeriodFits(ppPeriods);
   done["seconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
@@ -1843,6 +2216,68 @@ void fill(const fs::path &work, int index) {
   writeText(dir / "done.json", done.dump(1) + "\n");
   photonjet::progressOffset = photonjet::progressTotal - photonjet::progressRowTotal;
   photonjet::progressPhase = "complete"; photonjet::reportProgress(photonjet::entryEnd);
+}
+
+/* Three independently sealed ordinary plans keep each DATA product's scale,
+   settings and package identity truthful. Only the science traversal is fused;
+   QA/extensions are explicitly nominal and ordinary merges need no new path. */
+void fillDataJes(const fs::path& nominal,const fs::path& up,const fs::path& down,int index,bool muteReusedProgress=false) {
+  const std::array<fs::path,3> works={fs::canonical(nominal),fs::canonical(up),fs::canonical(down)};
+  if(works[0]==works[1] || works[0]==works[2] || works[1]==works[2])throw std::runtime_error("DATA JES work identities must be distinct");
+  std::array<Json,3> plans;std::array<fs::path,3> dirs;
+  const std::array<double,3> scales={1./.916,1./.907,1./.923};
+  Json baseline;
+  for(size_t i=0;i<3;++i){
+    const auto descriptor=works[i]/"rows"/std::to_string(index/1000)/(std::to_string(index)+".json");
+    const bool scoped=muteReusedProgress && fs::exists(descriptor);
+    plans[i]=readJson((scoped?descriptor:works[i]/"plan.json").string());auto compare=plans[i];
+    if(scoped){
+      const auto claimed=compare.at("descriptor_sha256");compare.erase("descriptor_sha256");
+      if(digest(compare)!=claimed.get<std::string>() || compare.at("plan_sha256")!=readJson((works[i]/"binding.json").string()).at("plan_sha256"))
+        throw std::runtime_error("DATA JES row descriptor binding differs");
+      compare.erase("plan_sha256");
+    }else{
+      const auto claimed=compare.at("plan_sha256");compare.erase("plan_sha256");
+      if(digest(compare)!=claimed.get<std::string>())throw std::runtime_error("DATA JES plan digest differs");
+    }
+    checkReductionCode(plans[i]);
+    const auto& h=plans[i].at("histograms");
+    if(h.at("data_jet_scale").at("pp")!=scales[i] || h.at("data_jet_scale").at("auau")!=1. || h.at("response_variation")!="")
+      throw std::runtime_error("DATA JES requires exact absolute scales and nominal other-system/response settings");
+    for(const auto& sample:plans[i].at("samples")){
+      if(sample.at("system")!="PP" || sample.at("family")!="data" || sample.contains("reused_package") || sample.contains("_source_files"))
+        throw std::runtime_error("DATA JES requires ordinary original-only pp DATA plans");
+      std::set<std::string> sources;
+      for(const auto& source:sample.at("sources"))if(!sources.insert(source.at("identity").get<std::string>()).second)
+        throw std::runtime_error("duplicate original source identity in DATA JES plan");
+    }
+    compare.erase("settings");compare["histograms"]["data_jet_scale"]["pp"]=scales[0];
+    if(i==0)baseline=compare;else if(compare!=baseline)throw std::runtime_error("DATA JES plans differ beyond their exact pp DATA scale");
+    const auto& job=plans[i].at("jobs").at(scoped?0:index);dirs[i]=jobDirectory(works[i].string(),job);
+    for(const char* name:{"done.json","spectra.json","spectra.root","spectra.root.partial","qa.root","extensions.root"})
+      if(fs::exists(dirs[i]/name))throw std::runtime_error("DATA JES refuses existing row products; reuse or reconcile the exact row first");
+  }
+  for(const auto& dir:dirs)fs::create_directories(dir);
+  const auto upPartial=(dirs[1]/"spectra.root.partial").string(),downPartial=(dirs[2]/"spectra.root.partial").string();
+  fill(works[0],index,upPartial.c_str(),downPartial.c_str());
+  const auto nominalDone=readJson((dirs[0]/"done.json").string());
+  for(size_t i=1;i<3;++i){
+    fs::rename(dirs[i]/"spectra.root.partial",dirs[i]/"spectra.root");
+    for(const char* kind:{"spectra","qa","extensions"}){
+      const std::string name=kind;
+      if(name!="spectra")fs::create_hard_link(dirs[0]/(name+".root"),dirs[i]/(name+".root"));
+      Json binding=readJson((dirs[0]/(name+".json")).string());
+      binding["plan_sha256"]=plans[i].at("plan_sha256");binding["sha256"]=sha256File((dirs[i]/(name+".root")).string());
+      writeText(dirs[i]/(name+".json"),binding.dump()+"\n");
+    }
+    const auto observer=photonjet::progressObserver;
+    if(muteReusedProgress)photonjet::progressObserver={};
+    try{fill(works[i],index);}catch(...){photonjet::progressObserver=observer;throw;}
+    photonjet::progressObserver=observer;
+    auto done=readJson((dirs[i]/"done.json").string());
+    done["data_jes_fusion"]={{"nominal_plan_sha256",plans[0].at("plan_sha256")},{"science_traversals",1},{"qa_extensions","nominal_reused"}};
+    writeText(dirs[i]/"done.json",done.dump(1)+"\n");
+  }
 }
 
 std::string option(int argc, char **argv, const std::string &name, bool requiredOption = true) {
@@ -1878,7 +2313,9 @@ Json preparePlan(const std::string &settings, const std::string &inputs, const s
 }
 Json settingsSnapshot(const std::string &settings, const std::string &home) {
   const auto s=Settings::read(settings,home);
-  return {{"selection",s.selection},{"histograms",histogramSettings(s)}};
+  Json result={{"selection",s.selection},{"histograms",histogramSettings(s)}};
+  if(!s.responseGrid.is_null())result["response_component_grid"]=s.responseGrid;
+  return result;
 }
 Json inspectSources(const Json &descriptor,const Json &snapshot) {
   const auto &files=descriptor.at("files");
@@ -1931,6 +2368,8 @@ void savePlanRow(const Json &p, long index, const std::string &directory,const J
   Json row={{"schema",p.at("schema")},{"plan_sha256",p.at("plan_sha256")},{"root_version",p.at("root_version")},
     {"selection",p.at("selection")},{"histograms",p.at("histograms")},{"producer_code",p.at("producer_code")},
     {"samples",Json::array({sample})},{"jobs",Json::array({job})}};
+  if(p.contains("response_component_grid"))row["response_component_grid"]=p.at("response_component_grid");
+  if(p.contains("selection_fanout"))row["selection_fanout"]=p.at("selection_fanout");
   row["descriptor_sha256"]=digest(row);
   const fs::path path=work/"rows"/std::to_string(index/1000)/(std::to_string(index)+".json");
   fs::create_directories(path.parent_path()); writeText(path,row.dump()+"\n");
@@ -1957,11 +2396,21 @@ void savePlan(const Json &p, const std::string &directory, bool writeRows) {
 }
 void fillRow(const std::string &work, long index) { fill(work, index); }
 
+
 /* A farm row reduces a bounded, ordered batch in private worker scratch, then
    publishes one intermediate package. Existing fills and source-aware merges
    retain each original's contribution and event identity. Scratch is removed
-   only after the chunk and completion receipt have both been validated. */
-void fillGroup(const std::string &work, const std::string &group, const std::string &scratch) {
+   only after the chunk and completion receipt have both been validated.
+   A group may be run by more than one job (a repeat of a slow one): the package
+   takes its name by a hard link, which only one job can make, so the first
+   to finish publishes and every other one keeps that result and stops. */
+struct DataJesGroup {
+  std::array<fs::path,3> homes,outputs;
+  std::array<Json,3> plans;
+  std::array<std::string,3> descriptorHashes;
+};
+void fillGroupImpl(const std::string &work, const std::string &group, const std::string &scratch,
+                   const DataJesGroup* jes=nullptr) {
   if (!std::regex_match(group,std::regex("G[0-9]+"))) throw std::runtime_error("invalid fill group");
   const std::string shard=std::to_string(std::stoul(group.substr(1))/1000);
   const fs::path home=work, descriptor=home/"fill_groups"/shard/(group+".json"), output=home/"chunks"/shard/group;
@@ -1973,22 +2422,24 @@ void fillGroup(const std::string &work, const std::string &group, const std::str
   checkReductionCode(p); checkVertexFit(sample); checkPpPeriodFits(ppPeriodsOf(p,sample));
   if (p.at("root_version").get<std::string>()!=gROOT->GetVersion()) throw std::runtime_error("ROOT version differs from the plan");
   long long entries=0;
-  for (const auto &src : sample.at("sources")) {
-    if (sha256File(src.at("path"))!=src.at("expected_sha256").get<std::string>()) throw std::runtime_error("group input changed");
-    entries+=src.at("metadata").at("entries").get<long long>();
-  }
+  for (const auto &src : sample.at("sources")) entries+=src.at("metadata").at("entries").get<long long>();
   const long passes=sample.at("family")=="data" ? 3 : 4+(sample.at("normalization").contains("ownership") ? 1 : 0);
   const long long total=entries*passes;
   fs::create_directories(output);
   const std::string package=(output/(sample.at("key").get<std::string>()+".root")).string();
   const auto started=std::chrono::steady_clock::now();
-  long long completed=0;
+  long long completed=0,highestProcessed=0;
+  /* While the group runs its progress is written to the job's own scratch (live), every few seconds. The shared
+     output folder gets one record, at the end: thousands of jobs rewriting a file there every two seconds is the
+     small-file load a shared file system must not carry. */
+  fs::path live;
   auto progress=[&](const std::string &phase,const Json &child=Json::object(),const Json &error=nullptr) {
-    const long long processed=completed+child.value("processed",0LL);
+    long long processed=completed+child.value("processed",0LL);
+    if(jes){highestProcessed=std::max(highestProcessed,processed);processed=highestProcessed;}
     if (processed<0 || processed>total) throw std::runtime_error("group progress exceeds its sealed event total");
     const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
     const double rate=seconds>0 ? processed/seconds : 0;
-    const Json record={{"campaign",p.at("plan_sha256")},{"row",group},{"sample",sample.at("key")},{"source",group},
+    Json record={{"campaign",p.at("plan_sha256")},{"row",group},{"sample",sample.at("key")},{"source",group},
       {"phase",phase},{"unit","event_passes"},{"processed",processed},{"total",total},{"remaining",total-processed},
       {"row_processed",processed},{"row_total",total},{"row_remaining",total-processed},
       {"deterministic_skip_processed",0},{"deterministic_skip_total",0},{"deterministic_skip_remaining",0},
@@ -1996,7 +2447,9 @@ void fillGroup(const std::string &work, const std::string &group, const std::str
       {"elapsed_seconds",seconds},{"rate",rate},{"eta_seconds",rate>0 ? (total-processed)/rate : -1},
       {"updated_at_unix",std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()},
       {"latest_error",error}};
-    writeText(output/"progress.json",record.dump()+"\n");
+    if(jes)record["data_jes_fusion"]={{"views",3},{"physical_passes_per_source",3},{"physical_work_owner",p.at("plan_sha256")}};
+    if (phase=="complete" || phase=="failed") writeText(output/"progress.json",record.dump()+"\n");
+    else if (!live.empty()) writeText(live,record.dump()+"\n");
   };
   auto finish=[&](const std::string &expected,const Json &seconds,const std::string &state) {
     writeText(output/"done.json",Json{{"plan_sha256",p.at("plan_sha256")},{"descriptor_sha256",descriptorSha},
@@ -2027,31 +2480,138 @@ void fillGroup(const std::string &work, const std::string &group, const std::str
     {"thread",std::hash<std::thread::id>{}(std::this_thread::get_id())}}).substr(0,24);
   const fs::path temporary=fs::canonical(scratchHome)/("treetohists-"+group+"-"+nonce);
   if (!fs::create_directory(temporary)) throw std::runtime_error("cannot create unique row scratch");
+  live=temporary/"progress.json";
   progress("starting");
   try {
     savePlan(p,temporary.string());
-    photonjet::progressObserver=[&](const Json &value) {progress(value.at("phase"),value);};
+    if(jes)for(size_t v=1;v<3;++v)savePlan(jes->plans[v],(temporary/(v==1?"energy_up":"energy_down")).string());
+    photonjet::progressObserver=[&](const Json &value) {
+      const std::string phase=value.at("phase");
+      // Only the group's own finish publishes a shared terminal progress record.
+      progress(phase=="complete" || phase=="reused" ? "source_complete" : phase,value);
+    };
     for (size_t i=0;i<p.at("jobs").size();++i) {
-      fillRow(temporary.string(),i);
+      if(jes)fillDataJes(temporary,temporary/"energy_up",temporary/"energy_down",i,true);
+      else fillRow(temporary.string(),i);
       completed+=photonjet::progressTotal;
+      photonjet::progressPath.clear();
     }
     photonjet::progressObserver={}; progress("merging_chunk");
+    if(jes){
+      std::array<std::string,3> hashes;
+      long long actualScienceReaders=0,actualScienceEntries=0;
+      for(const auto& job:p.at("jobs")){
+        const auto raw=fs::path(jobDirectory((temporary/"energy_up").string(),job))/"spectra.root";
+        TFile source(raw.c_str(),"READ");const auto observed=Json::parse(text(source,"data_jes_fusion"));
+        const auto& src=sample.at("sources").at(job.at("source").get<size_t>());
+        const auto expectedEntries=job.value("range_end",src.at("metadata").at("entries").get<long long>())-job.value("range_begin",0LL);
+        if(observed.at("science_readers")!=1 || observed.at("original_entries")!=expectedEntries)
+          throw std::runtime_error("DATA JES original traversal counters differ from sealed row range");
+        actualScienceReaders+=observed.at("science_readers").get<long long>();actualScienceEntries+=observed.at("original_entries").get<long long>();
+      }
+      if(actualScienceEntries!=entries)throw std::runtime_error("DATA JES original group entry counters differ");
+      for(size_t v=0;v<3;++v){
+        const auto& vp=jes->plans[v];const auto& vs=vp.at("samples").at(0);
+        const fs::path local=v==0?temporary:temporary/(v==1?"energy_up":"energy_down");
+        merge(vp,vs,local.string(),(local/"packages").string());
+        const auto original=local/"packages"/(vs.at("key").get<std::string>()+".root");
+        const auto target=jes->outputs[v]/(vs.at("key").get<std::string>()+".root");
+        const auto partial=target.string()+".partial."+nonce;hashes[v]=sha256File(original.string());
+        fs::create_directories(target.parent_path());fs::copy_file(original,partial);
+        if(sha256File(partial)!=hashes[v])throw std::runtime_error("DATA JES group publication copy differs");
+        if(::link(partial.c_str(),target.c_str())!=0)throw std::runtime_error("DATA JES group publication collided; exact reconciliation required");
+        fs::remove(partial);
+        writeText(jes->outputs[v]/"publication.json",Json{{"plan_sha256",vp.at("plan_sha256")},
+          {"descriptor_sha256",jes->descriptorHashes[v]},{"sha256",hashes[v]}}.dump()+"\n");
+        validatePackage(target.string(),vp,vs);
+      }
+      for(size_t v=1;v<3;++v){
+        const auto& vp=jes->plans[v];const auto& vs=vp.at("samples").at(0);
+        writeText(jes->outputs[v]/"done.json",Json{{"plan_sha256",vp.at("plan_sha256")},{"descriptor_sha256",jes->descriptorHashes[v]},
+          {"sha256",hashes[v]},{"status","COMPLETE"},{"processed_entries",entries},{"source_count",vs.at("sources").size()},
+          {"sample_class","PP/data"},{"seconds",nullptr},{"root_version",gROOT->GetVersion()},
+          {"producer_code_sha256",digest(vp.at("producer_code"))},
+          {"reduction_settings_sha256",digest(Json{{"selection",vp.at("selection")},{"histograms",vp.at("histograms")}})},
+          {"data_jes_fusion",{{"physical_work_owner",p.at("plan_sha256")},{"physical_event_passes",0},{"shared_science_readers",actualScienceReaders},{"shared_science_entries",actualScienceEntries},{"qa_extensions","nominal_reused"}}}}.dump(1)+"\n");
+        writeText(jes->outputs[v]/"progress.json",Json{{"campaign",vp.at("plan_sha256")},{"row",group},{"sample",vs.at("key")},
+          {"phase","complete"},{"unit","event_passes"},{"processed",0},{"total",0},{"remaining",0},
+          {"row_processed",0},{"row_total",0},{"row_remaining",0},
+          {"deterministic_skip_processed",0},{"deterministic_skip_total",0},{"deterministic_skip_remaining",0},
+          {"rate",0},{"eta_seconds",0},{"updated_at_unix",std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()},
+          {"latest_error",nullptr},{"input_entries",entries},{"source",group},
+          {"data_jes_fusion",{{"physical_work_owner",p.at("plan_sha256")},{"physical_progress",(output/"progress.json").string()},{"physical_event_passes",0}}}}.dump()+"\n");
+      }
+      finish(hashes[0],std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count(),"COMPLETE");
+      auto ownerDone=readJson((output/"done.json").string());
+      ownerDone["data_jes_fusion"]={{"views",3},{"physical_event_passes",total},{"science_readers",actualScienceReaders},{"science_entries",actualScienceEntries},{"qa_passes",1},{"extensions_passes",1}};
+      writeText(output/"done.json",ownerDone.dump(1)+"\n");
+      fs::remove_all(temporary);return;
+    }
     merge(p,sample,temporary.string(),(temporary/"packages").string());
     const std::string original=(temporary/"packages"/(sample.at("key").get<std::string>()+".root")).string();
-    const std::string expected=sha256File(original), partial=package+".partial";
+    const std::string expected=sha256File(original), partial=package+".partial."+nonce;
     fs::create_directories(fs::path(package).parent_path());
     fs::copy_file(original,partial,fs::copy_options::overwrite_existing);
     if (sha256File(partial)!=expected) throw std::runtime_error("chunk publication copy differs");
+    const bool first=::link(partial.c_str(),package.c_str())==0;  /* fails when another job has published the group */
+    fs::remove(partial);
+    if (!first) {
+      for (int waited=0; waited<300 && !fs::exists(output/"done.json"); ++waited) std::this_thread::sleep_for(std::chrono::seconds(1));
+      if (!fs::exists(output/"done.json")) throw std::runtime_error("another job published this group and left no receipt");
+      validatePackage(package,p,sample); completed=total; fs::remove_all(temporary); return;
+    }
     writeText(output/"publication.json",Json{{"plan_sha256",p.at("plan_sha256")},
       {"descriptor_sha256",descriptorSha},{"sha256",expected}}.dump()+"\n");
-    fs::rename(partial,package); validatePackage(package,p,sample);
+    validatePackage(package,p,sample);
     const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
     finish(expected,seconds,"COMPLETE");
     fs::remove_all(temporary);
   } catch (const std::exception &error) {
-    photonjet::progressObserver={}; progress("failed",Json::object(),error.what());
+    photonjet::progressObserver={};
+    const Json failedProgress=jes && !photonjet::progressPath.empty() ?
+      Json{{"processed",photonjet::progressOffset+photonjet::progressRowProcessed}} : Json::object();
+    progress("failed",failedProgress,error.what());
     throw; // Failed row scratch is retained for diagnosis; no other row is touched.
   }
+}
+
+/* Default group execution retains its original recipe and lifecycle. */
+void fillGroup(const std::string& work,const std::string& group,const std::string& scratch){fillGroupImpl(work,group,scratch);}
+
+void fillDataJesGroup(const std::string& nominal,const std::string& up,const std::string& down,
+                     const std::string& group,const std::string& scratch){
+  if(!std::regex_match(group,std::regex("G[0-9]+")))throw std::runtime_error("invalid fill group");
+  const std::string shard=std::to_string(std::stoul(group.substr(1))/1000);
+  DataJesGroup views;views.homes={fs::canonical(nominal),fs::canonical(up),fs::canonical(down)};
+  if(views.homes[0]==views.homes[1] || views.homes[0]==views.homes[2] || views.homes[1]==views.homes[2])
+    throw std::runtime_error("DATA JES group work identities must be distinct");
+  const std::array<double,3> scales={1./.916,1./.907,1./.923};Json baseline;
+  for(size_t v=0;v<3;++v){
+    auto d=readJson((views.homes[v]/"fill_groups"/shard/(group+".json")).string());
+    views.descriptorHashes[v]=d.at("descriptor_sha256");d.erase("descriptor_sha256");
+    if(digest(d)!=views.descriptorHashes[v])throw std::runtime_error("DATA JES group descriptor digest differs");
+    views.plans[v]=d.at("plan");const auto& p=views.plans[v];
+    if(p.at("plan_sha256")!=readJson((views.homes[v]/"binding.json").string()).at("plan_sha256"))
+      throw std::runtime_error("DATA JES group immutable plan binding differs");
+    checkReductionCode(p);
+    if(p.at("root_version").get<std::string>()!=gROOT->GetVersion())throw std::runtime_error("DATA JES group ROOT version differs");
+    if(p.at("samples").size()!=1 || p.at("jobs").empty())throw std::runtime_error("DATA JES group must contain one bounded sample and jobs");
+    const auto& sample=p.at("samples").at(0);const auto& h=p.at("histograms");
+    if(sample.at("system")!="PP" || sample.at("family")!="data" || sample.contains("reused_package") ||
+       sample.contains("_source_files") || h.at("response_variation")!="" || h.at("data_jet_scale").at("pp")!=scales[v] || h.at("data_jet_scale").at("auau")!=1.)
+      throw std::runtime_error("DATA JES group requires exact pp DATA scales and original-only nominal response inputs");
+    std::set<std::string> sources;
+    for(const auto& source:sample.at("sources"))if(!sources.insert(source.at("identity").get<std::string>()).second)
+      throw std::runtime_error("duplicate original source in DATA JES group");
+    auto compare=p;compare.erase("plan_sha256");compare["histograms"]["data_jet_scale"]["pp"]=scales[0];
+    if(v==0)baseline=compare;else if(compare!=baseline)throw std::runtime_error("DATA JES group source/range/selection/settings bindings differ");
+    views.outputs[v]=fs::weakly_canonical(views.homes[v]/"chunks"/shard/group);
+    if(fs::exists(views.outputs[v]) && !fs::is_empty(views.outputs[v]))
+      throw std::runtime_error("DATA JES group refuses existing results; exact reconciliation required");
+  }
+  if(views.outputs[0]==views.outputs[1] || views.outputs[0]==views.outputs[2] || views.outputs[1]==views.outputs[2])
+    throw std::runtime_error("DATA JES group output identities alias");
+  fillGroupImpl(views.homes[0].string(),group,scratch,&views);
 }
 }  /* namespace treetohists */
 
@@ -2109,8 +2669,22 @@ std::vector<double> axis(const TAxis *a) {
 
 }  /* namespace */
 
+bool finalDataAggregatesValidated(const Json &receipt, const Json &m, const std::string &fileHash) {
+  if (!receipt.is_object() || !receipt.contains("validation") ||
+      m.value("schema", "") != "PhotonJetSampleV1" || m.value("package_kind", "") != "FINAL" ||
+      m.value("system", "") != "AuAu" || m.value("family", "") != "data") return false;
+  const auto &v = receipt.at("validation");
+  const Json required = {"identity_and_settings", "histograms_and_sumw2",
+                         "source_ranges_and_contributions", "event_references"};
+  return v.value("schema", "") == "PhotonJetPackageValidationV1" && v.value("status", "") == "PASS" &&
+      v.value("checks", Json()) == required && receipt.value("sha256", "") == fileHash &&
+      receipt.at("sources") == m.at("source_count") && receipt.at("plan_sha256") == m.at("plan_sha256") &&
+      receipt.at("package_binding_sha256") == m.at("package_binding_sha256") &&
+      receipt.at("selection_sha256") == m.at("selection").at("selection_sha256") &&
+      v.at("producer_code_sha256") == digest(m.at("render_selection").at("producer_code"));
+}
+
 Json centralityWeights(const Settings &s, const std::string &catalogue, const std::string &dataPackage) {
-  const std::string dataHash=sha256File(dataPackage),configurationHash=sha256File(catalogue);
   const std::string trigger = s.selection.at("systems").at("auau").at("event_selection").at("trigger_name");
   /* DATA: the named trigger's column of every source's centrality x scaled-bit cells */
   std::unique_ptr<TFile> d(TFile::Open(dataPackage.c_str(), "READ"));
@@ -2123,7 +2697,18 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
   const std::vector<double> centralityEdges = axis(bits->GetXaxis());
   std::vector<double> data(centralityEdges.size() - 1);
   Json runs = Json::array();
-  TTreeReader rs(dynamic_cast<TTree *>(d->Get("records/sources"))), rc(dynamic_cast<TTree *>(d->Get("records/source_contributions")));
+  auto *sources=d->Get<TTree>("records/sources"),*cells=d->Get<TTree>("records/source_contributions");
+  if(!sources || !cells) throw std::runtime_error("centrality DATA source records are missing");
+  // The existing hash loop pulses this counter while verifying large inputs.
+  ReductionProgress dataProgress("centrality-data",2*sources->GetEntries()+1);
+  const std::string dataHash=sha256File(dataPackage),configurationHash=sha256File(catalogue);
+  fs::path sidecar=dataPackage;sidecar.replace_extension(".json");
+  const std::string receiptHash=fs::exists(sidecar)?sha256File(sidecar.string()):"";
+  bool aggregate= !receiptHash.empty() && finalDataAggregatesValidated(readJson(sidecar.string()),meta,dataHash);
+  int commonBit=-1;
+  if(aggregate && sources->GetEntries()!=meta.at("source_count").get<long long>())
+    throw std::runtime_error("centrality DATA source records are missing or incomplete");
+  TTreeReader rs(sources), rc(cells);
   TTreeReaderValue<std::string> json(rs, "json"), histogram(rc, "histogram");
   TTreeReaderValue<Long64_t> begin(rs, "contribution_begin"), end(rs, "contribution_end"), bin(rc, "bin");
   TTreeReaderValue<double> value(rc, "value");
@@ -2140,7 +2725,35 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
       }
     const bool enabled = bit >= 0 && table.at("initial_prescale")[bit].get<int>() >= 0;
     Json record = {{"source", runs.size()}, {"input_sha256", source.at("sha256")}, {"bit", bit >= 0 ? Json(bit) : Json()}, {"enabled", enabled}};
-    if (enabled) {
+    if (enabled && commonBit<0) commonBit=bit;
+    if (enabled && bit!=commonBit) aggregate=false;
+    runs.push_back(record);
+    dataProgress.advance(runs.size());
+  }
+  aggregate=aggregate && commonBit>=0;
+  /* A shared enabled trigger column commutes with source summation. Subtract
+     that column for disabled/absent sources, where the global bit may mean
+     another trigger. Mixed enabled mappings keep per-source extraction. */
+  if (aggregate) {
+    if(bits->GetSumw2N()!=bits->GetNcells()) throw std::runtime_error("centrality DATA has no retained Sumw2");
+    // DATA entries have unit weight. Sumw2 stores their exact double-precision
+    // counts even when the TH2F contents rounded during a large final merge.
+    for (size_t b=0;b<data.size();++b) {
+      const int cell=bits->GetBin(b+1,commonBit+1);
+      const double count=bits->GetSumw2()->At(cell),content=bits->GetBinContent(cell);
+      if(!std::isfinite(count) || count<0 || count!=std::floor(count) ||
+         std::abs(content-count)>1e-6*std::max(1.,count))
+        throw std::runtime_error("validated DATA centrality needs integer unit counts and matching Sumw2");
+      data[b]=count;
+    }
+  }
+  rs.Restart();size_t ordinal=0;
+  while (rs.Next()) {
+      auto &record=runs.at(ordinal++);
+      const bool enabled=record.at("enabled").get<bool>();
+      dataProgress.advance(sources->GetEntries()+ordinal-1);
+      if (aggregate?enabled:!enabled) continue;
+      const int bit=aggregate?commonBit:record.at("bit").get<int>();
       std::vector<double> column(centralityEdges.size() - 1);
       for (Long64_t i = *begin; i < *end; ++i) {
         if (rc.SetEntry(i) != TTreeReader::kEntryValid) throw std::runtime_error("cannot read a source contribution");
@@ -2149,11 +2762,10 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
         bits->GetBinXYZ(static_cast<int>(*bin), bx, by, bz);
         if (by - 1 == bit && bx >= 1 && bx <= static_cast<int>(column.size())) column[bx - 1] += *value;
       }
-      for (size_t i = 0; i < column.size(); ++i) data[i] += column[i];
-      record["counts"] = sliceCounts(column, centralityEdges);
-    }
-    runs.push_back(record);
+      for (size_t i = 0; i < column.size(); ++i) data[i] += (aggregate?-1:1)*column[i];
+      if(enabled) record["counts"] = sliceCounts(column, centralityEdges);
   }
+  dataProgress.advance(2*sources->GetEntries());
   const std::vector<double> dataSlices = sliceCounts(data, centralityEdges);
   /* simulation: every Au+Au simulated sample of the catalogue, weighted by its cross section per generated event */
   const Json c = readInputCollection(catalogue);
@@ -2233,7 +2845,10 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
   int with = 0;
   for (const auto &r : runs) with += r.at("enabled").get<bool>();
   for(const auto &publication:publications)if(sha256File(publication.at("path"))!=publication.at("sha256").get<std::string>())throw std::runtime_error("centrality publication manifest changed");
-  if(sha256File(dataPackage)!=dataHash || sha256File(catalogue)!=configurationHash)throw std::runtime_error("centrality DATA/configuration changed during derivation");
+  if(sha256File(dataPackage)!=dataHash || sha256File(catalogue)!=configurationHash ||
+     (!receiptHash.empty() && sha256File(sidecar.string())!=receiptHash))
+    throw std::runtime_error("centrality DATA/configuration changed during derivation");
+  dataProgress.finish();
   return Json{{"schema", "AuAuCentralityWeightsV1"}, {"status","DERIVED_UNQUALIFIED"},
               {"input_configuration_sha256",configurationHash},{"input_snapshot_sha256",digest(snapshot)},
               {"publication_bindings",publications},{"data_coverage",dataCorrectionCoverage(meta,runs.size())},
@@ -2241,12 +2856,16 @@ Json centralityWeights(const Settings &s, const std::string &catalogue, const st
               {"per_slice", weights}, {"centrality_weights_sha256", digest(weights)},
               {"data", {{"package", fs::absolute(dataPackage).string()}, {"package_sha256", dataHash}, {"histogram", key},
                         {"trigger", trigger}, {"counts", dataSlices}, {"sources_with_trigger", with},
+                        {"aggregation",aggregate?"validated_final_common_trigger":"per_source_trigger_columns"},
+                        {"validation_receipt_sha256",receiptHash},
                         {"sources_without_trigger", static_cast<int>(runs.size()) - with}, {"sources", runs}}},
               {"simulation", {{"histogram", "hist/SIM/h_centrality"}, {"counts", simulation}, {"samples", samples}}},
               {"selection_sha256", s.selection.at("selection_sha256")}};
 }
 
 }  /* namespace treetohists */
+
+#include "SelectionFanout.cc"
 
 /* Command dispatch. Settings/plan validation precedes filling; isolation's
    derivation commands live in Isolation.cc and use the shared definitions. */
@@ -2255,6 +2874,16 @@ int main(int argc, char **argv) {
   gROOT->SetBatch(true);
   const std::string command = argc > 1 ? argv[1] : "";
   try {
+    if(command=="selection-groups"){selection_fanout::localGroups(option(argc,argv,"--work"));return 0;}
+    if(command=="selection-plan"){
+      selection_fanout::planView(option(argc,argv,"--work"),option(argc,argv,"--out"),option(argc,argv,"--variant"),option(argc,argv,"--prescriptions"));return 0;
+    }
+    if(command=="fill-selection-group" || command=="validate-selection-group"){
+      std::vector<fs::path> works={option(argc,argv,"--work")};
+      for(int i=2;i+1<argc;++i)if(std::string(argv[i])=="--view-work")works.emplace_back(argv[i+1]);
+      if(command=="validate-selection-group")std::cout<<selection_fanout::validateSaved(works,option(argc,argv,"--group")).dump(2)<<std::endl;
+      else selection_fanout::group(works,option(argc,argv,"--group"),option(argc,argv,"--scratch"));return 0;
+    }
     if (command == "plan") {
       std::vector<std::string> only;
       for (int i = 2; i + 1 < argc; ++i) if (std::string(argv[i]) == "--sample") only.push_back(argv[i + 1]);
@@ -2267,8 +2896,16 @@ int main(int argc, char **argv) {
                 << p.at("selection").at("profile").get<std::string>() << ", plan " << (work / "plan.json").string() << std::endl;
       return 0;
     }
+    if (command == "fill-data-jes") {
+      fillDataJes(option(argc,argv,"--work"),option(argc,argv,"--up-work"),option(argc,argv,"--down-work"),std::stoi(option(argc,argv,"--job")));
+      return 0;
+    }
     if (command == "fill") {
       fill(option(argc, argv, "--work"), std::stoi(option(argc, argv, "--job")));
+      return 0;
+    }
+    if (command == "fill-data-jes-group") {
+      fillDataJesGroup(option(argc,argv,"--work"),option(argc,argv,"--up-work"),option(argc,argv,"--down-work"),option(argc,argv,"--group"),option(argc,argv,"--scratch",false));
       return 0;
     }
     if (command == "fill-group") {

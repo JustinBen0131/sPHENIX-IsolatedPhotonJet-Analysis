@@ -600,6 +600,13 @@ void PhotonJetTree::capturePhotonShowerShapes(const RawCluster* cluster, TowerIn
   }
 
   const double primaryFloor = namedShape(cluster, "shower_shape_floor_gev");
+  photon.primaryShowerFloorGeV=primaryFloor;
+  const auto capturedEnum=[&](const char* key) { const double value=namedShape(cluster,key);
+    return std::isfinite(value) && value>=0 && value<=1 && std::floor(value)==value ? static_cast<int>(value) : -1; };
+  photon.primaryShowerEnergy=capturedEnum("shower_shape_energy_source");
+  photon.primaryShowerSums=capturedEnum("shower_shape_sum_membership");
+  photon.primaryShowerMoments=capturedEnum("shower_shape_moment_membership");
+  photon.primaryShowerAlgorithm=capturedEnum("shower_shape_algorithm");
   for (const std::string& definitionName : m_config.showerDefinitions)
   {
     const double floor = photonjet::showerViewDefinition(definitionName).floorGeV;
@@ -671,6 +678,8 @@ void PhotonJetTree::capturePhotonShowerShapes(const RawCluster* cluster, TowerIn
     const auto* witness = m_photonBuilder->get_shower_feature_view(cluster, definitionName);
     if (!witness) throw std::runtime_error("missing configured builder feature view: " + definitionName);
     const auto captured = [witness](const std::string& key) { return witness->at(key); };
+    shape.calculationFloorGeV = captured("shower_shape_floor_gev");
+    shape.calculationAlgorithm = static_cast<std::int32_t>(captured("shower_shape_algorithm"));
     shape.rawCenterEta = captured("raw_center_eta");
     shape.rawCenterPhi = captured("raw_center_phi");
     shape.centerEtaIndex = static_cast<std::int32_t>(captured("center_ieta"));

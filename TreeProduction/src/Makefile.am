@@ -17,6 +17,7 @@ libEventTree_la_SOURCES = EventTree.cc
 nodist_libEventTree_la_SOURCES = EventTreeSchema.h
 libEventTree_la_LIBADD = $(ROOT_LIBS)
 libEventTree_la_LDFLAGS = -no-undefined -version-info 0:0:0
+libEventTree_la_CPPFLAGS = $(AM_CPPFLAGS) -include $(builddir)/BuildIdentity.h
 
 libPhotonJetTree_la_SOURCES = \
   PhotonJetTree.cc \
@@ -29,6 +30,7 @@ libPhotonJetTree_la_SOURCES = \
   internal/Output.cc
 libPhotonJetTree_la_LIBADD = libEventTree.la $(PRODUCER_LIBS)
 libPhotonJetTree_la_LDFLAGS = -no-undefined -version-info 0:0:0
+libPhotonJetTree_la_CPPFLAGS = $(AM_CPPFLAGS) -include $(builddir)/BuildIdentity.h
 
 productionincludedir = $(includedir)/TreeProduction
 productioninclude_HEADERS = EventTree.h
@@ -36,7 +38,7 @@ internalincludedir = $(productionincludedir)/internal
 internalinclude_HEADERS =
 if BUILD_PRODUCER
 productioninclude_HEADERS += PhotonJetTree.h PhotonClusterBuilder.h
-internalinclude_HEADERS += internal/Production.h internal/Types.h internal/Configuration.h
+internalinclude_HEADERS += internal/Production.h internal/Types.h internal/Configuration.h internal/PrimaryShowerDefinition.h internal/SourceScientificDefinitions.h
 endif
 EXTRA_DIST = autogen.sh ../config/eventTree_v1.yaml
 
@@ -49,13 +51,11 @@ EventTreeSchema.h: $(schema_file)
 
 # Regenerate when a compiled source, installed header, build recipe or the
 # schema changes. The digest describes the actual compilation inputs.
-build_identity_sources = $(libEventTree_la_SOURCES) $(libPhotonJetTree_la_SOURCES) EventTree.h PhotonJetTree.h PhotonClusterBuilder.h internal/Production.h internal/Types.h internal/Configuration.h Makefile.am configure.ac autogen.sh ../config/eventTree_v1.yaml
-BUILT_SOURCES = EventTreeSchema.h
-CLEANFILES = EventTreeSchema.h EventTreeSchema.h.tmp
-if BUILD_PRODUCER
-BUILT_SOURCES += BuildIdentity.h
-CLEANFILES += BuildIdentity.h BuildIdentity.h.tmp
-endif
-BuildIdentity.h: $(build_identity_sources)
+build_identity_sources = $(libEventTree_la_SOURCES) $(libPhotonJetTree_la_SOURCES) EventTree.h PhotonJetTree.h PhotonClusterBuilder.h internal/Production.h internal/Types.h internal/Configuration.h internal/PrimaryShowerDefinition.h internal/SourceScientificDefinitions.h ../../TreeToHists/src/ScientificTrace.h ../../TreeToHists/src/NativeModelDefinition.h ../../TreeToHists/src/ScientificProducerEvidence.h Makefile.am configure.ac autogen.sh ../config/eventTree_v1.yaml
+BUILT_SOURCES = EventTreeSchema.h BuildIdentity.h
+CLEANFILES = EventTreeSchema.h EventTreeSchema.h.tmp BuildIdentity.h BuildIdentity.h.tmp
+.PHONY: native_producer_witness_force
+native_producer_witness_force:
+BuildIdentity.h: native_producer_witness_force $(addprefix $(srcdir)/,$(build_identity_sources))
 	$(AM_V_GEN)$(PYTHON) -c 'import hashlib,pathlib,sys; r=pathlib.Path(sys.argv[1]); h=hashlib.sha256(); [(h.update(n.encode()+b"\0"),h.update((r/n).read_bytes()),h.update(b"\0")) for n in sorted(sys.argv[2:])]; print("#define PHOTONJET_SOURCE_SHA256 \""+h.hexdigest()+"\"")' "$(srcdir)" $(build_identity_sources) > $@.tmp
-	mv $@.tmp $@
+	@set -e; witness=$$($(PYTHON) '$(srcdir)/../../FinalAnalysis/scripts/write_native_build_witness.py' --source-root '$(srcdir)/../..' --output-dir "$$(pwd)/.physics/native-source-headers"); printf '#include "%s"\n' "$$witness" >> $@.tmp; if ! cmp -s $@.tmp $@; then mv $@.tmp $@; fi

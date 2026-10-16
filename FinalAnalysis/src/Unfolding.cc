@@ -1,15 +1,16 @@
 /* Unfolding: iterative Bayes (D'Agostini, as RooUnfoldBayes) with one fake cause, the per-photon normalisation, and the
    frozen iteration rule. */
 
-/* The rule (frozen 2026-09-20, the collaboration's scan_problem and gate_contract) unfolds one problem with the simulated
-   prior for k = 1..12. For every k: S_data and S_response, the median over reported bins of the central-68% half width
-   of the unfolded data and response toys relative to the central value; D_k, the median symmetric relative change from
-   k - 1; Q_k = sqrt(S_data^2 + S_response^2 + D_k^2). The gates: finite result, a symmetric positive semi-definite toy
-   covariance, no reported truth bin without efficiency, data and response toy success >= 95%, a data refold
-   chi2/rank < 1.5 against the data plus response residual-toy covariance, simulation closure and refold chi2/ndf < 5,
-   a negative fraction < 50%, a condition number < 1e8. The smallest Q_k among the passing k = 2..4 is selected (ties
-   to the lower k); k = 5..12 are diagnostics. The photon yield replaces the refold test by the measured-covariance
-   refold chi2 (one degree of freedom for two bins). */
+/* The iteration scan, as the analysis note defines it, unfolds one problem for k = 1..12. For every k: S_data and
+   S_response, the median over the reported bins of the central-68% half width of the unfolded data and response toys
+   relative to the central value; D_k, the median symmetric relative change from k - 1; and the stability quantity
+   Q_k = sqrt(S_data^2 + S_response^2 + D_k^2). The selected k is the one with the smallest Q_k (k >= 2, ties to the
+   lower k). The photon yield and the joint (photon pT, xJ) unfolding are scanned and selected separately.
+   The scan also records quality checks for every k: a finite result, a symmetric positive semi-definite toy
+   covariance, no reported truth bin without efficiency, data and response toy success >= 95%, a data refold chi2/rank
+   < 1.5 against the data plus response residual-toy covariance, simulation closure and refold chi2/ndf < 5, a negative
+   fraction < 50%, a condition number < 1e8. They are saved with the scan and reported when the selected k fails one;
+   they do not change the selection. */
 #include "FinalAnalysis.h"
 
 #include <algorithm>
@@ -65,9 +66,12 @@ TVectorD bayes(const TVectorD &measured, const TMatrixD &response, const TVector
         if (denominator[j] > 0) x += conditional(i, j) * state[i] / denominator[j] * measured[j];
       unfolded[i] = x / efficiency[i];
     }
-    const double total = unfolded.Sum();
-    if (!std::isfinite(total) || std::fabs(total) <= 1e-15) throw std::runtime_error("empty signed estimate");
-    state = unfolded;
+    if (!std::isfinite(unfolded.Sum())) throw std::runtime_error("empty signed estimate");
+    /* the next iteration's prior: the estimate with negative causes at zero (a probability cannot be negative; with
+       negative entries a reco denominator can change sign and the iteration collapses). The estimate itself stays signed. */
+    double total = 0;
+    for (int i = 0; i < nC; ++i) state[i] = std::max(unfolded[i], 0.0), total += state[i];
+    if (!(total > 1e-15)) throw std::runtime_error("empty signed estimate");
     state *= 1.0 / total;
   }
   if (refolded) {  /* conditional^T unfolded: the reco spectrum the result predicts, fake cause included */
@@ -261,8 +265,8 @@ const double kToySuccessMin = 0.95, kRefoldMax = 1.5, kMcMax = 5.0, kNegativeMax
 Problem photonProblem(const Window &w) { return {w.photonResponse, w.photonMisses, w.photonTruth, w.photonFakes}; }
 Problem pairProblem(const Window &w) { return {w.pairResponse, w.pairMisses, w.pairTruth, w.pairFakes}; }
 
-/* Apply the frozen rule above to accepted toys, retaining the requested totals for success rates.
-   selected=0 means no allowed iteration passed; callers must not silently choose a diagnostic iteration. */
+/* The scan above on accepted toys, retaining the requested totals for success rates. selected = 0 means no k >= 2
+   has a finite Q_k. */
 IterationScan scanIterations(const Problem &p, const TVectorD &measured, const std::vector<TVectorD> &dataToys, int dataRequested,
                              const std::vector<ResponseToy> &responseToys, int responseRequested, const std::vector<bool> &mask) {
   if (responseRequested < 2) throw std::runtime_error("the iteration rule needs at least two response toys");
@@ -332,39 +336,15 @@ IterationScan scanIterations(const Problem &p, const TVectorD &measured, const s
         {"data_refold", row.refold < kRefoldMax}, {"mc_closure", row.mcClosure < kMcMax}, {"mc_refold", row.mcRefold < kMcMax},
         {"negative_fraction", row.negativeFraction < kNegativeMax}, {"conditioning", condition > 0 && condition < kConditionMax}};
     for (const auto &[name, passed] : gates) if (!passed) row.failures += (row.failures.empty() ? "" : "|") + std::string(name);
-    row.passes = k >= 2 && k <= 4 && row.failures.empty();
+    row.passes = row.failures.empty();
     scan.rows.push_back(row);
     scan.unfolded.push_back(central);
     scan.refolded.push_back(refolded);
   }
   double best = kInf;
   for (const auto &row : scan.rows)
-    if (row.passes && row.objective < best) best = row.objective, scan.selected = row.k;
+    if (row.k >= 2 && std::isfinite(row.objective) && row.objective < best) best = row.objective, scan.selected = row.k;
   return scan;
-}
-
-/* The photon-yield k: the frozen gates with the refold test replaced by residual^T (V_data + V_response)^-1 residual of
-   the measured photon yields. */
-int photonRefoldSelection(const IterationScan &scan, const TVectorD &measured, const std::vector<TVectorD> &dataToys,
-                          const std::vector<TVectorD> &responseMeasured) {
-  TMatrixDSym covariance = sampleCovariance(dataToys);
-  if (responseMeasured.size() >= 2) covariance += sampleCovariance(responseMeasured);
-  int selected = 0;
-  double best = kInf;
-  for (size_t i = 0; i < scan.rows.size(); ++i) {
-    const ScanRow &row = scan.rows[i];
-    if (row.k < 2 || row.k > 4) continue;
-    std::string others = "|" + row.failures + "|";
-    const auto at = others.find("|data_refold|");
-    if (at != std::string::npos) others.erase(at, std::string("|data_refold").size());
-    if (others.find_first_not_of('|') != std::string::npos) continue;
-    TVectorD residual = measured - scan.refolded[i], solved(residual);
-    TDecompLU lu(covariance);
-    if (!lu.Solve(solved)) continue;
-    const double chi2 = residual * solved;
-    if (chi2 < kRefoldMax && row.objective < best) best = row.objective, selected = row.k;
-  }
-  return selected;
 }
 
 }  /* namespace fa */

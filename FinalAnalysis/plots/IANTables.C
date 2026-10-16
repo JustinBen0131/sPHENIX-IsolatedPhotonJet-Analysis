@@ -244,3 +244,21 @@ void IANTables(const char *results, const char *out, const char *systematics = "
   }
   printf("IANTables: %zu tables in %s\n", written.size(), out);
 }
+
+/* final_analysis.sh builds this file as an ordinary program, which starts here. Under ROOT (IANTables.C+ or the
+   interpreter) the function above is the entry point and this is left out. */
+#if !defined(__CLING__) && !defined(__ACLIC__)
+int main(int argc, char **argv) {
+  if (argc != 4) {
+    fprintf(stderr, "usage: tables RESULTS OUTPUT SYSTEMATICS   (\"\" for a file that is not given)\n");
+    return 2;
+  }
+  try {
+    IANTables(argv[1], argv[2], argv[3]);
+  } catch (const std::exception &error) {
+    fprintf(stderr, "IANTables: %s\n", error.what());
+    return 1;
+  }
+  return 0;
+}
+#endif

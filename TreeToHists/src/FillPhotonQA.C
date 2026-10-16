@@ -1,3 +1,6 @@
+#include "ScientificProducerEvidence.h"
+#include "SelectionViewContract.h"
+#include "EmsComposition.h"
 /* Photon and event QA reduction from eventTree v1.
 
    Uses the measurement's selection, matches and weights for selected QA.
@@ -7,6 +10,8 @@
    FillExtensions adds declared shower, matching, jet and fraction diagnostics.
    Execute through tree_to_hists.sh; unavailable fractions stay explicit. */
 #include "PhotonJet.h"
+#include "MbdTimeReference.h"
+#include "QAScientificContext.h"
 
 #ifdef __CLING__
 R__LOAD_LIBRARY(libTreePlayer)
@@ -61,7 +66,7 @@ R__LOAD_LIBRARY(libTreePlayer)
    <f>: candidate label; <F>: file family; slices: the 16 5% slices of 0-80% (one slice in pp); ET axis 10-40 GeV in
    1 GeV bins unless stated:
    ss_<var>_<f>_<c>        var x ET x stage      shower shapes and the photon-ID score: e11_over_e33, e32_over_e35,
-   bdt, weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx, et1..et4
+   bdt, weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx, weta35_cogx, wphi53_cogx, et1..et4
    (et1..et4: the NPB-input values)
    ncb_<f>_<c>             NPB score x ET        stage 0 (the NPB score enters the preselection)
    iso_<f>_<c>             iso x ET x ID         stage 1; ID 0 tight, 1 non-tight, 2 neither
@@ -77,19 +82,21 @@ R__LOAD_LIBRARY(libTreePlayer)
    edges holding every sample window, so a stitched mixture keeps
    each sample to its owned window (region-major flattened axis)
    scoreiso_<f>_<c>        score x iso x ET      stage 1 with a score and a witness: 20 score bins, iso 1 GeV bins
-   over -10..40, ET 15-35 in 2 GeV (factorisation tests in sub-bands)
+   scoreiso_fine_<f>_<c>   score x iso x ET      same selected population with 100 score bins (0.01)
+   over -20..40, ET 15-35 in 2 GeV (factorisation tests in sub-bands)
    clu_et_<f>_<c>          ET (0-50 GeV) x stage   (every stage axis is cumulative: a candidate fills each stage
-   clu_etaphi_<f>_<c>      eta x phi x stage       it reached); ET >= 10 GeV for eta x phi
+   clu_etaphi_<f>_<c>      eta x phi x stage       it reached); ET >= 12 GeV for eta x phi
    bdt_<f>                 score x ET x slice    stage 1, no isolation requirement
    isoslice_<f>            iso x ET x slice      stage 1, any ID
    isonoueslice_<f>        the same without UE subtraction (Au+Au)
-   width_<var>_<f>         var x ET x slice      stage 1; weta_cogx, wphi_cogx, weta33_cogx, wphi33_cogx in 0.01 bins
+   width_<var>_<f>         var x ET x slice      stage 1; the widths of kWidths (whole cluster, 3x3, 3x5, 5x3) in 0.01 bins
    over 0-1 (the shape histograms keep the full range)
    width_tight_iso_<var>_<f>  the same fine axes, stage 3; retained for DATA/SIM overlays after tight + isolation
-   e11e33_dt_data_<c>      e11/e33 x ET x dt     DATA, stage 0; dt = cluster time - MBD t0 [ns]
+   e11e33_dt_data_<c>      e11/e33 x ET x dt     DATA, stage 0; dt = cluster time - MBD time [ns], the MBD time
+   corrected by the pinned per-run table in pp; AuAu uses its file median
    etatime_data_<c>        eta x dt              DATA, stage 0, ET >= 10 GeV
    evt_vz_<F>_<c>          vertex z              events before the vertex window
-   jet_pt_<F>_<c>          jet pT x selection    analysis-view R = 0.4 jets; selection 0 every analysis event,
+   jet_pt_<F>_<c>          jet pT x selection    jets of the analysis radius; selection 0 every analysis event,
    jet_etaphi_<F>_<c>      eta x phi x selection 1 events with a Region-A leader (15 <= ET < 35 GeV); pT >= 5 GeV
    evt_cent_<F>            centrality x weight   Au+Au, inside the vertex window; weight 0 w_event, 1 the full weight
    cent_bits_data          centrality x scaled bit   Au+Au DATA inside the vertex window, minimum-bias classified
@@ -109,7 +116,15 @@ R__LOAD_LIBRARY(libTreePlayer)
    gen_<F>                 pT x kind             simulation, every recorded event (pp: every one the source stitching
    admitted): kind 0 the leading prompt truth photon, 1 the leading truth
    jet (R = 0.4)
-   Analysis events: evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && evt_terminal_status == 0 (recorded
+   gen_raw_<F>             pT x kind             simulation, unit event counts before ownership, vertex and analysis
+   weights: a sample's whole generated range, for the stitching figure. pp: every recorded event. Au+Au: producer
+   class 0 or 4 at 0-80% centrality; kind 0 is the generator-filter photon for a sample stitched on it. Kind 2 is
+   the maximum pT of the signal truth photons (source role 1) in every sample: the coordinate of the IAN's photon
+   stitching panel, which shows a turn-on below a sample's filter threshold where the filter coordinate has none.
+   Kind 3 is kind 2 for the events the sample owns (its stitching window), so the samples' kind 3 add up to the
+   stitched spectrum in that coordinate
+   Analysis events: evt_record == 0 && evt_nodes_ready == 1 && vtx_valid == 1 && an accepted producer class
+   (acceptedEventClass in PhotonJet.h: evt_terminal_status 0, or 4 for a sample stitched here by truth-jet pT) (recorded
    events: the first two and the last). Weights are w_event (1 when not finite) times, in Au+Au simulation, the
    centrality weight of the event's 5% slice (an input, as in FillPhotonJetResponse.C; 1 when the product is not
    finite). Written with "profile", "family", "centrality_weights", "sources" and "qa_contract" (version and axes), and for
@@ -123,8 +138,9 @@ constexpr int kQaVersion = 1;
 constexpr double kQaEtMin = 10.0, kQaEtMax = 40.0, kStoredAbsEtaMax = 0.7;
 constexpr double kQaJetMapPtMin = 5.0;
 const std::vector<std::string> kShapes = {"e11_over_e33", "e32_over_e35", "bdt", "weta_cogx", "wphi_cogx",
-                                          "weta33_cogx", "wphi33_cogx", "et1", "et2", "et3", "et4"};
-const std::vector<std::string> kWidths = {"weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx"};
+                                          "weta33_cogx", "wphi33_cogx", "weta35_cogx", "wphi53_cogx", "et1", "et2", "et3", "et4"};
+/* the cluster widths by window: the whole cluster, 3x3 towers, and 3x5 (eta) and 5x3 (phi) towers */
+const std::vector<std::string> kWidths = {"weta_cogx", "wphi_cogx", "weta33_cogx", "wphi33_cogx", "weta35_cogx", "wphi53_cogx"};
 
 struct Range {
   int bins;
@@ -175,15 +191,26 @@ class Book {
   }
   std::vector<std::string> names() const {
     std::vector<std::string> out;
-    for (const auto& [n, h] : h1_) out.push_back(n);
-    for (const auto& [n, h] : h2_) out.push_back(n);
-    for (const auto& [n, h] : h3_) out.push_back(n);
+    for (const auto& [n, h] : h1_)out.push_back(n);
+    for (const auto& [n, h] : h2_)out.push_back(n);
+    for (const auto& [n, h] : h3_)out.push_back(n);
     return out;
   }
+  void scientificContext(const photonjet_science::Json& context) {
+    const std::string serialized=context.dump();
+    contexts_.emplace(serialized,context);
+  }
   void write() {
-    for (auto& [n, h] : h1_) h->Write();
-    for (auto& [n, h] : h2_) h->Write();
-    for (auto& [n, h] : h3_) h->Write();
+    const auto writeOne=[&](const std::string& name,TH1& h) {
+      photonjet_science::Json definitions=photonjet_science::Json::array();
+      for(const auto& [key,context]:contexts_)definitions.push_back(photonjet_science::qaDefinition(name,context));
+      if(definitions.size()==1)photonjet_science::putDefinition(h,definitions.at(0));
+      else h.GetListOfFunctions()->Add(new TNamed("physics_effective_definitions",definitions.dump().c_str()));
+      h.Write();
+    };
+    for (auto& [n, h] : h1_)writeOne(n,*h);
+    for (auto& [n, h] : h2_)writeOne(n,*h);
+    for (auto& [n, h] : h3_)writeOne(n,*h);
   }
 
  private:
@@ -197,6 +224,7 @@ class Book {
     map[name].reset(h);
     return *h;
   }
+  std::map<std::string,photonjet_science::Json> contexts_;
   bool sumw2_;
   std::map<std::string, std::unique_ptr<TH1F>> h1_;
   std::map<std::string, std::unique_ptr<TH2F>> h2_;
@@ -213,9 +241,23 @@ inline std::vector<double> recoilOwnershipAxis() {
   return e;
 }
 const std::vector<double> kRecoilOwnership = recoilOwnershipAxis();
-const Range kEt{30, kQaEtMin, kQaEtMax}, kStage{4, 0.0, 4.0}, kIso{500, -10.0, 40.0}, kId{3, 0.0, 3.0}, kSlice16{16, 0.0, 16.0},
+const Range kEt{30, kQaEtMin, kQaEtMax}, kStage{4, 0.0, 4.0}, kIso{600, -20.0, 40.0}, kId{3, 0.0, 3.0}, kSlice16{16, 0.0, 16.0},
     kEta{58, -kStoredAbsEtaMax, kStoredAbsEtaMax}, kPhi{256, -M_PI, M_PI}, kDt{160, -40.0, 40.0}, kDtCoarse{40, -20.0, 20.0}, kWidth{100, 0.0, 1.0},
     kJetEta{44, -1.1, 1.1}, kJetPhi{64, -M_PI, M_PI}, kSel{2, 0.0, 2.0};
+
+/* Finite MBD median fallback. AuAu retains this reference. PP uses the byte-pinned
+   PPG12 per-run table; only a flagged or absent run uses this median. The scan is
+   over the original file, so the correction is independent of job entry shards. */
+inline double mbdTimeReference(TFile& file,const std::function<void(Long64_t)>& observed={}) {
+  TTreeReader reader("eventTree", &file);
+  TTreeReaderValue<double> t0(reader, "mbd_t0");
+  std::vector<double> times;
+  while (reader.Next()){if (std::isfinite(*t0)) times.push_back(*t0);if(observed)observed(reader.GetCurrentEntry()+1);}
+  if (times.empty()) return std::numeric_limits<double>::quiet_NaN();
+  const auto middle = times.begin() + times.size() / 2;
+  std::nth_element(times.begin(), middle, times.end());
+  return *middle;
+}
 
 /* Public packages always contain the same objects, including empty selections. */
 inline void prebook(Book& b, Family family, System system, const std::vector<CentralityClass>& classes) {
@@ -232,20 +274,27 @@ inline void prebook(Book& b, Family family, System system, const std::vector<Cen
       if (auau) b.h3("isonoue_"+t,"",kIso,kEt,kId);
       b.h2("abcd_"+t,"",{4,0,4},{20,15,35});
       b.h3v("recoil_"+t,"",kRecoilRegions,photonEtEdges(),xjEdges());
-      b.h3("scoreiso_"+t,"",{20,0,1},{50,-10,40},{10,15,35});
+      b.h3("scoreiso_"+t,"",{20,0,1},{60,-20,40},{10,15,35});
+      b.h3("scoreiso_fine_"+t,"",{100,0,1},{60,-20,40},{10,15,35});
       b.h2("clu_et_"+t,"",{100,0,50},kStage);
       b.h3("clu_etaphi_"+t,"",kEta,kPhi,kStage);
+      b.h3("preselection_compare_"+t,"",{4,-1.5,2.5},{2,-.5,1.5},kEt);
       if (sim) {
         b.h3v("abcdown_"+t,"",kRegions4,photonEtEdges(),kOwnershipEdges);
         b.h3v("recoilown_"+t,"",kRecoilOwnership,photonEtEdges(),xjEdges());
       }
     }
     b.h1("evt_vz_"+F+"_"+c,"",{240,-60,60});
+    if (sim && auau) b.h1("evt_vz_novertexweight_"+F+"_"+c,"",{240,-60,60});
     b.h2("jet_pt_"+F+"_"+c,"",{120,0,60},kSel);
     b.h3("jet_etaphi_"+F+"_"+c,"",kJetEta,kJetPhi,kSel);
     if (!sim) {
       b.h3("e11e33_dt_data_"+c,"",shapeRange("e11_over_e33"),kEt,kDtCoarse);
       b.h2("etatime_data_"+c,"",kEta,kDt);
+      b.h3("clu_time_stage_data_"+c,"",kDt,kEt,kStage);
+      b.h3("clu_etatime_stage_data_"+c,"",kEta,kDt,kStage);
+      b.h3("clu_etatime_npb_data_"+c,"",kEta,kDt,{22,-1.1,1.1});
+      b.h3("clu_rawtime_stage_data_"+c,"",kDt,kEt,kStage);
     }
     if (family==Family::phosim) {
       b.h3("truth_iso_"+c,"",{300,0,30},{35,5,40},{4,0,4});
@@ -264,13 +313,20 @@ inline void prebook(Book& b, Family family, System system, const std::vector<Cen
   b.h3("evt_calo_"+F,"",auau?Range{300,0,3000}:Range{200,0,200},auau?Range{100,0,100}:Range{1,0,100},{4,0,4});
   if (auau) {
     b.h2("evt_cent_"+F,"",{100,0,100},kSel);
-    if (!sim) b.h2("cent_bits_data","",{100,0,100},{64,0,64});
+    if (sim) b.h2("evt_vzw_"+F,"",{40,-10,10},kSel);
+    if (!sim) {
+      b.h2("cent_bits_data","",{100,0,100},{64,0,64});
+      b.h1("evt_vz_selected_data","selected DATA events;v_{z} [cm]",{80,-10,10});
+      b.h1("evt_vz_selected_wide_data","selected DATA events before vertex window;v_{z} [cm]",{120,-60,60});
+    }
   }
   if (sim) b.h2("gen_"+F,"",{160,0,80},{2,0,2});
   else {
     b.h3("trig_data","",{100,0,40},{64,0,64},{65,0,65});
     b.h3("trig_study_data","",{40,0,20},{64,0,64},{65,0,65});
   }
+  if (sim) b.h2("gen_raw_"+F,"unit event counts before ownership and analysis cuts;p_{T} [GeV];generator kind",{80,0,80},{4,0,4});
+  if (sim && !auau) b.h1("reco_tag_vz30_"+F,"leading tight isolated tag;E_{T} [GeV]",{20,15,35});
 }
 
 /* The candidate's photon-ID and isolation decisions under the profile (the per-candidate form of regionLeaders). */
@@ -279,8 +335,8 @@ struct Decision {
   double iso = std::numeric_limits<double>::quiet_NaN();
 };
 
-template <class Values, class Ints, class Scores>
-Decision decide(const Profile& p, std::size_t i, double et, double centrality, const Scores& score, const Ints& state,
+template <class Values, class Ints, class Scores, class States>
+Decision decide(const Profile& p, std::size_t i, double et, double centrality, const Scores& score, const States& state,
                 const Values& cone, const Values& threshold, const Values& sideband, const Ints& method, const Ints& role,
                 const Ints& idClass, const Ints& isoClass) {
   /* the selection's own classes (PhotonJet.h photonClass), plus the witness cone sum for the isolation plots */
@@ -292,7 +348,7 @@ Decision decide(const Profile& p, std::size_t i, double et, double centrality, c
   d.nonTight = c.nonTight;
   d.isolated = c.isolated;
   d.nonIsolated = c.nonIsolated;
-  if (c.witness) d.iso = cone[2 * i + p.isolationRadiusIndex];
+  if (c.witness) d.iso = analysisIsolation(p,cone[2 * i + p.isolationRadiusIndex]);
   return d;
 }
 
@@ -301,16 +357,26 @@ inline bool candidateInWindow(const Profile& p, double vz, double et, double eta
   return std::fabs(vz) < p.vertexAbsZMax && std::fabs(eta) < p.photonAbsEtaMax;
 }
 
+struct SelectionView { Profile profile;Book* book=nullptr;response::Variation variation;double expectedStoredGap=std::numeric_limits<double>::quiet_NaN(); };
 inline void fillFile(const std::string& path, const Profile& requested, Family family, const CentralityWeights& centralityWeight,
-                     const std::vector<CentralityClass>& classes, Book& b) {
+                     const std::vector<CentralityClass>& classes, Book& nominalBook,const response::Variation* variation=nullptr,
+                     const char* emsContractText="",const std::function<std::string(const std::string&)>& digest={},
+                     const std::vector<SelectionView>& views={},const double* suppliedMbdReference=nullptr) {
   std::unique_ptr<TFile> file(TFile::Open(path.c_str(), "READ"));
   if (!file || file->IsZombie()) throw std::runtime_error("cannot open " + path);
-  const Profile profile = validateSelectionInput(*file, requested);
+  const Profile baseProfile = validateSelectionInput(*file, requested);const auto& profile=baseProfile;
+  std::vector<Profile> profiles;
+  for(const auto& view:views){
+    if(!view.book || !selection_views::cutComposition(view.variation))throw std::runtime_error("QA cut composition unsupported");
+    selection_views::compatible(baseProfile,view.profile,view.expectedStoredGap);
+    profiles.push_back(validateSelectionInput(*file,view.profile));
+  }
   if (fileSystem(*file) != profile.system) throw std::runtime_error("profile system differs from " + path);
   if (fileFamily(*file) != family) throw std::runtime_error("inputs mix data and simulation families: " + path);
   const bool auau = profile.system == System::auau, sim = family != Family::data;
   const DataEventSelection dataSelection(*file,profile);
   const std::string F = familyName(family);
+  const double mbdReference = sim ? 0.0 : suppliedMbdReference?*suppliedMbdReference:mbdTimeReference(*file);
   TTreeReader reader("eventTree", file.get());
   applyEntryRange(reader);
   const VertexEventWeight vertexWeight(*file,reader);
@@ -321,10 +387,13 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
   TTreeReaderValue<double> vz(reader, "vtx_z"), centrality(reader, "cent_value"), weightValue(reader, "w_event"),
       caloTotal(reader, "calo_total"), maxCluster(reader, "calo_max_cluster_e"), mbdT0(reader, "mbd_t0");
   TTreeReaderValue<ULong64_t> scaled(reader, "trig_scaled"), live(reader, "trig_live");
-  TTreeReaderArray<double> et(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi"),
-      time(reader, "pho_time_ns"), npb(reader, "pho_npb_score");
-  PhotonScores score(*file,reader,profile);
-  TTreeReaderArray<int> presel(reader, "pho_presel_active"), state(reader, profile.stateBranch.c_str()), idClass(reader, "pho_id_class"),
+  TTreeReaderArray<double> originalEt(reader, "pho_et"), eta(reader, "pho_eta"), phi(reader, "pho_phi"),
+      time(reader, "pho_time_ns"), originalNpb(reader, "pho_npb_score");
+  PhotonScores originalScore(*file,reader,profile);PhotonPreselection originalPresel(reader);
+  ems_native::Overlay<TTreeReaderArray<double>,double> et(originalEt),npb(originalNpb);
+  ems_native::Overlay<PhotonScores,double> score(originalScore);
+  ems_native::Overlay<PhotonPreselection,int> presel(originalPresel);
+  TTreeReaderArray<int> originalState(reader, profile.stateBranch.c_str()), idClass(reader, "pho_id_class"),
       isoClass(reader, "pho_iso_class");
   std::vector<std::unique_ptr<TTreeReaderArray<double>>> shape;
   for (const std::string& var : kShapes) {
@@ -333,13 +402,25 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
     if (var == "et1" || var == "et2" || var == "et3" || var == "et4") branch = "pho_npb_cluster_" + var;
     shape.emplace_back(new TTreeReaderArray<double>(reader, branch.c_str()));
   }
-  TTreeReaderArray<double> cone(reader, "isow_cone_sum"), threshold(reader, "isow_threshold"),
-      sideband(reader, "isow_sideband_threshold");
+  ems_native::Overlay<TTreeReaderArray<int>,int> state(originalState);
+  TTreeReaderArray<double> originalCone(reader, "isow_cone_sum"), originalThreshold(reader, "isow_threshold"),
+      originalSideband(reader, "isow_sideband_threshold");
+  ems_native::Overlay<TTreeReaderArray<double>,double> cone(originalCone),threshold(originalThreshold),sideband(originalSideband);
   TTreeReaderArray<int> method(reader, "isow_subtraction_method"), role(reader, "isow_reconstructed_or_truth");
   TTreeReaderArray<int> isocPho(reader, "isoc_pho");
   TTreeReaderArray<double> isocDr(reader, "isoc_delta_r"), isocDeta(reader, "isoc_delta_eta"), isocCal(reader, "isoc_calibrated_energy"),
       isocSub(reader, "isoc_sub1_energy");
-  TTreeReaderArray<double> jetPt(reader, "jet04_pt"), jetEta(reader, "jet04_eta"), jetPhi(reader, "jet04_phi");
+  TTreeReaderArray<double> storedJetPt(reader, profile.jetBranch("jet", "pt").c_str()), jetEta(reader, profile.jetBranch("jet", "eta").c_str()),
+      jetPhi(reader, profile.jetBranch("jet", "phi").c_str());
+  ems_native::Overlay<TTreeReaderArray<double>,double> selectedJetPt(storedJetPt);
+  const response::Variation chosen=variation?*variation:response::Variation{};
+  std::unique_ptr<ems_native::Runtime> emsRuntime;std::unique_ptr<energy_selection::NativeInputs> emsInputs;
+  std::unique_ptr<TTreeReaderArray<double>> emFraction;
+  if(ems_native::active(profile,chosen)){
+    emsRuntime=std::make_unique<ems_native::Runtime>(profile,ems_native::parseContract(emsContractText),digest);
+    emsInputs=std::make_unique<energy_selection::NativeInputs>(*file->Get<TTree>("eventTree"),reader,profile,originalScore);
+    emFraction=std::make_unique<TTreeReaderArray<double>>(reader,profile.jetBranch("jet","emcal_frac").c_str());
+  }
   const OwnershipGate owner(reader);  /* a stitched sample's events outside its window belong to another sample */
   /* simulation only */
   std::unique_ptr<TTreeReaderArray<double>> truthPt, truthEta, truthIso, truthJetPt;
@@ -361,9 +442,18 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
   const Range caloRange = auau ? Range{300, 0.0, 3000.0} : Range{200, 0.0, 200.0};
   const Range centRange = auau ? Range{100, 0.0, 100.0} : Range{1, 0.0, 100.0};
 
+  nominalBook.scientificContext(photonjet_science::qaContext(*file,baseProfile,centralityWeight,dataSelection,mbdReference,chosen.centralityOff,originalScore.scientificFunctions()));
+  for(std::size_t i=0;i<views.size();++i)views[i].book->scientificContext(photonjet_science::qaContext(*file,profiles[i],centralityWeight,
+      DataEventSelection(*file,profiles[i]),mbdReference,views[i].variation.centralityOff,originalScore.scientificFunctions()));
   while (reader.Next()) {
-    treeCopies.check();
-    reportProgress(reader.GetCurrentEntry()+1);
+    treeCopies.check();reportProgress(reader.GetCurrentEntry()+1);
+    for(size_t viewIndex=0;viewIndex<=views.size();++viewIndex){
+    const auto& profile=viewIndex?profiles[viewIndex-1]:baseProfile;
+    Book& b=viewIndex?*views[viewIndex-1].book:nominalBook;
+    const response::Variation chosen=viewIndex?views[viewIndex-1].variation:(variation?*variation:response::Variation{});
+    if(viewIndex)selection_views::validateStoredGap(baseProfile,views[viewIndex-1].expectedStoredGap,originalEt.GetSize(),originalCone,originalThreshold,originalSideband,method,role);
+    et.clear();score.clear();npb.clear();presel.clear();state.clear();cone.clear();threshold.clear();sideband.clear();selectedJetPt.clear();
+
     /* The legacy trigger study precedes analysis cuts: |vz| < 30 cm,
        maximum retained cluster energy >= 1 GeV, 40 bins over 0–20 GeV.
        Its run-level live/scaled correction is applied by the package merge. */
@@ -374,14 +464,40 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         for (int l=0;l<64;++l) if ((*live>>l)&1ULL) study.Fill(*maxCluster,s+0.5,l+0.5);
       }
     }
-    validateSelectionEvent(profile, *centrality, et, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
-    if (*record != 0 || *ready != 1 || *terminal != 0) continue;
+    // Generator stitching needs the full source spectrum before ownership,
+    // vertex or analysis weighting. The producer records ownership and vertex
+    // rejection in terminal status, so these counts must precede that gate too.
+    // Source role 1 is the historical generator-photon definition.
+    /* Au+Au: the IAN's population, 0-80% and the producer's vertex selection, before the stitching windows:
+       producer class 0 or 4 (the vertex class 2 is assigned before the stitch class 4). A sample stitched on its
+       generator-filter photon (the embedded photon+jet samples) shows that photon, the variable of its window, as
+       gen_ does: the truth photons of the tree are only those inside the acceptance. */
+    const bool rawGenerator = sim && *record == 0 &&
+        (!auau || ((*terminal == 0 || *terminal == 4) && *centrality >= 0.0 && *centrality < 80.0));
+    if (rawGenerator) {
+      double photon = -1.0, jet = -1.0;
+      for (std::size_t t = 0; t < truthPt->GetSize(); ++t)
+        if ((*truthRole)[t] == kSignalSourceRole && std::isfinite((*truthPt)[t]) && (*truthPt)[t] > 0)
+          photon = std::max(photon, (*truthPt)[t]);
+      for (std::size_t j = 0; j < truthJetPt->GetSize(); ++j)
+        if (std::isfinite((*truthJetPt)[j]) && (*truthJetPt)[j] > 0) jet = std::max(jet, (*truthJetPt)[j]);
+      const double signalPhoton = photon;
+      if (configuredOwnership.owner == Ownership::Owner::filterPhoton) photon = std::isfinite(owner.value()) ? owner.value() : -1.0;
+      auto &raw = b.h2("gen_raw_" + F, "unit event counts before ownership and analysis cuts;p_{T} [GeV];generator kind",
+                       {80,0,80},{4,0,4});
+      if (photon > 0) raw.Fill(photon,0.5);
+      if (jet > 0) raw.Fill(jet,1.5);
+      if (signalPhoton > 0) raw.Fill(signalPhoton,2.5);
+      if (signalPhoton > 0 && owner.owned()) raw.Fill(signalPhoton,3.5);
+    }
+    validateSelectionEvent(profile, *centrality, originalEt, originalScore, originalState, originalCone, originalThreshold, originalSideband, method, role, idClass, isoClass);
+    if (*record != 0 || *ready != 1 || !acceptedEventClass(*terminal, *centrality)) continue;
     const bool ppOwned = ppSelection.accepts();
     if (strictReduction && !std::isfinite(*weightValue)) throw std::runtime_error("nonfinite QA event weight");
     const double wEvent = (std::isfinite(*weightValue) ? treeCopies.baseWeight(ppSelection.weight(*weightValue)) : 1.0) * vertexWeight();
     double w = wEvent;
     if (sim && auau) {
-      w = wEvent * centralityWeight(*centrality);
+      w = wEvent * (chosen.centralityOff?1.:centralityWeight(*centrality));
       if (strictReduction && !std::isfinite(w)) throw std::runtime_error("nonfinite QA centrality weight");
       if (!std::isfinite(w)) w = 1.0;
     }
@@ -429,12 +545,26 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
     const int slice = auau ? ((*centrality >= 0.0 && *centrality < 80.0) ? centralitySlice(*centrality) : -1) : 0;
     const bool inWindow = std::isfinite(*vz) && std::fabs(*vz) < profile.vertexAbsZMax;
     if (inClass) b.h1("evt_vz_" + F + "_" + c, "analysis events;v_{z} [cm]", {240, -60.0, 60.0}).Fill(*vz, w);
+    if (auau && sim && inClass) {
+      const double beforeVertex = treeCopies.baseWeight(ppSelection.weight(*weightValue)) * (chosen.centralityOff?1.:centralityWeight(*centrality));
+      if (!std::isfinite(beforeVertex)) throw std::runtime_error("nonfinite pre-vertex full-range QA weight");
+      b.h1("evt_vz_novertexweight_"+F+"_"+c,"analysis events before vertex weighting;v_{z} [cm]",{240,-60,60}).Fill(*vz,beforeVertex);
+    }
     {
       const int mb = ((*centMb == 1) ? 1 : 0) + ((*embMb == 1) ? 2 : 0);
       b.h3("evt_calo_" + F, "analysis events;total calorimeter E [GeV];centrality [%];MB state", caloRange, centRange,
            {4, 0.0, 4.0}).Fill(*caloTotal, *centrality, mb + 0.5, w);
     }
+    if (auau && !sim && inClass && dataSelection.accepts(*run,*scaled,*centMb) && std::isfinite(*vz))
+      b.h1("evt_vz_selected_wide_data","selected DATA events before vertex window;v_{z} [cm]",{120,-60,60}).Fill(*vz);
     if (!inWindow) continue;
+    if (auau && sim && inClass) {
+      // Compute the pre-vertex weight directly, never divide by a possibly zero factor.
+      const double beforeVertex = treeCopies.baseWeight(ppSelection.weight(*weightValue)) * (chosen.centralityOff?1.:centralityWeight(*centrality));
+      if (!std::isfinite(beforeVertex)) throw std::runtime_error("nonfinite pre-vertex QA weight");
+      auto &vertex = b.h2("evt_vzw_"+F,"selected class events;v_{z} [cm];0 without vertex weight, 1 full weight",{40,-10,10},kSel);
+      vertex.Fill(*vz,0.5,beforeVertex); vertex.Fill(*vz,1.5,w);
+    }
     if (auau) {
       TH2F& cent = b.h2("evt_cent_" + F, "analysis events;centrality [%];0 w_event, 1 full weight", {100, 0.0, 100.0}, kSel);
       cent.Fill(*centrality, 0.5, wEvent);
@@ -447,7 +577,20 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         if ((*scaled >> s) & 1ULL) bits.Fill(*centrality, s + 0.5);
     }
     if (!inClass || !dataSelection.accepts(*run,*scaled,*centMb)) continue;
+    // Retain the correction target before requiring a photon or an ID decision.
+    // Unit counts and per-source cells allow an independent run-split fit later.
+    if (auau && !sim) {
+      b.h1("evt_vz_selected_data","selected DATA events;v_{z} [cm]",{80,-10,10}).Fill(*vz);
+    }
+    if(emsRuntime){
+      const auto selected=emsRuntime->evaluate(*emsInputs,originalEt,*vz,*centrality,chosen.emScale);
+      et.assign(selected.et);score.assign(selected.score);npb.assign(selected.npb);presel.assign(selected.preselection);state.assign(selected.state);
+      cone.assign(selected.cone);threshold.assign(selected.threshold);sideband.assign(selected.sideband);
+      response::Varied jets(storedJetPt,1.,0.,chosen.seed,0,reader.GetCurrentEntry(),1);
+      jets.scaleEmFraction(*emFraction,chosen.emScale);selectedJetPt.assign(jets);
+    }
     const std::size_t n = et.GetSize();
+    const ScaledValues jetPt(selectedJetPt, sim ? 1.0 : configuredDataJetScale);  /* DATA jets on the in-situ scale */
     if (cone.GetSize() != 2 * n) throw std::runtime_error("isolation witnesses are not 2 per photon in " + path);
     if (profile.augmentedClasses && (idClass.GetSize() != n || isoClass.GetSize() != n))
       throw std::runtime_error("the augmented classes pho_id_class, pho_iso_class are not filled in " + path);
@@ -481,6 +624,8 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
     long leaderA = -1;
     for (std::size_t i = 0; i < n; ++i) {
       if (!candidateInWindow(profile, *vz, et[i], eta[i], phi[i])) continue;
+      b.h3("preselection_compare_"+labelOf(i)+"_"+c,"preselection cross-check;stored flag;canonical NPB pass;E_{T} [GeV]",
+           {4,-1.5,2.5},{2,-.5,1.5},kEt).Fill(presel.saved(i),presel[i],et[i],w);
       const Decision d = decide(profile, i, et[i], *centrality, score, state, cone, threshold, sideband, method, role, idClass, isoClass);
       decisionOf[i] = d;
       int stage = 0;
@@ -499,8 +644,8 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
       /* stage axes are cumulative: a candidate fills every stage it reached */
       TH2F& cluEt = b.h2("clu_et_" + tag, "candidates;E_{T} [GeV];stage (reached)", {100, 0.0, 50.0}, kStage);
       for (int s = 0; s <= stage; ++s) cluEt.Fill(et[i], s + 0.5, w);
-      if (et[i] >= 10.0) {
-        TH3F& cluEtaPhi = b.h3("clu_etaphi_" + tag, "candidates E_{T} >= 10 GeV;#eta;#phi;stage (reached)", kEta, kPhi, kStage);
+      if (et[i] >= 12.0) {
+        TH3F& cluEtaPhi = b.h3("clu_etaphi_" + tag, "candidates E_{T} >= 12 GeV;#eta;#phi;stage (reached)", kEta, kPhi, kStage);
         for (int s = 0; s <= stage; ++s) cluEtaPhi.Fill(eta[i], phi[i], s + 0.5, w);
       }
       if (!(kQaEtMin <= et[i] && et[i] < kQaEtMax)) continue;
@@ -512,32 +657,47 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         for (int s = 0; s <= stage; ++s) h.Fill(x, et[i], s + 0.5, w);
       }
       if (std::isfinite(npb[i])) b.h2("ncb_" + tag, ";NPB score;E_{T} [GeV]", {110, -1.1, 1.1}, kEt).Fill(npb[i], et[i], w);
-      const double dt = time[i] - *mbdT0;
+      const double timeReference = (auau || sim) ? mbdReference : ppMbdOffset(*run,mbdReference);
+      const double dt = time[i] - (*mbdT0 - timeReference);
+      if (!sim && std::isfinite(time[i])) for (int s=0;s<=stage;++s)
+        b.h3("clu_rawtime_stage_data_"+c,";raw cluster time [ns];E_{T} [GeV];stage",kDt,kEt,kStage).Fill(time[i],et[i],s+.5,w);
       if (!sim && std::isfinite(dt)) {
+        const bool inNcbMapWindow = photonjet_science::ncbEtaTimeEnergyAccepted(et[i]);
+        if (inNcbMapWindow && std::isfinite(npb[i]))
+          b.h3("clu_etatime_npb_data_"+c,"stage 0, 12 <= E_{T} < 40 GeV;#eta;cluster time minus corrected MBD [ns];NPB score",kEta,kDt,{22,-1.1,1.1}).Fill(eta[i],dt,npb[i],w);
+        for (int s=0;s<=stage;++s) {
+          b.h3("clu_time_stage_data_"+c,";cluster time minus corrected MBD [ns];E_{T} [GeV];stage",kDt,kEt,kStage).Fill(dt,et[i],s+.5,w);
+          if (inNcbMapWindow)
+            b.h3("clu_etatime_stage_data_"+c,";#eta;cluster time minus corrected MBD [ns];stage",kEta,kDt,kStage).Fill(eta[i],dt,s+.5,w);
+        }
         const double e11 = (*shape[0])[i];
         if (std::isfinite(e11))
           b.h3("e11e33_dt_data_" + c, ";E_{11}/E_{33};E_{T} [GeV];t_{cluster} - t_{MBD} [ns]", shapeRange("e11_over_e33"), kEt,
                kDtCoarse).Fill(e11, et[i], dt, w);
-        b.h2("etatime_data_" + c, "E_{T} >= 10 GeV;#eta;t_{cluster} - t_{MBD} [ns]", kEta, kDt).Fill(eta[i], dt, w);
+        if (inNcbMapWindow)
+          b.h2("etatime_data_" + c, "12 <= E_{T} < 40 GeV;#eta;t_{cluster} - t_{MBD} [ns]", kEta, kDt).Fill(eta[i], dt, w);
       }
       if (stage < 1) continue;
       const int id = d.tight ? 0 : d.nonTight ? 1 : 2;
-      if (d.witness && state[i] == 1 && std::isfinite(score[i]) && et[i] >= 15.0 && et[i] < 35.0)
-        b.h3("scoreiso_" + tag, "preselected;photon-ID score;E_{T}^{iso} [GeV];E_{T} [GeV]", {20, 0.0, 1.0}, {50, -10.0, 40.0},
+      if (d.witness && d.scored && et[i] >= 15.0 && et[i] < 35.0) {
+        b.h3("scoreiso_" + tag, "preselected;photon-ID score;E_{T}^{iso} [GeV];E_{T} [GeV]", {20, 0.0, 1.0}, {60, -20.0, 40.0},
              {10, 15.0, 35.0}).Fill(score[i], d.iso, et[i], w);
+        b.h3("scoreiso_fine_" + tag, "preselected;photon-ID score;E_{T}^{iso} [GeV];E_{T} [GeV]", {100, 0.0, 1.0}, {60, -20.0, 40.0},
+             {10, 15.0, 35.0}).Fill(score[i], d.iso, et[i], w);
+      }
       if (d.witness) {
         b.h3("iso_" + tag, ";E_{T}^{iso} [GeV];E_{T} [GeV];ID (tight, non-tight, neither)", kIso, kEt, kId).Fill(d.iso, et[i], id + 0.5, w);
-        if (auau)
+        if (auau && !emsRuntime)
           b.h3("isonoue_" + tag, "no UE subtraction;E_{T}^{iso} [GeV];E_{T} [GeV];ID (tight, non-tight, neither)", kIso, kEt, kId)
               .Fill(d.iso + ue[i], et[i], id + 0.5, w);
       }
       if (slice < 0) continue;
       const Range slices = auau ? kSlice16 : Range{1, 0.0, 1.0};
-      if (state[i] == 1 && std::isfinite(score[i]))
+      if (d.scored)
         b.h3("bdt_" + f, "preselected;photon-ID score;E_{T} [GeV];5% slice", {200, 0.0, 1.0}, kEt, slices).Fill(score[i], et[i], slice + 0.5, w);
       if (d.witness) {
         b.h3("isoslice_" + f, "preselected;E_{T}^{iso} [GeV];E_{T} [GeV];5% slice", kIso, kEt, slices).Fill(d.iso, et[i], slice + 0.5, w);
-        if (auau)
+        if (auau && !emsRuntime)
           b.h3("isonoueslice_" + f, "preselected, no UE subtraction;E_{T}^{iso} [GeV];E_{T} [GeV];5% slice", kIso, kEt, slices)
               .Fill(d.iso + ue[i], et[i], slice + 0.5, w);
       }
@@ -561,6 +721,10 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
       if (leader[r] < 0) continue;
       const long i = leader[r];
       const std::string f = labelOf(i);
+      // Retain the historical vertex-window comparison alongside nominal QA.
+      // The sample role is recorded in package provenance; FinalAnalysis uses SI only.
+      if (sim && !auau && r == kA && std::fabs(*vz) < 30)
+        b.h1("reco_tag_vz30_" + F,"leading tight isolated tag;E_{T} [GeV]",{20,15,35}).Fill(et[i],w);
       b.h2("abcd_" + f + "_" + c, "event-leading photons;region (A,B,C,D);E_{T} [GeV]", {4, 0.0, 4.0}, {20, 15.0, 35.0}).Fill(r + 0.5, et[i], w);
       if (sim)  /* the same by the ownership class of the event (a sample's owned window of its generator variable) */
         b.h3v("abcdown_" + f + "_" + c, "event-leading photons;region (A,B,C,D);E_{T} [GeV];generator p_{T} class", kRegions4,
@@ -589,10 +753,10 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
     for (std::size_t j = 0; j < jetPt.GetSize(); ++j) {
       if (!(std::isfinite(jetPt[j]) && std::isfinite(jetEta[j]) && std::isfinite(jetPhi[j]))) continue;
       for (int s = 0; s < (leaderA >= 0 ? 2 : 1); ++s) {
-        b.h2("jet_pt_" + F + "_" + c, "R = 0.4 jets;p_{T} [GeV];0 every event, 1 with a Region-A leader", {120, 0.0, 60.0}, kSel)
+        b.h2("jet_pt_" + F + "_" + c, "analysis jets;p_{T} [GeV];0 every event, 1 with a Region-A leader", {120, 0.0, 60.0}, kSel)
             .Fill(jetPt[j], s + 0.5, w);
         if (jetPt[j] >= kQaJetMapPtMin)
-          b.h3("jet_etaphi_" + F + "_" + c, "R = 0.4 jets p_{T} >= 5 GeV;#eta;#phi;0 every event, 1 with a Region-A leader", kJetEta,
+          b.h3("jet_etaphi_" + F + "_" + c, "analysis jets p_{T} >= 5 GeV;#eta;#phi;0 every event, 1 with a Region-A leader", kJetEta,
                kJetPhi, kSel).Fill(jetEta[j], jetPhi[j], s + 0.5, w);
       }
     }
@@ -620,6 +784,7 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
         if (reached[s]) eff.Fill((*truthPt)[t], s + 1.5, et[r], w);
     }
   }
+    } // selection views: one original entry supplies all full QA books
   /* a missing branch or a read error ends the loop like the end of the tree; only the end is accepted */
   if (reader.GetEntryStatus() != TTreeReader::kEntryBeyondEnd && reader.GetEntryStatus() != TTreeReader::kEntryNotFound)
     throw std::runtime_error("eventTree read stopped before the end of " + path);
@@ -632,9 +797,13 @@ inline void fillFile(const std::string& path, const Profile& requested, Family f
    Au+Au simulation only and required there, 16 weights for the 5% slices of 0-80% (CentralityWeights). */
 /* QA of the same planned source/selection used by measurement fills.
    Broad generator spectra retain their separate diagnostic population. */
-int FillPhotonQA(const char* inputs, const char* output, const char* profileName = "nominal", const char* centralityWeightText = "", const char* selection = "") {
+int FillPhotonQA(const char* inputs, const char* output, const char* profileName = "nominal", const char* centralityWeightText = "", const char* selection = "",
+                 const char* variationText="",const char* emsContractText="",const std::function<std::string(const std::string&)>& digest={}) {
   using namespace photonjet;
   using namespace photonjet::qa;
+  const auto variation=response::parseVariation(variationText);
+  response::requireRunnableVariation(variation,emsContractText && *emsContractText);
+  if(response::emsSelectionResponse(variation))ems_native::parseContract(emsContractText);
   const std::vector<std::string> paths = inputPaths(inputs);
   std::unique_ptr<TFile> first(TFile::Open(paths.front().c_str(), "READ"));
   if (!first || first->IsZombie()) throw std::runtime_error("cannot open " + paths.front());
@@ -654,7 +823,7 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
   std::string triggerInfo;  /* DATA: the run's trigger table (bit names, prescales, run totals), identical in every input */
   bool triggerConsistent = true;
   for (std::size_t f = 0; f < paths.size(); ++f) {
-    fillFile(paths[f], profile, family, weights, classes, b);
+    fillFile(paths[f], profile, family, weights, classes, b,&variation,emsContractText,digest);
     std::unique_ptr<TFile> in(TFile::Open(paths[f].c_str(), "READ"));
     sources << (f ? "," : "") << "{\"path\":\"" << paths[f] << "\",\"input_file_sha256\":\"" << sourceSha(*in) << "\"}";
     const char* triggerKey = in->Get("meta/trigger_selection") ? "meta/trigger_selection" : "meta/trigger_run_info";
@@ -668,8 +837,10 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
   std::unique_ptr<TFile> out(TFile::Open(output, "CREATE"));
   if (!out || out->IsZombie()) throw std::runtime_error(std::string("cannot create ") + output);
   b.write();
+  photonjet_science::writeProducerEvidence(*out,photonjet_science::producerInputs(paths));
   std::ostringstream contract;
   contract << "{\"schema\":\"RJPhotonQAV1\",\"version\":" << kQaVersion << ",\"et\":[" << kQaEtMin << "," << kQaEtMax
+           << "],\"ncb_eta_time_et\":[" << photonjet_science::kNcbEtaTimeEtMinGeV << "," << photonjet_science::kNcbEtaTimeEtMaxGeV
            << "],\"stages\":[\"every candidate\",\"preselected\",\"tight\",\"tight and isolated\"],\"histograms\":" << b.names().size() << "}";
   TObjString(profile.name.c_str()).Write("profile");
   writeSelection(profile);
@@ -682,6 +853,8 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
   TObjString(w.str().c_str()).Write("centrality_weights");
   TObjString(sources.str().c_str()).Write("sources");
   TObjString(contract.str().c_str()).Write("qa_contract");
+  if(response::emsSelectionResponse(variation))TObjString(emsContractText).Write("ems_selection_contract");
+  if(response::emsSelectionResponse(variation))TObjString(family!=Family::data?"true":"false").Write("ems_applied_to_simulation");
   if (family == Family::data) {
     TObjString(triggerInfo.c_str()).Write("trigger_run_info");
     TObjString(triggerConsistent ? "1" : "0").Write("trigger_run_info_consistent");
@@ -702,7 +875,7 @@ int FillPhotonQA(const char* inputs, const char* output, const char* profileName
 namespace photonjet {
 
 inline void fillExtensions(const char* inputPath, const char* outputPath, const char* selection, const char* centralityWeightText,
-                           bool requireStage3Fractions) {
+                           bool requireStage3Fractions,bool centralityOff=false) {
   std::unique_ptr<TFile> input(TFile::Open(inputPath));
   if (!input || input->IsZombie()) throw std::runtime_error("extension input cannot open");
   const auto profile=validateSelectionInput(*input,configuredProfile("nominal",fileSystem(*input),selection));
@@ -765,7 +938,8 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
   }
   TTreeReaderArray<double> et(r,"pho_et"),eta(r,"pho_eta"),phi(r,"pho_phi");
   PhotonScores score(*input,r,profile);
-  TTreeReaderArray<int> pre(r,"pho_presel_active"),state(r,profile.stateBranch.c_str());
+  PhotonPreselection pre(r);
+  TTreeReaderArray<int> state(r,profile.stateBranch.c_str());
   std::unique_ptr<TTreeReaderArray<int>> pr,pt,pc,jr,jc,tvalid,tclass;
   std::unique_ptr<TTreeReaderArray<double>> pm,jm;
   if(sim) {
@@ -782,9 +956,9 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
     if(!ppSelection.accepts()) continue;
     if(!owner.owned()) continue;
     if(!std::isfinite(*w)) throw std::runtime_error("nonfinite event weight");
-    const double weight=treeCopies.baseWeight(ppSelection.weight(*w))*vertexWeight()*weights(*c), centValue=auau?*c:50.;
+    const double weight=treeCopies.baseWeight(ppSelection.weight(*w))*vertexWeight()*(centralityOff?1.:weights(*c)), centValue=auau?*c:50.;
     auto& cut=h3("qa/events/cutflow",{6,0,6},cent,{2,0,2});
-    const bool gates[]={true,*ready==1,*terminal==0,*valid==1,std::isfinite(*vz)&&std::abs(*vz)<profile.vertexAbsZMax,!auau||(*c>=0&&*c<80)};
+    const bool gates[]={true,*ready==1,acceptedEventClass(*terminal,*c),*valid==1,std::isfinite(*vz)&&std::abs(*vz)<profile.vertexAbsZMax,!auau||(*c>=0&&*c<80)};
     for(int i=0;i<6;++i) {if(!gates[i]) break;cut.Fill(i+.5,centValue,.5);cut.Fill(i+.5,centValue,1.5,weight);}
     // Base weight applied by TreeToHists; the second channel holds the final weight.
     b.h2(key("qa/events/weights"),"",{200,-10,10},{2,0,2}).Fill(treeCopies.baseWeight(*w),.5);
@@ -835,7 +1009,8 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
   TObjString(profile.name.c_str()).Write("profile");writeSelection(profile);
   SelectionJson availability={{"fractions",fractions?"available":"stage3_not_filled"},
     {"npb_timing","blocked_run_timing_calibration_and_tag_contract"},{"semantic_triggers","blocked_named_trigger_population_contract"}};
-  TObjString(availability.dump().c_str()).Write("availability");out->Close();
+  TObjString(availability.dump().c_str()).Write("availability");
+  photonjet_science::writeProducerEvidence(*out,photonjet_science::Json::array({photonjet_science::producerInput(*input)}));out->Close();
 }
 
 }  /* namespace photonjet */
@@ -843,7 +1018,7 @@ inline void fillExtensions(const char* inputPath, const char* outputPath, const 
 /* Additional retained observables under the same source bindings. Optional
    fraction availability is checked by the plan, rather than inferred from 0. */
 int FillExtensions(const char* input, const char* output, const char* selection, const char* centralityWeightText = "",
-                   bool requireStage3Fractions = false) {
-  photonjet::fillExtensions(input, output, selection, centralityWeightText, requireStage3Fractions);
+                   bool requireStage3Fractions = false, bool centralityOff = false) {
+  photonjet::fillExtensions(input, output, selection, centralityWeightText, requireStage3Fractions, centralityOff);
   return 0;
 }

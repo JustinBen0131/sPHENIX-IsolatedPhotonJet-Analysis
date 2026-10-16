@@ -18,16 +18,23 @@ std::string sha256File(const std::string &path);     /* TreeToHists.cc */
 std::string digest(const Json &value);
 std::string digestStream(const std::function<void(std::ostream &)> &write);
 Json readJson(const std::string &path);
+/* Reuse aggregate histograms only when full native validation is bound to
+   these exact file bytes, sources, settings and producer. */
+bool finalDataAggregatesValidated(const Json &receipt, const Json &metadata,
+                                 const std::string &fileHash);
 Json reductionCode();
 void checkReductionCode(const Json &plan);
 void checkVertexFit(const Json &sample);
 void checkPpPeriodFits(const Json &periods);
 Json ppPeriodsOf(const Json &plan, const Json &sample);
 Json inventory(const std::string &system, const std::string &family);
+Json packageInventory(const Json &plan, const Json &sample);
 void merge(const Json &plan, const Json &sample, const std::string &work, const std::string &output);
 Json preparePlan(const std::string &settings, const std::string &inputs, const std::string &home,
                  const std::vector<std::string> &samples, long long maxEvents, const std::string &work = "",
                  bool bounded = false, const Json &inspections = Json::array());
+Json inspectionSelection(const Json &selection);
+bool inspectionCompatible(const Json &oldSnapshot, const Json &newSnapshot);
 Json inspectSources(const Json &descriptor, const Json &snapshot);
 void savePlan(const Json &plan, const std::string &work, bool writeRows = true);
 void savePlanRow(const Json &plan, long index, const std::string &work,
@@ -84,3 +91,10 @@ int vertex(const std::vector<std::string> &args);     /* Corrections.cc: AuAu tr
 }  /* namespace treetohists */
 
 namespace treetohists { Json treeCopySummary(const Json &sample); }
+
+namespace treetohists {
+void verifyReplayParent(const std::string&,const Json&,const Json&);
+Json measurementReplayInventory(const std::string&,const std::string&);
+void validateMeasurementReplayPackage(const std::string&,const Json&,const Json&,const std::string&,const Json&);
+void publishMeasurementReplayPackage(const std::string&,const std::string&,const Json&,const Json&,const std::string&,const Json&);
+}

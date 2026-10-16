@@ -7,6 +7,7 @@
  * with bounded buffers; whole trees are never held in memory.
  */
 #include "EventTree.h"
+#include "../../TreeToHists/src/ScientificProducerEvidence.h"
 
 #include <TBranch.h>
 #include <TBranchElement.h>
@@ -2246,6 +2247,9 @@ std::string consolidate(const std::string& requestJson)
     }
     combined["schema"]["counters"] = counters;
     combined["schema"]["encoding"] = "counted";
+    combined["native_source_witness"] = photonjet_science::compiledProducerWitness();
+    combined["native_source_ancestry"] =
+        photonjet_science::consolidatedProducerAncestry(combined.at("consolidation"));
     out->cd();
     require(tree->Write("", TObject::kOverwrite) > 0, "TTree::Write failed");
     for (const auto& [key, value] : combined.items()) writeText(*out, "meta/" + key, dumps(value));

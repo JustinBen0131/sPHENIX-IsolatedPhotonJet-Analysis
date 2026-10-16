@@ -71,7 +71,7 @@ AS_IF([test "x$enable_producer" != xno], [
   AS_IF([test -z "$SPHENIX_LIBS"], [
     SPHENIX_LIBS="-lcalo_reco -lCaloStatusSkimmer -lcalotrigger -lcalotrigger_io -lcentrality -lcentrality_io -lglobalvertex -lglobalvertex_io -lmbd -lmbd_io -lzdcinfo -lzdcinfo_io -ljetbackground -ljetbackground_io -ljetbase -ljetbase_io -lg4jets -lg4eval -lg4mbd -lCaloWaveformSim -lg4detectors -lphg4hit -lphhepmc -lphhepmc_io -lcalo_io -lffamodules -lffaobjects -lffarawobjects -lcdbobjects -lfun4all -lSubsysReco -lphool"
   ])
-  PRODUCER_LIBS="$SPHENIX_LIBS $FASTJET_LIBS -lHepMC -lCLHEP -lTMVA $ROOT_LIBS"
+  PRODUCER_LIBS="$SPHENIX_LIBS $FASTJET_LIBS -lHepMC -lCLHEP -lTMVA -lTMVAUtils $ROOT_LIBS"
   AC_CHECK_HEADERS([fun4all/Fun4AllServer.h calobase/PhotonClusterv1.h caloreco/RawClusterBuilderTopo.h g4mbd/MbdDigitization.h calowaveformsim/CaloWaveformSim.h TMVA/RBDT.hxx], [],
                    [AC_MSG_ERROR([required production header missing or incompatible; check the selected release])])
   saved_libs="$LIBS"

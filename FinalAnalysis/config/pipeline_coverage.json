@@ -1,0 +1,220 @@
+{
+  "schema": "PhotonJetSystematicCoverageV1",
+  "nominal_sha256": "@nominal",
+  "sources": [
+    "prior",
+    "iterations",
+    "combinatoric_sideband",
+    "background_correlation",
+    "jet_energy_scale",
+    "jet_energy_resolution",
+    "electromagnetic_scale",
+    "electromagnetic_resolution",
+    "photon_id_selection",
+    "isolation_selection",
+    "centrality_weight",
+    "timing_selection"
+  ],
+  "results": {
+    "pp": {
+      "prior": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "iterations": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "combinatoric_sideband": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "background_correlation": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "jet_energy_scale": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "jet_energy_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_scale": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "photon_id_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "isolation_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "centrality_weight": {
+        "status": "not_applicable",
+        "reason": "pp has no AuAu centrality weighting."
+      },
+      "timing_selection": {
+        "status": "not_yet_included",
+        "reason": "Timing selection deferred by Justin; unmeasured."
+      }
+    },
+    "auau_cent0_20": {
+      "prior": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "iterations": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "combinatoric_sideband": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "background_correlation": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "jet_energy_scale": {
+        "status": "not_yet_included",
+        "reason": "AuAu jet energy scale deferred by Justin for an independent later study."
+      },
+      "jet_energy_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_scale": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "photon_id_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "isolation_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "centrality_weight": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "timing_selection": {
+        "status": "not_yet_included",
+        "reason": "Timing selection deferred by Justin; unmeasured."
+      }
+    },
+    "auau_cent20_50": {
+      "prior": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "iterations": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "combinatoric_sideband": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "background_correlation": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "jet_energy_scale": {
+        "status": "not_yet_included",
+        "reason": "AuAu jet energy scale deferred by Justin for an independent later study."
+      },
+      "jet_energy_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_scale": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "photon_id_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "isolation_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "centrality_weight": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "timing_selection": {
+        "status": "not_yet_included",
+        "reason": "Timing selection deferred by Justin; unmeasured."
+      }
+    },
+    "auau_cent50_80": {
+      "prior": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "iterations": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "combinatoric_sideband": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "background_correlation": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "jet_energy_scale": {
+        "status": "not_yet_included",
+        "reason": "AuAu jet energy scale deferred by Justin for an independent later study."
+      },
+      "jet_energy_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_scale": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "electromagnetic_resolution": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "photon_id_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "isolation_selection": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "centrality_weight": {
+        "status": "included",
+        "reason": "Bound to canonical variation products; numerical acceptance remains separate."
+      },
+      "timing_selection": {
+        "status": "not_yet_included",
+        "reason": "Timing selection deferred by Justin; unmeasured."
+      }
+    }
+  }
+}

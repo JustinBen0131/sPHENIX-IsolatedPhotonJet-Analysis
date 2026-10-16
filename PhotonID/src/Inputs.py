@@ -22,7 +22,7 @@ import awkward as ak
 import numpy as np
 import yaml
 
-from .Models import SYSTEMS, WorkProgress, digest, file_hash, read_json, require, save_json
+from .Models import SYSTEMS, WorkProgress, canonical, digest, file_hash, read_json, require, save_json
 
 _EVENTTREE = None
 
@@ -521,6 +521,8 @@ def project_source(item, recipe, root, *, progress_identity=None, event_progress
                         source=item, source_events=item['entries'], definition=population_definition(recipe),
                         rows=rows, class_counts=classes, record_dtype=dtype.descr,
                         rows_sha256=file_hash(folder / 'rows.bin'), isolation_used=False, weights_used=False)
+            from . import ScientificMetadata
+            body['scientific_inputs']=ScientificMetadata.source_definitions(meta)
             save_json(folder / 'projection.json', dict(body, projection_sha256=digest(body)))
             tracker.write('complete', tracker.total, status='PASS')
         except BaseException as error:
@@ -652,7 +654,7 @@ class Population:
         return ~self.train if self.partition is None else self.partition == 2
 
 
-def inverse_pdf(values, *, fixed_range=None, cap=None, progress=None):
+def inverse_pdf(values, *, fixed_range=None, cap=None, progress=None, scientific=None):
     """Exact PPG12 twenty-bin spline weights, with bounded observable passes."""
     from scipy.interpolate import UnivariateSpline
     values = np.asarray(values, np.float64)
@@ -683,10 +685,15 @@ def inverse_pdf(values, *, fixed_range=None, cap=None, progress=None):
     mean = factors.mean()
     for begin, end in batches('normalize'):
         factors[begin:end] /= mean
+    if scientific is not None:
+        scientific.update(method='scipy.UnivariateSpline cubic; s=0; twenty-bin density',
+            edges=edges.tolist(),counts=counts.tolist(),knots=spline.get_knots().tolist(),
+            coefficients=spline.get_coeffs().tolist(),floor=1e-3,cap=cap,normalization_mean=float(mean),
+            inverse='1/max(spline(x),floor); optional cap; divide by complete-population mean')
     return factors
 
 
-def canonical_weights(x, y, features, *, progress=None):
+def canonical_weights(x, y, features, *, progress=None, scientific=None):
     """Class balance times per-class eta/ET flattening, before the event split.
 
     These are training weights; generator normalization and analysis event
@@ -697,10 +704,14 @@ def canonical_weights(x, y, features, *, progress=None):
         mask = y == klass; n = int(mask.sum())
         require(n >= 20, 'both training classes need at least twenty eligible rows')
         weights[mask] = len(y) / (2. * n)
+        seen={'class_balance':len(y)/(2.*n),'feature_factors':{}}
         for name, settings in [('cluster_Eta', dict(fixed_range=(-.7, .7))), ('cluster_Et', dict(cap=800.))]:
             def observed(phase, processed, total):
                 if progress: progress(f'prepare-weights-class{klass}-{name}-{phase}', processed, total)
-            weights[mask] *= inverse_pdf(x[mask, features.index(name)], progress=observed, **settings)
+            factor={}
+            weights[mask] *= inverse_pdf(x[mask, features.index(name)], progress=observed, scientific=factor, **settings)
+            seen['feature_factors'][name]=factor
+        if scientific is not None:scientific[str(klass)]=seen
     require(np.isfinite(weights).all() and (weights > 0).all(), 'invalid canonical training weights')
     return weights
 
@@ -1035,8 +1046,9 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
             data['partition'][:] = np.where(data['train'], 0, 2)
             data['split_rank'][:] = np.arange(total)
         tracker.write('prepare-weights', phase_unit='eligible photons')
+        scientific_weights={}
         data['weights'][:] = canonical_weights(data['x'], data['y'], recipe['features'],
-            progress=lambda phase, done, count: tracker.stage(phase, done, count, 'photons'))
+            progress=lambda phase, done, count: tracker.stage(phase, done, count, 'photons'),scientific=scientific_weights)
         if recipe['training'].get('weight_dtype') == 'float32':
             data['weights'][:] = data['weights'].astype(np.float32)
         tracker.write('prepare-seal', phase_unit='prepared arrays')
@@ -1061,6 +1073,21 @@ def prepare(inputs, recipe, work, *, split_reference=None, progress_identity=Non
                        event_visits=0 if projections is not None else visits,
                        cached_photon_visits=visits if projections is not None else 0,
                        projection_receipts=projection_pins)
+        from . import ScientificMetadata
+        native_inputs=[]
+        for item in counted_inputs:
+            rows=(projections[item['logical_id']]['receipt'].get('scientific_inputs',
+                    [ScientificMetadata.unknown('retained projection has no native definitions')]) if projections is not None
+                  else ScientificMetadata.source_definitions(metadata(item['path'])))
+            native_inputs.extend(rows)
+        receipt['scientific_inputs']=sorted({canonical(row):row for row in native_inputs}.values(),key=canonical)
+        receipt['scientific_weights']={'classes':scientific_weights,'final_precision':recipe['training'].get('weight_dtype','float64')}
+        receipt['scientific_recipe']={key:recipe[key] for key in ('system','features','domain','training','sources','weights')}
+        if 'training_domain' in recipe:receipt['scientific_recipe']['training_domain']=recipe['training_domain']
+        receipt['scientific_split']={'algorithm':receipt['split_method'],
+            'parameters':{key:recipe['training'].get(key) for key in ('seed','split_identity','train_fraction','validation_fraction','test_fraction')},
+            'event_hash_method':'sha256 first 32 bits, lexical event-key tie break',
+            'holdout_cutoff':cutoff,'reference_method':reference_receipt.get('method') if reference_receipt else None}
         receipt['event_split_sha256'] = split_witness(receipt)
         save_json(done, receipt)
         tracker.write('complete', tracker.total, status='PASS')

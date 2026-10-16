@@ -1,6 +1,12 @@
 /* Source-aware histogram merging and package validation. Histograms remain
    unscaled; FinalAnalysis applies each sample's normalization once. */
 #include "TreeToHists.h"
+#include "BuildInfo.h"
+#include "ScientificProducerEvidence.h"
+#include "CandidateScientificContext.h"
+#include "SelectionReplay.h"
+#include "ResponseOnlyResolution.h"
+#include "CandidateCachePackage.h"
 #include "Configuration.h"
 
 #include <cmath>
@@ -13,6 +19,7 @@
 #include <stdexcept>
 #include <TFile.h>
 #include <TH1.h>
+#include "HistogramScientificDefinitions.h"
 #include <THnSparse.h>
 #include <TLeaf.h>
 #include <TObjString.h>
@@ -146,6 +153,7 @@ std::string bindingWithSources(const Json &plan,const Json &sample,
     {"normalization",sample.at("normalization")},{"coverage",sample.at("coverage")},
     {"weights",sample.at("weights")},{"vertex_reweighting",sample.at("vertex_reweighting")},
     {"intermediate",sample.value("intermediate",false)}};
+  if(sample.at("family")!="data" && plan.contains("response_component_grid"))body["response_component_grid"]=plan.at("response_component_grid");
   for (const char *key : {"centrality_evidence","centrality_data_trigger","run","data_run","run_packages","run_coverages","run_records"})
     body[key]=sample.value(key,Json());
   /* Emit the same sorted canonical JSON as the original binding, one source
@@ -203,6 +211,18 @@ void RecordTable::append(TTree &input, const std::string &name, Long64_t source,
     }
     if (!ints.count("source")) output->Branch("source", &(ints["source"]=0), "source/L");
   }
+  const auto incomingContexts=photonjet_science::candidateContexts(input);
+  if(!incomingContexts.empty())photonjet_science::candidateContexts(*output,
+    photonjet_science::mergeCandidateContexts(photonjet_science::candidateContexts(*output),incomingContexts,source,sourceMap));
+  Json definitions=Json::array();
+  if(auto* saved=dynamic_cast<TNamed*>(output->GetUserInfo()->FindObject("physics_effective_definitions"))) {
+    definitions=Json::parse(saved->GetTitle());output->GetUserInfo()->Remove(saved);
+  }
+  auto* sourceDefinitions=dynamic_cast<TNamed*>(input.GetUserInfo()->FindObject("physics_effective_definitions"));
+  const Json incoming=sourceDefinitions?Json::parse(sourceDefinitions->GetTitle()):Json::array({nullptr});
+  for(const auto& definition:incoming)if(std::find(definitions.begin(),definitions.end(),definition)==definitions.end())definitions.push_back(definition);
+  std::sort(definitions.begin(),definitions.end(),[](const Json& a,const Json& b){return a.dump()<b.dump();});
+  output->GetUserInfo()->Add(new TNamed("physics_effective_definitions",definitions.dump().c_str()));
   for (Long64_t row=0; row<input.GetEntries(); ++row) {
     if (row%10000==0) ReductionProgress::pulse("copying_"+name);
     if (input.GetEntry(row)<=0) throw std::runtime_error("cannot read event record");
@@ -229,6 +249,15 @@ void RecordTable::append(TTree &input, const std::string &name, Long64_t source,
 }
 void RecordTable::write() {
   if (!output) return;
+  TDirectory::TContext restore;
+  auto* saved=dynamic_cast<TNamed*>(output->GetUserInfo()->FindObject("physics_effective_definitions"));
+  const Json definitions=saved?Json::parse(saved->GetTitle()):Json::array({nullptr});
+  std::string parent=output->GetDirectory()->GetPath();parent=parent.substr(parent.find(':')+1);
+  if(!parent.empty()&&parent.front()=='/')parent.erase(0,1);
+  const auto records=parent.rfind("records");
+  if(records==std::string::npos)throw std::runtime_error("record definition has no records directory");
+  directory(*output->GetDirectory()->GetFile(),parent.substr(0,records)+"meta/record_definitions")->cd();
+  TObjString(Json{{"schema","EffectiveObservableDefinitionsV1"},{"definitions",definitions}}.dump().c_str()).Write(output->GetName(),TObject::kOverwrite);
   output->GetDirectory()->cd(); output->Write("",TObject::kOverwrite); output->SetDirectory(nullptr);
 }
 
@@ -238,6 +267,9 @@ void RecordTable::write() {
 namespace {
 void checkPackageMetadata(const Json &meta,const Json &plan,const Json &sample,const std::string &path) {
   const std::string binding=packageBinding(plan,sample);
+  const Json expectedComponents=sample.at("family")!="data" && plan.contains("response_component_grid") ?
+    Json{{"scope","RESPONSE_COMPONENT_ONLY"},{"configuration",plan.at("response_component_grid")},{"ems_measurement_qa_fanout","UNQUALIFIED"}} : Json();
+  if(meta.value("response_components",Json())!=expectedComponents)throw std::runtime_error("response component settings differ from planned package");
   if (meta.at("schema")!="PhotonJetSampleV1" || meta.at("system")!=sample.at("system") ||
       meta.at("name")!=sample.at("name") || meta.at("family")!=sample.at("family") ||
       meta.at("selection")!=plan.at("selection") || meta.at("histograms")!=plan.at("histograms") ||
@@ -284,16 +316,21 @@ void checkValidatedInput(const std::string &path,const Json &plan,const Json &sa
 }
 }  // namespace
 
-void validatePackage(const std::string &path, const Json &plan, const Json &sample) {
+void verifyReplayParent(const std::string& path,const Json& plan,const Json& sample) {checkValidatedInput(path,plan,sample);}
+
+static void validatePackageContents(const std::string &path, const Json &plan, const Json &sample,
+                                    const Json& expectedInventory,bool measurementReplay) {
   ReductionProgress progress("validate",sourceCount(sample)+1);
-  checkReductionCode(plan); checkVertexFit(sample); checkPpPeriodFits(ppPeriodsOf(plan,sample));
+  checkVertexFit(sample); checkPpPeriodFits(ppPeriodsOf(plan,sample));
   std::unique_ptr<TFile> f(TFile::Open(path.c_str(),"READ"));
   if (!f || f->IsZombie()) throw std::runtime_error("cannot open package " + path);
   const Json meta=object(*f,"meta/package");
   checkPackageMetadata(meta,plan,sample,path);
+  if(plan.contains("response_component_grid") && sample.at("family")!="data" && object(*f,"meta/inventory")!=expectedInventory)
+    throw std::runtime_error("response component inventory differs");
   size_t histograms=0;
   std::map<std::string,TH1*> dense;
-  for (const auto &row : inventory(sample.at("system"),sample.at("family"))) {
+  for (const auto &row : expectedInventory) {
     const std::string name=row.at("path"); TObject *o=f->Get(name.c_str());
     if (!o && row.at("kind")=="extensions") continue;
     if (!o) throw std::runtime_error("missing histogram " + name);
@@ -304,6 +341,12 @@ void validatePackage(const std::string &path, const Json &plan, const Json &samp
   TTree &sources=tree(*f,"records/sources"), &cells=tree(*f,"records/source_contributions"), &events=tree(*f,"records/events");
   if (sources.GetEntries()!=static_cast<Long64_t>(sourceCount(sample)) || meta.at("event_records")!=events.GetEntries())
     throw std::runtime_error("source/event counts differ");
+  if(measurementReplay) {
+    if(meta.at("replay_provenance").at("candidate_archive")!="parent_only" ||
+       meta.contains("candidate_records") || !meta.contains("parent_candidate_records") ||
+       f->GetDirectory("records/candidates"))
+      throw std::runtime_error("replay candidate archive must remain only in its nominal parent");
+  } else if(plan.at("histograms").value("candidate_records",false))validateCandidateCache(*f,sources.GetEntries());
   std::string *json=nullptr, *histogram=nullptr;
   sources.SetBranchAddress("json",&json); cells.SetBranchAddress("histogram",&histogram);
   Long64_t previous=0;
@@ -350,10 +393,14 @@ void validatePackage(const std::string &path, const Json &plan, const Json &samp
   sources.ResetBranchAddresses(); cells.ResetBranchAddresses();
   if (observedBinding!=packageBinding(plan,sample)) throw std::runtime_error("ordered source identities or metadata differ from the planned binding");
   if (previous!=cells.GetEntries()) throw std::runtime_error("unattributed source contributions");
+  std::vector<std::string> recordPrefixes{"records/"};
+  if (!measurementReplay && sample.at("family")=="data" && plan.at("selection").value("fill_diagnostics",Json::object()).value("data_timecut",Json::object()).value("event_records",false))
+    recordPrefixes.push_back("variations/data_timecut/records/");
+  for (const auto &prefix : recordPrefixes) {
   std::vector<std::pair<Long64_t,Long64_t>> eventRanges(sources.GetEntries(),{0,0});
   Long64_t lastSource=-1;
-  for (const char *name : {"records/events","records/photons","records/jets"}) {
-    TTree &t=tree(*f,name);
+  for (const std::string name : {prefix+"events",prefix+"photons",prefix+"jets"}) {
+    TTree &t=tree(*f,name.c_str());
     if (!t.GetLeaf("source")) throw std::runtime_error("missing event source reference");
     t.SetBranchStatus("*",false); t.SetBranchStatus("source",true);
     if (t.GetLeaf("event")) t.SetBranchStatus("event",true);
@@ -362,7 +409,7 @@ void validatePackage(const std::string &path, const Json &plan, const Json &samp
       if (t.GetEntry(i)<=0) throw std::runtime_error("unreadable event record");
       const long long id=t.GetLeaf("source")->GetValueLong64();
       if (id<0 || id>=sources.GetEntries()) throw std::runtime_error("event source outside source table");
-      if (std::string(name)=="records/events") {
+      if (name==prefix+"events") {
         if (id<lastSource) throw std::runtime_error("unordered event source records");
         if (id!=lastSource) eventRanges.at(id).first=i;
         eventRanges.at(id).second=i+1; lastSource=id;
@@ -373,11 +420,81 @@ void validatePackage(const std::string &path, const Json &plan, const Json &samp
       } else throw std::runtime_error("missing object event reference");
     }
   }
-  const Json receipt=sidecar(*f,path);
+  }
+  Json receipt=sidecar(*f,path);
+  if(measurementReplay) {
+    if(object(*f,"meta/inventory")!=expectedInventory)throw std::runtime_error("measurement replay inventory differs");
+    receipt["validation"]["scope"]="measurement_response_purity_inputs";
+    receipt["validation"]["consumer_code_sha256"]=digest(meta.at("replay_provenance").at("consumer_code"));
+    receipt["validation"]["parent_package_sha256"]=meta.at("replay_provenance").at("parent_package_sha256");
+  }
   fs::path jsonPath=path; jsonPath.replace_extension(".json");
   if (fs::exists(jsonPath) && readJson(jsonPath.string())!=receipt) throw std::runtime_error("package sidecar differs: " + jsonPath.string());
   if (!fs::exists(jsonPath)) writeJson(jsonPath,receipt);
   progress.finish();
+}
+
+void validatePackage(const std::string& path,const Json& plan,const Json& sample) {
+  checkReductionCode(plan);
+  validatePackageContents(path,plan,sample,packageInventory(plan,sample),false);
+}
+
+Json measurementReplayInventory(const std::string& system,const std::string& family) {
+  Json rows=Json::array();
+  for(const auto& row:inventory(system,family)) {
+    const std::string kind=row.at("kind"),path=row.at("path");
+    const bool purity=kind=="qa" && path.rfind("qa/photons/",0)==0 &&
+      (path.size()>=5 && (path.substr(path.size()-5)=="/abcd" || path.substr(path.size()-7)=="/recoil"));
+    if((kind=="spectra" && path.rfind("measurement/",0)==0) || kind=="response" || purity)rows.push_back(row);
+  }
+  return rows;
+}
+
+/* A record consumer does not become the historical eventTree producer.
+   Bind the original validated bytes and producer separately from the consumer
+   and its complete recipe. The normal production validator remains unchanged. */
+void validateMeasurementReplayPackage(const std::string& path,const Json& plan,const Json& sample,
+                                     const std::string& parent,const Json& consumerCode) {
+  std::unique_ptr<TFile> original(TFile::Open(parent.c_str(),"READ")),output(TFile::Open(path.c_str(),"READ"));
+  if(!original || original->IsZombie() || !output || output->IsZombie())throw std::runtime_error("unreadable replay parent/output");
+  const Json before=object(*original,"meta/package"),after=object(*output,"meta/package");
+  if(before.contains("replay_provenance"))throw std::runtime_error("replay must start from an original nominal package");
+  const auto& provenance=after.at("replay_provenance");
+  const auto& recipe=plan.at("histograms").at("measurement_replay");
+  if(provenance.at("schema")!="PhotonJetMeasurementReplayV1" || provenance.at("scope")!="measurement_response_purity_inputs" ||
+     provenance.at("parent_package_sha256")!=sha256File(parent) || provenance.at("consumer_code")!=consumerCode ||
+     provenance.at("recipe")!=recipe || provenance.at("recipe_sha256")!=digest(recipe) ||
+     provenance.at("applied_effect")!=recipe.at("sample_effects").at(sample.at("key").get<std::string>()) ||
+     provenance.at("candidate_archive")!="parent_only" || recipe.at("candidate_archive")!="parent_only" ||
+     after.at("parent_candidate_records")!=before.at("candidate_records") || after.contains("candidate_records") ||
+     provenance.at("normalization_applied")!=false || provenance.at("nominal_diagnostics")!="parent_only" ||
+     provenance.at("original_producer_code")!=before.at("render_selection").at("producer_code") ||
+     after.at("normalization")!=before.at("normalization"))
+    throw std::runtime_error("measurement replay parent, consumer, recipe or invariant binding differs");
+  photonjet_response_only::validate(recipe,sample.at("key"),sample.at("family"));
+  photonjet_selection_replay::validate(recipe,before.at("selection"),after.at("selection"),[](const Json& j){return digest(j);});
+  if(recipe.contains("selection_change")) {
+    if(after.at("parent_selection")!=before.at("selection") ||
+       after.at("render_selection").at("selection_sha256")!=after.at("selection").at("selection_sha256") ||
+       after.at("render_selection").at("photon_id")!=after.at("selection").at("systems").at(sample.at("system")=="PP"?"pp":"auau"))
+      throw std::runtime_error("selection replay render or original-selection binding differs");
+  } else if(after.contains("parent_selection"))throw std::runtime_error("undeclared parent selection");
+  auto expectedHistograms=before.at("histograms");expectedHistograms["measurement_replay"]=recipe;
+  if(plan.at("histograms")!=expectedHistograms || plan.at("producer_code")!=before.at("render_selection").at("producer_code"))
+    throw std::runtime_error("replay changed unrelated histogram settings or historical producer");
+  Json originalPlan=plan;originalPlan["histograms"]=before.at("histograms");originalPlan["selection"]=before.at("selection");originalPlan["plan_sha256"]=before.at("plan_sha256");
+  checkValidatedInput(parent,originalPlan,sample);
+  validatePackageContents(path,plan,sample,measurementReplayInventory(sample.at("system"),sample.at("family")),true);
+}
+
+void publishMeasurementReplayPackage(const std::string& partial,const std::string& path,const Json& plan,const Json& sample,
+                                     const std::string& parent,const Json& consumerCode) {
+  fs::path temporary=partial;temporary.replace_extension(".json");
+  if(fs::exists(path) || fs::exists(temporary))throw std::runtime_error("replay publication already exists");
+  validateMeasurementReplayPackage(partial,plan,sample,parent,consumerCode);
+  Json receipt=readJson(temporary.string());receipt["package"]=fs::path(path).filename().string();
+  fs::path side=path;side.replace_extension(".json");if(fs::exists(side))throw std::runtime_error("replay sidecar exists");
+  fs::rename(partial,path);writeJson(side,receipt);fs::remove(temporary);
 }
 
 void publishValidatedPackage(const std::string &partial,const std::string &path,
@@ -455,15 +572,19 @@ void combinePackages(const Json &plan, const Json &sample, const std::vector<std
   cells.Branch("source",&source); cells.Branch("histogram",&histogram); cells.Branch("bin",&bin);
   cells.Branch("value",&value); cells.Branch("variance",&variance);
   sources.SetAutoFlush(-8*1024*1024); cells.SetAutoFlush(-8*1024*1024);
-  RecordTable events,photons,jets;
+  RecordTable events,photons,jets,timeEvents,timePhotons,timeJets;
+  Long64_t timeEventOffset=0;
+  CandidateCachePackage candidateCache;
   std::map<std::string,std::unique_ptr<TH1>> sums;
   std::map<std::string,std::unique_ptr<THnSparse>> sparse;
   Json meta,available=Json::object(); std::string grids;
   long long denominator=0; size_t cursor=0;
+  Json nativeAncestry=Json::array();
   for (size_t inputIndex=0; inputIndex<inputs.size(); ++inputIndex) {
     const std::string &path=inputs[inputIndex];
     std::unique_ptr<TFile> in(TFile::Open(path.c_str(),"READ"));
     if (!in || in->IsZombie()) throw std::runtime_error("cannot open merge input " + path);
+    nativeAncestry.push_back(photonjet_science::producerInput(*in));
     const Json m=object(*in,"meta/package");
     const size_t count=m.at("source_count");
     if (!count || cursor+count>sourceCount(sample)) throw std::runtime_error("merge source count differs");
@@ -497,7 +618,7 @@ void combinePackages(const Json &plan, const Json &sample, const std::vector<std
       if (!available.contains(key)) available[key]=state;
       else if (available.at(key)!=state) available[key]="PARTIAL";
     }
-    for (const auto &row : inventory(sample.at("system"),sample.at("family"))) {
+    for (const auto &row : packageInventory(plan,sample)) {
       const std::string name=row.at("path"); TObject *o=in->Get(name.c_str());
       if (!o && row.at("kind")=="extensions") continue;
       if (!o) throw std::runtime_error("missing merge histogram " + name);
@@ -508,6 +629,7 @@ void combinePackages(const Json &plan, const Json &sample, const std::vector<std
           if (h->GetDimension()>1) sameAxis(*sums[name]->GetYaxis(),*h->GetYaxis());
           if (h->GetDimension()>2) sameAxis(*sums[name]->GetZaxis(),*h->GetZaxis());
           if (sums[name]->GetDimension()!=h->GetDimension() || !sums[name]->Add(h)) throw std::runtime_error("histogram merge failed");
+          photonjet_science::mergeDefinitions(*sums[name],*h);
         }
       } else if (auto *h=dynamic_cast<THnSparse *>(o)) {
         if (!sparse.count(name)) sparse[name].reset(static_cast<THnSparse *>(h->Clone()));
@@ -539,12 +661,23 @@ void combinePackages(const Json &plan, const Json &sample, const std::vector<std
     is.ResetBranchAddresses(); ic.ResetBranchAddresses();
     TTree &ev=tree(*in,"records/events"), &ph=tree(*in,"records/photons"), &jt=tree(*in,"records/jets");
     events.append(ev,"events",0,eventOffset,records,&map); photons.append(ph,"photons",0,eventOffset,records,&map); jets.append(jt,"jets",0,eventOffset,records,&map);
+    if (sample.at("family")=="data" && plan.at("selection").value("fill_diagnostics",Json::object()).value("data_timecut",Json::object()).value("event_records",false)) {
+      TDirectory *timing=directory(*out,"variations/data_timecut/records");
+      TTree &te=tree(*in,"variations/data_timecut/records/events");
+      timeEvents.append(te,"events",0,timeEventOffset,timing,&map);
+      timePhotons.append(tree(*in,"variations/data_timecut/records/photons"),"photons",0,timeEventOffset,timing,&map);
+      timeJets.append(tree(*in,"variations/data_timecut/records/jets"),"jets",0,timeEventOffset,timing,&map);
+      timeEventOffset+=te.GetEntries();
+    }
+    if(plan.at("histograms").value("candidate_records",false))candidateCache.append(*in,"records/candidates/",0,records,&map);
     eventOffset+=ev.GetEntries(); cursor+=count; progress.advance(cursor);
   }
   if (cursor!=sourceCount(sample)) throw std::runtime_error("merge did not cover the planned sources");
   for (auto &[name,h] : sums) {const auto slash=name.rfind('/'); directory(*out,name.substr(0,slash))->cd(); h->Write(name.substr(slash+1).c_str());}
   for (auto &[name,h] : sparse) {const auto slash=name.rfind('/'); directory(*out,name.substr(0,slash))->cd(); h->Write(name.substr(slash+1).c_str());}
-  records->cd(); sources.Write(); cells.Write(); events.write(); photons.write(); jets.write();
+  records->cd(); sources.Write(); cells.Write(); events.write(); photons.write(); jets.write(); candidateCache.write();
+  timeEvents.write(); timePhotons.write(); timeJets.write();
+  if(plan.at("histograms").value("candidate_records",false))meta["candidate_records"]=candidateRecordMetadata(candidateCache,plan,sample.at("system").get<std::string>());
   meta["source_count"]=cursor; meta["event_records"]=eventOffset; meta["histograms_written"]=sums.size()+sparse.size(); meta["availability"]=available;
   meta["system"]=sample.at("system"); meta["name"]=sample.at("name"); meta["family"]=sample.at("family"); meta["coverage"]=sample.at("coverage");
   meta["plan_sha256"]=plan.at("plan_sha256"); meta["package_binding_sha256"]=packageBinding(plan,sample);
@@ -561,9 +694,10 @@ void combinePackages(const Json &plan, const Json &sample, const std::vector<std
   out->cd(); TObjString(plan.at("selection").at("profile").get<std::string>().c_str()).Write("profile");
   TObjString(plan.at("selection").dump().c_str()).Write("selection"); if (!grids.empty()) TObjString(grids.c_str()).Write("grids");
   directory(*out,"meta")->cd(); TObjString(meta.dump().c_str()).Write("package");
-  TObjString(inventory(sample.at("system"),sample.at("family")).dump().c_str()).Write("inventory");
+  TObjString(packageInventory(plan,sample).dump().c_str()).Write("inventory");
   if (sample.at("family")!="data" && !meta.at("normalization").at("pb_per_generated_event").is_null())
     TParameter<double>("pb_per_generated_event",meta.at("normalization").at("pb_per_generated_event").get<double>()).Write();
+  photonjet_science::writeProducerEvidence(*out,nativeAncestry);
   sources.SetDirectory(nullptr); cells.SetDirectory(nullptr); out->Close();
   sums.clear(); sparse.clear(); events.output.reset(); photons.output.reset(); jets.output.reset();
   publishValidatedPackage(partial,output,plan,sample); progress.finish();

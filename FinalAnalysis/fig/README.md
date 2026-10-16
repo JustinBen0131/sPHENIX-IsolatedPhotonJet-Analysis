@@ -15,9 +15,10 @@ Every xJ figure shows only the reported range, where the distribution is fully p
 above the recoil-jet threshold over the lowest photon pT (derived by the analysis, so it follows any rebinning) to
 `Measurement.ReportedXjMax`. The axis always starts at 0.
 
-The iteration-stability figures draw the frozen iteration rule's saved table (data and response statistics, the change
-from k - 1 and their quadrature Q_k, with the selected k); a result unfolded with configured iterations has no table and
-lists them as not drawn.
+The iteration-stability figures draw the saved iteration scan (data and response statistics, the change from k - 1 and
+their quadrature sum Q_k for every k) with the iterations the result uses marked. With `PairIterations: scan` and
+`PhotonIterations: scan` those are the k with the smallest Q_k. A run without response toys has no scan and lists the
+figures as not drawn.
 
 The tables below map generated output filenames to the measurement and QA figures.
 
@@ -33,6 +34,8 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/pp_photon_yield_unfolding_nominal_2bin_k2.png` | fig:photon_yield_unfolding | IAN slot pp_photon_yield_unfolding_nominal_2bin_k3.png: the file name carries the iteration count |
 | `Unfolding/pp_xj_prior_reweighting.png` | new: no IAN slot yet |  |
 | `Unfolding/pp_xj_before_after_unfolding.png` | fig:xjg_before_after_unfolding |  |
+| `Unfolding/pp_xj_closure_overlay.png` | fig:xjg_unfolding_closure | same-population simulation closure of the joint unfolding |
+| `Unfolding/pp_joint_refold.png` | fig:joint_refolding | refolded against the corrected measured pairs |
 | `purityAndCombSub/auau020_xj_purity_correction.png` | fig:xjg_purity_correction |  |
 | `purityAndCombSub/auau020_xj_combinatoric_subtraction.png` | fig:xjg_combinatorial_subtraction |  |
 | `Unfolding/auau_0to20_photon_response.png` | fig:photon_response |  |
@@ -43,6 +46,8 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/auau020_photon_yield_unfolding_nominal_2bin_k2.png` | fig:photon_yield_unfolding |  |
 | `Unfolding/auau020_xj_prior_reweighting.png` | new: no IAN slot yet |  |
 | `Unfolding/auau020_xj_before_after_unfolding.png` | fig:xjg_before_after_unfolding |  |
+| `Unfolding/auau020_xj_closure_overlay.png` | fig:xjg_unfolding_closure | same-population simulation closure of the joint unfolding |
+| `Unfolding/auau020_joint_refold.png` | fig:joint_refolding | refolded against the corrected measured pairs |
 | `purityAndCombSub/auau2050_xj_purity_correction.png` | new: no IAN slot yet |  |
 | `purityAndCombSub/auau2050_xj_combinatoric_subtraction.png` | new: no IAN slot yet |  |
 | `Unfolding/auau_20to50_photon_response.png` | new: no IAN slot yet |  |
@@ -53,6 +58,8 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/auau2050_photon_yield_unfolding_nominal_2bin_k2.png` | new: no IAN slot yet |  |
 | `Unfolding/auau2050_xj_prior_reweighting.png` | new: no IAN slot yet |  |
 | `Unfolding/auau2050_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
+| `Unfolding/auau2050_xj_closure_overlay.png` | new: no IAN slot yet | same-population simulation closure of the joint unfolding |
+| `Unfolding/auau2050_joint_refold.png` | new: no IAN slot yet | refolded against the corrected measured pairs |
 | `purityAndCombSub/auau5080_xj_purity_correction.png` | new: no IAN slot yet |  |
 | `purityAndCombSub/auau5080_xj_combinatoric_subtraction.png` | new: no IAN slot yet |  |
 | `Unfolding/auau_50to80_photon_response.png` | new: no IAN slot yet |  |
@@ -63,6 +70,9 @@ The tables below map generated output filenames to the measurement and QA figure
 | `Unfolding/auau5080_photon_yield_unfolding_nominal_2bin_k2.png` | new: no IAN slot yet |  |
 | `Unfolding/auau5080_xj_prior_reweighting.png` | new: no IAN slot yet |  |
 | `Unfolding/auau5080_xj_before_after_unfolding.png` | new: no IAN slot yet |  |
+| `Unfolding/auau5080_xj_closure_overlay.png` | new: no IAN slot yet | same-population simulation closure of the joint unfolding |
+| `Unfolding/auau5080_joint_refold.png` | new: no IAN slot yet | refolded against the corrected measured pairs |
+| `xJ_generalQA/pp_auau_gamma_jet_dphi_2x2.png` | fig:gamma_jet_dphi | one pad per result, from the DATA event records |
 | `Unfolding/pp_vs_auau_xj_unfolded.png` | fig:final_xjg_pp_auau | p+p and the most central Au+Au class |
 | `FinalResults/pp_vs_auau_centrality_xj_unfolded.png` | new: no IAN slot yet | every class |
 | `LHCComparison/pp_xj_atlas_overlay.png` | new: no IAN slot yet | ATLAS p+p 5.02 TeV, PLB 789 (2019) 167 |
@@ -157,7 +167,7 @@ scientific acceptance.
 | `isolation/auau_50to80_isoStack.png` | photon QA |
 | `isolation/auau_20to50_isoStack.png` | photon QA |
 | `isolation/auau_0to20_isoStack.png` | photon QA |
-| `photonOnly/pp_auau_abcd_region_counts_1x4.png` | photon QA |
+| `photonOnly/pp_auau_abcd_region_counts_2x2.png` | photon QA |
 | `photonOnly/data_purity_and_prompt_leakage_2x4_style.png` | photon QA |
 | `photonOnly/purity_qa_pp_auau_simCLOSURE.png` | photon QA |
-| `photonOnly/pp_si_di_auau_photon_efficiency_1x4.png` | photon QA |
+| `photonOnly/pp_si_di_auau_photon_efficiency_2x2.png` | photon QA |

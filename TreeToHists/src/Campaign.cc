@@ -3,6 +3,7 @@
    This coordinator never runs FinalAnalysis or transfers files. */
 #include "TreeToHists.h"
 #include "Configuration.h"
+#include "CollectionContract.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -66,9 +67,12 @@ Json inspectionParts(const Json &c) {
     throw std::runtime_error("input inspection index changed");
   return readJson(path.string());
 }
+/* Header inspection reads only selection.systems (branches and saved scores) and ROOT.
+   Global fill preselection, timing diagnostics and the full selection digest are not header inputs.
+   Not the reduction code and not the histograms, so a result stays valid when those change and an earlier
+   campaign's inspection of the same inputs can be taken over (Campaign.InspectionFrom). */
 Json inspectionSnapshot(const Json &c) {
-  Json snapshot=c.at("resolved_settings");snapshot["producer_code"]=c.at("producer_code");
-  snapshot["root_version"]=gROOT->GetVersion();return snapshot;
+  return {{"selection",inspectionSelection(c.at("resolved_settings").at("selection"))},{"root_version",gROOT->GetVersion()}};
 }
 size_t sourceCount(const Json &s) {
   return s.contains("_source_count") ? s.at("_source_count").get<size_t>() : s.at("sources").size();
@@ -191,7 +195,8 @@ void prepare(const std::vector<std::string> &args) {
   const Json cfg=photonjet_config::readYaml(path.string()).at("Campaign");
   const std::set<std::string> known={"Settings","Inputs","WorkDirectory","OutputDirectory","LogsDirectory","EventLog",
     "SetupScript","SetupArguments","TimingFile","MaxEventsPerJob","MaxSourcesPerJob","MergeFanIn","FillConcurrency","MergeConcurrency",
-    "MemoryMB","PlanMemoryMB","FillMemoryMB","MergeMemoryMB","CollectionMemoryMB","DiskMB","InspectSourcesPerJob","InspectConcurrency"};
+    "MemoryMB","PlanMemoryMB","FillMemoryMB","MergeMemoryMB","CollectionMemoryMB","DiskMB","InspectSourcesPerJob","InspectConcurrency",
+    "InspectionFrom"};
   for (const auto &[key,value] : cfg.items()) if (!known.count(key)) throw std::runtime_error("unknown Campaign setting: " + key);
   Json c={{"schema","TreeToHistsCampaignV1"},{"home",safePath(base,arg(args,"--home"))},
     {"work",safePath(base,cfg.at("WorkDirectory"))},{"output",safePath(base,cfg.at("OutputDirectory"))},
@@ -204,7 +209,7 @@ void prepare(const std::vector<std::string> &args) {
     {"fill_memory_mb",cfg.value("FillMemoryMB",cfg.value("MemoryMB",2048))},
     {"merge_memory_mb",cfg.value("MergeMemoryMB",cfg.value("MemoryMB",2048))},
     {"collection_memory_mb",cfg.value("CollectionMemoryMB",cfg.value("MemoryMB",1024))},{"disk_mb",cfg.value("DiskMB",8192)}};
-  if (c.at("max_events").get<long>()<1 || c.at("max_events").get<long>()>100000 ||
+  if (c.at("max_events").get<long>()<1 || c.at("max_events").get<long>()>1000000 ||
       c.at("max_sources").get<int>()<1 || c.at("max_sources").get<int>()>256 ||
       c.at("fan_in").get<int>()<2 || c.at("fan_in").get<int>()>1024 || c.at("fill_concurrency").get<int>()<1 ||
       c.at("merge_concurrency").get<int>()<1 || c.at("disk_mb").get<int>()<8192 ||
@@ -260,6 +265,28 @@ void prepare(const std::vector<std::string> &args) {
   }
   flushInspection();atomic(work/"inspection/index.json",parts.dump()+"\n");
   c["inspection_index_sha256"]=sha256File((work/"inspection/index.json").string());
+  /* An earlier campaign's inspection, taken over part by part: a result is used when it was made for the same tree
+     files (path and hash, in the same order) and the same selection. What else an input list holds (weights,
+     normalization) does not enter a header inspection, so a list that differs only there keeps its inspection.
+     Parts without a matching result are inspected as usual. */
+  if (cfg.contains("InspectionFrom")) {
+    const fs::path earlier=fs::path(safePath(base,cfg.at("InspectionFrom")))/"inspection";
+    const Json snapshot=inspectionSnapshot(c);
+    size_t taken=0;
+    for (size_t i=0;i<parts.size();++i) {
+      const fs::path from=earlier/"results"/(std::to_string(i)+".json"),fromRow=earlier/"rows"/(std::to_string(i)+".json");
+      if (!fs::is_regular_file(from) || !fs::is_regular_file(fromRow)) continue;
+      Json saved=readJson(from.string());const std::string sha=saved.at("sha256");saved.erase("sha256");
+      /* an inspection made before the snapshot was reduced to selection and ROOT carries both among other entries */
+      const Json &earlierSnapshot=saved.at("snapshot");
+      if (digest(saved)!=sha || saved.at("descriptor_sha256")!=sha256File(fromRow.string()) ||
+          !inspectionCompatible(earlierSnapshot,snapshot) ||
+          readJson(fromRow.string()).at("files")!=readJson(parts.at(i).at("path")).at("files")) continue;
+      saved["snapshot"]=snapshot;saved["descriptor_sha256"]=parts.at(i).at("sha256");saved["sha256"]=digest(saved);
+      atomic(parts.at(i).at("result").get<std::string>(),saved.dump()+"\n");++taken;
+    }
+    std::cout<<"[TreeToHists] inspection taken over for "<<taken<<" of "<<parts.size()<<" parts\n";
+  }
   atomic(work/"campaign.json",c.dump(1)+"\n");
   const bool ready=!c.at("timing").is_null() && c.at("timing").value("environment","")=="SDCC";
   atomic(work/"admission.json",Json{{"status",ready ? "READY_FOR_SITE_PREFLIGHT" : "NEEDS_SDCC_TIMING"},
@@ -284,16 +311,19 @@ void prepare(const std::vector<std::string> &args) {
 
 void makeDag(const fs::path &work) {
   const Json c=readJson((work/"campaign.json").string()); bindings(c);
-  if (c.at("timing").is_null()) throw std::runtime_error("measured timing is required before farm planning");
+  /* A measured fill time, when one is given, lowers the events per job so that a job stays inside eight hours.
+     Without one the configured MaxEventsPerJob (at most one million) stands. */
   long cap=c.at("max_events");
-  for (const auto &[name,row] : c.at("timing").at("classes").items())
-    cap=std::min(cap,static_cast<long>(std::floor(8*3600/(1.5*row.at("seconds").get<double>()/row.at("processed_entries").get<long long>()))));
+  if (!c.at("timing").is_null())
+    for (const auto &[name,row] : c.at("timing").at("classes").items())
+      cap=std::min(cap,static_cast<long>(std::floor(8*3600/(1.5*row.at("seconds").get<double>()/row.at("processed_entries").get<long long>()))));
   if (cap<1) throw std::runtime_error("one event exceeds the wall-time target");
   Json p=preparePlan(c.at("settings"),c.at("inputs"),c.at("home"),{},cap,work.string(),true,inspectionParts(c));
   if (p.at("selection")!=c.at("resolved_settings").at("selection")) throw std::runtime_error("planned selection differs from frozen settings");
-  for (const auto &s : p.at("samples"))
-    if (!c.at("timing").at("classes").contains(s.at("system").get<std::string>()+"/"+s.at("family").get<std::string>()))
-      throw std::runtime_error("missing measured timing for a selected sample class");
+  if (!c.at("timing").is_null())
+    for (const auto &s : p.at("samples"))
+      if (!c.at("timing").at("classes").contains(s.at("system").get<std::string>()+"/"+s.at("family").get<std::string>()))
+        throw std::runtime_error("missing measured timing for a selected sample class");
   savePlan(p,work.string(),false); // Only range rows need individual GPFS descriptors.
   ReductionProgress graphProgress("campaign-graph",p.at("samples").size()+1);
   long long plannedSamples=0;
@@ -324,11 +354,17 @@ void makeDag(const fs::path &work) {
     const std::string out=(s.value("intermediate",false) ? work/"merge"/id : fs::path(c.at("output").get<std::string>())) .string();
     Json small={{"producer_code",p.at("producer_code")},{"selection",p.at("selection")},{"histograms",p.at("histograms")},
       {"root_version",p.at("root_version")},{"plan_sha256",p.at("plan_sha256")},{"jobs",Json::array()}};
+    if(p.contains("response_component_grid"))small["response_component_grid"]=p.at("response_component_grid");
     if (inputs.empty() && !s.contains("reused_package")) for (const auto &src : s.at("sources"))
       for (const auto &name : sourceJobs[s.at("key")][src.at("index").get<size_t>()])
         small["jobs"].push_back(p.at("jobs").at(std::stoul(name.substr(1))));
     Json compact=compactSample(s), inputSamples=Json::array();
-    if (!inputs.empty()) for (const auto &parent : parents) inputSamples.push_back(packageSamples.at(parent));
+    if (!inputs.empty()) for (const auto &parent : parents) {
+      inputSamples.push_back(std::move(packageSamples.at(parent)));
+      // A package has one merge consumer. Keep only the next merge level's
+      // headers instead of retaining every completed chunk in the planner.
+      packageSamples.erase(parent);
+    }
     Json descriptor={{"sample",inputs.empty() && !s.contains("reused_package") ? s : compact},{"plan",small},{"inputs",inputs},
       {"input_samples",inputSamples},{"output_directory",out},{"plan_sha256",p.at("plan_sha256")}};
     packageSamples[id]=compact;
@@ -387,6 +423,7 @@ void makeDag(const fs::path &work) {
         Json small={{"schema",p.at("schema")},{"producer_code",p.at("producer_code")},{"selection",p.at("selection")},
           {"histograms",p.at("histograms")},{"root_version",p.at("root_version")},{"plan_sha256",p.at("plan_sha256")},
           {"samples",Json::array({local})},{"jobs",jobs}};
+        if(p.contains("response_component_grid"))small["response_component_grid"]=p.at("response_component_grid");
         Json descriptor={{"plan",small}}; descriptor["descriptor_sha256"]=digest(descriptor);
         const fs::path descriptorPath=work/"fill_groups"/shard/(id+".json");
         atomic(descriptorPath,descriptor.dump()+"\n");
@@ -460,6 +497,7 @@ void makeDag(const fs::path &work) {
     }
     finals.push_back(level.at(0).node);
     if (s.contains("run")) runFinals[s.at("key")]=std::make_pair(level.at(0).node,level.at(0).path);
+    sourceJobs.erase(s.at("key").get<std::string>());
     graphProgress.advance(++plannedSamples);
   }
   dag<<"JOB COLLECTION collection.sub\nVARS COLLECTION row=\"0\" shard=\"0\"\nPARENT";
@@ -538,9 +576,216 @@ void collection(const fs::path &work,const fs::path &output) {
   progress.finish();
   std::cout<<"[TreeToHists] validated collection: "<<path<<'\n';
 }
+/* A resolved selection carries identifiers derived from its content (resolveSelection): check them, never trust. */
+bool selectionIdentified(const Json &selection) {
+  Json content=selection;
+  for(const char *derived:{"selection_sha256","profile","name"}) content.erase(derived);
+  const std::string id=digest(content);
+  return selection.value("selection_sha256","")==id && selection.value("profile","")=="selection:"+id;
+}
+/* Whether packages filled under `selection` may be analysed under `reference`. A resolved selection names the p+p
+   DATA trigger, which only p+p DATA evaluates: any other package may carry another p+p DATA trigger name, with the
+   identifiers derived from it. Every other setting must be identical. FinalAnalysis applies the same rule when it
+   reads the collection (photonjet_render::selectionsAgree, FinalAnalysis/src/RenderMetadata.h). */
+bool selectionsAgree(const Json &selection,const Json &reference,bool ppData) {
+  if(selection==reference) return true;
+  if(ppData) return false;
+  const auto evaluated=[](Json s) {
+    for(const char *derived:{"selection_sha256","profile"}) s.erase(derived);
+    if(s.contains("systems") && s.at("systems").contains("pp") && s.at("systems").at("pp").contains("event_selection"))
+      s["systems"]["pp"]["event_selection"].erase("trigger_name");
+    return s;
+  };
+  return evaluated(selection)==evaluated(reference) && selectionIdentified(selection) && selectionIdentified(reference);
+}
+/* Assemble separately validated production components for transfer/local use.
+   Retained run ROOT files stay on the farm; their original collection manifest
+   carries the exact run lineage. No histogram is readjusted or merged here.
+   An input may itself be an assembled collection: its original components are carried over unchanged. Settings are
+   compared as parsed content, so two YAML spellings of one selection agree. The collection takes the selection of
+   its p+p DATA (selectionsAgree); every package keeps the selection it was filled with. */
+void portableCollection(const std::vector<std::string> &args) {
+  const fs::path output=fs::absolute(arg(args,"--out"));
+  Json responseContract,emsContract,dataScale; std::string simulationRecipe; bool responseExplicit=false;
+  for(size_t i=0;i<args.size();++i) {
+    const auto option=args[i];
+    if(option!="--simulation-response-variation" && option!="--ems-selection-contract" && option!="--data-jet-scale-recipe") continue;
+    if(i+1==args.size()) throw std::runtime_error("missing collection recipe argument: "+option);
+    const auto value=args[++i];
+    if(option=="--simulation-response-variation") {
+      if(responseExplicit) throw std::runtime_error("supply exactly one simulation response recipe");
+      responseExplicit=true;simulationRecipe=value;
+    } else {
+      auto &declaration=option=="--ems-selection-contract" ? emsContract : dataScale;
+      if(!declaration.is_null()) throw std::runtime_error("duplicate collection recipe declaration: "+option);
+      declaration=readJson(value);
+      if(declaration.is_null()) throw std::runtime_error("collection recipe declaration cannot be null");
+    }
+  }
+  if(responseExplicit || !emsContract.is_null() || !dataScale.is_null())
+    responseContract=photonjet_collection::collectionRecipe(simulationRecipe,emsContract,dataScale);
+  struct Native {fs::path file; std::string sha; Json manifest;};
+  struct Input {
+    fs::path path,base; Json manifest,selection,histograms,responseContract; std::map<std::string,std::string> pins;
+    std::vector<Native> natives; std::map<std::string,size_t> nativeOf; bool ppData=false;
+  };
+  std::vector<Input> inputs; std::set<std::string> inputHashes;
+  const auto validated=[](const Json &c) {
+    return c.value("schema","")=="PhotonJetHistogramCollectionV1" && c.value("status","")=="VALIDATED" &&
+           c.contains("samples") && !c.at("samples").empty();
+  };
+  for(size_t i=0;i+1<args.size();++i) if(args[i]=="--from") {
+    Input in; in.path=fs::canonical(args[++i]); in.base=in.path.parent_path();
+    const std::string sha=sha256File(in.path.string());
+    in.manifest=photonjet_config::readYaml(in.path.string());
+    if(!validated(in.manifest) || !inputHashes.insert(sha).second)
+      throw std::runtime_error("expected a distinct validated collection: "+in.path.string());
+    for(const auto &f:in.manifest.at("files")) if(!in.pins.emplace(f.at("path"),f.at("sha256")).second)
+      throw std::runtime_error("duplicate collection payload");
+    for(const char *name:{"selection.yaml","histograms.yaml"})
+      if(sha256File((in.base/name).string())!=in.pins.at(name))
+        throw std::runtime_error("collection settings changed: "+(in.base/name).string());
+    in.selection=photonjet_config::readYaml((in.base/"selection.yaml").string());
+    in.histograms=photonjet_config::readYaml((in.base/"histograms.yaml").string());
+    in.responseContract=in.manifest.value("simulation_response",Json());
+    photonjet_collection::requireContract(in.responseContract,in.histograms);
+    photonjet_collection::requireSelection(in.responseContract,in.selection);
+    if(!in.responseContract.is_null()) {
+      if(responseContract.is_null()) responseContract=in.responseContract;
+      else if(responseContract!=in.responseContract)
+        throw std::runtime_error("conflicting simulation response collection contracts");
+    }
+    if(in.selection.at("selection_sha256")!=in.manifest.at("selection_sha256") || !selectionIdentified(in.selection))
+      throw std::runtime_error("component selection binding differs");
+    if(!in.manifest.contains("component_collections")) in.natives.push_back({in.path,sha,in.manifest});
+    else {
+      /* An assembled input: bind its native components as FinalAnalysis does, then keep them. */
+      for(const auto &pin:in.manifest.at("component_collections")) {
+        const std::string name=pin.at("path"),pinned=pin.at("sha256");
+        if(name!="collections/"+pinned+".yaml" || !in.pins.count(name) || in.pins.at(name)!=pinned ||
+           sha256File((in.base/name).string())!=pinned)
+          throw std::runtime_error("assembled collection does not bind its component: "+name);
+        const Json component=photonjet_config::readYaml((in.base/name).string());
+        if(!validated(component) || component.contains("component_collections") ||
+           component.at("selection_sha256")!=in.manifest.at("selection_sha256"))
+          throw std::runtime_error("invalid component collection: "+name);
+        in.natives.push_back({in.base/name,pinned,component});
+      }
+    }
+    for(size_t n=0;n<in.natives.size();++n) for(const auto &row:in.natives[n].manifest.at("samples")) if(!row.contains("run"))
+      if(!in.nativeOf.emplace(row.at("key").get<std::string>(),n).second) throw std::runtime_error("duplicate component sample");
+    size_t listed=0;
+    for(const auto &sample:in.manifest.at("samples")) {
+      if(sample.at("system")=="PP" && sample.at("family")=="data") in.ppData=true;
+      if(sample.contains("run")) continue;
+      const std::string key=sample.at("key");
+      if(!in.nativeOf.count(key)) throw std::runtime_error("final package has no native component: "+key);
+      const Json &native=in.natives[in.nativeOf.at(key)].manifest;
+      const auto row=std::find_if(native.at("samples").begin(),native.at("samples").end(),[&](const Json &r) {return !r.contains("run") && r.at("key")==key;});
+      if(*row!=sample) throw std::runtime_error("assembled package differs from its native component: "+key);
+      ++listed;
+    }
+    if(listed!=in.nativeOf.size()) throw std::runtime_error("assembled collection omitted a final component sample");
+    inputs.push_back(std::move(in));
+  }
+  if(inputs.empty()) throw std::runtime_error("collection --from requires final packages");
+  const Input *reference=&inputs.front();
+  for(const auto &in:inputs) for(const auto &sample:in.manifest.at("samples"))
+    if(sample.at("family")=="data") {reference=&in;break;}
+  for(const auto &in:inputs) if(in.ppData) {reference=&in;break;}
+  const Input *histogramReference=reference;
+  const auto variedSystem=photonjet_collection::dataScaleSystem(responseContract);
+  bool haveVariedData=variedSystem.empty();
+  if(!variedSystem.empty()) for(const auto &in:inputs) for(const auto &sample:in.manifest.at("samples"))
+    if(!sample.contains("run") && sample.at("family")=="data" &&
+       sample.at("system")== (variedSystem=="pp" ? "PP" : "AuAu")) {histogramReference=&in;haveVariedData=true;}
+  if(!haveVariedData) throw std::runtime_error("DATA scale recipe has no DATA sample of its declared system");
+  photonjet_collection::requireContract(responseContract,histogramReference->histograms);
+  photonjet_collection::requireSelection(responseContract,reference->selection);
+  bool haveData=false,haveSimulation=false;
+  for(const auto &in:inputs) {
+    bool compatible=true;
+    for(const auto &sample:in.manifest.at("samples")) if(!sample.contains("run")) {
+      const std::string family=sample.at("family");
+      haveData=haveData || family=="data";
+      haveSimulation=haveSimulation || family=="photonjet" || family=="inclusivejet";
+      compatible=compatible && (in.responseContract.is_null()
+        ? photonjet_collection::histogramsAgree(in.histograms,histogramReference->histograms,responseContract,family,sample.at("system"))
+        : in.histograms==histogramReference->histograms && in.responseContract==responseContract);
+    }
+    if(!compatible || !selectionsAgree(in.selection,reference->selection,in.ppData))
+      throw std::runtime_error("component analysis settings differ: "+in.path.string());
+  }
+  if(!responseContract.is_null() && (!haveData || !haveSimulation))
+    throw std::runtime_error("simulation response collection requires DATA and simulation");
+
+  Json samples=Json::array(),components=Json::array(),files=Json::array();
+  std::set<std::string> keys;
+  struct Copy {fs::path source; std::string name,sha;}; std::vector<Copy> copies;
+  std::map<std::string,std::string> payloads;
+  auto add=[&](const fs::path &source,const std::string &name,const std::string &sha) {
+    if (payloads.count(name)) {if(payloads.at(name)!=sha) throw std::runtime_error("conflicting collection payload: "+name);return;}
+    if (sha.size()!=64 || sha.find_first_not_of("0123456789abcdef")!=std::string::npos || sha256File(source.string())!=sha)
+      throw std::runtime_error("collection payload changed: "+source.string());
+    payloads[name]=sha; copies.push_back({source,name,sha});files.push_back({{"path",name},{"sha256",sha}});
+  };
+  add(reference->base/"selection.yaml","selection.yaml",reference->pins.at("selection.yaml"));
+  add(histogramReference->base/"histograms.yaml","histograms.yaml",histogramReference->pins.at("histograms.yaml"));
+  for(const auto &in:inputs) {
+    for(const auto &sample:in.manifest.at("samples")) {
+      if(sample.contains("run")) continue;
+      const std::string key=sample.at("key"),name=sample.at("path");
+      if(!std::regex_match(key,std::regex("(PP|AuAu)/[A-Za-z0-9_-]+")) || name!=key+".root" || !keys.insert(key).second)
+        throw std::runtime_error("invalid or duplicate final sample: "+key);
+      if(in.pins.at(name)!=sample.at("sha256").get<std::string>()) throw std::runtime_error("component ROOT binding differs");
+      const Json receipt=readJson((in.base/(key+".json")).string());
+      TFile root((in.base/name).c_str(),"READ");auto *object=dynamic_cast<TObjString*>(root.Get("meta/package"));
+      if(root.IsZombie() || !object) throw std::runtime_error("missing final package metadata: "+key);
+      const Json meta=Json::parse(object->GetString().Data());
+      const Json &native=in.natives[in.nativeOf.at(key)].manifest;
+      if(meta.at("package_kind")!="FINAL" || meta.at("selection")!=in.selection ||
+         !photonjet_collection::histogramsAgree(meta.at("histograms"),in.histograms,in.responseContract,sample.at("family"),sample.at("system")) ||
+         meta.at("system")!=sample.at("system") || meta.at("name")!=sample.at("name") || meta.at("family")!=sample.at("family") ||
+         meta.at("plan_sha256")!=sample.value("package_plan_sha256",native.at("input_snapshot_sha256")) ||
+         meta.at("source_count")!=sample.at("source_count") || meta.at("event_records")!=sample.at("event_records") ||
+         receipt.at("sha256")!=sample.at("sha256") || receipt.at("validation").at("status")!="PASS" ||
+         receipt.at("package_binding_sha256")!=meta.at("package_binding_sha256"))
+        throw std::runtime_error("component package is inconsistent: "+key);
+      add(in.base/name,name,in.pins.at(name));add(in.base/(key+".json"),key+".json",in.pins.at(key+".json"));samples.push_back(sample);
+    }
+    for(const auto &native:in.natives) {
+      const std::string name="collections/"+native.sha+".yaml";
+      if(!payloads.count(name)) components.push_back({{"path",name},{"sha256",native.sha}});
+      add(native.file,name,native.sha);
+    }
+  }
+  if(components.empty() || samples.empty()) throw std::runtime_error("collection --from requires final packages");
+  Json result={{"schema","PhotonJetHistogramCollectionV1"},{"status","VALIDATED"},{"created_at",utc()},
+    {"input_snapshot_sha256",digest(components)},{"selection_sha256",reference->selection.at("selection_sha256")},
+    {"samples",samples},{"files",files},{"component_collections",components}};
+  if(!responseContract.is_null()) result["simulation_response"]=responseContract;
+  const fs::path manifest=output/"collection.yaml";
+  if(fs::exists(manifest)) {
+    const Json old=photonjet_config::readYaml(manifest.string());result["created_at"]=old.at("created_at");
+    if(old!=result) throw std::runtime_error("existing portable collection differs; use another output directory");
+  }
+  for(const auto &copy:copies) {
+    const fs::path target=output/copy.name;fs::create_directories(target.parent_path());
+    bool linked=false;
+    if(!fs::exists(target)) {
+      /* Published packages are immutable: on one filesystem a link is the file hashed above, without a second copy. */
+      std::error_code failed;fs::create_hard_link(copy.source,target,failed);
+      if(failed) fs::copy_file(copy.source,target); else linked=true;
+    }
+    if(!linked && sha256File(target.string())!=copy.sha) throw std::runtime_error("collection payload differs: "+target.string());
+  }
+  if(!fs::exists(manifest)) writeYaml(manifest,result);
+  std::cout<<"[TreeToHists] portable collection: "<<manifest<<" ("<<samples.size()<<" final packages)\n";
+}
 }  // namespace
 int campaign(const std::string &command,const std::vector<std::string> &args) {
   if (command=="campaign") {prepare(args); return 0;}
+  if(command=="collection" && std::find(args.begin(),args.end(),"--from")!=args.end()) {portableCollection(args);return 0;}
   if (command=="campaign-submit-check") {
     const fs::path config=fs::absolute(arg(args,"--config"));
     const Json cfg=photonjet_config::readYaml(config.string()).at("Campaign");
@@ -590,7 +835,8 @@ int campaign(const std::string &command,const std::vector<std::string> &args) {
   if (command=="campaign-plan") {makeDag(work); return 0;}
   if (command=="collection") {collection(work,arg(args,"--out")); return 0;}
   if (command=="merge-group") {
-    const Json c=readJson((work/"campaign.json").string()); bindings(c,false);
+    if(fs::exists(work/"campaign.json")){const Json c=readJson((work/"campaign.json").string()); bindings(c,false);}
+    else {const Json p=readJson((work/"plan.json").string());Json body=p;body.erase("plan_sha256");if(digest(body)!=p.at("plan_sha256").get<std::string>())throw std::runtime_error("local merge plan checksum differs");checkReductionCode(p);}
     const std::string id=arg(args,"--node");
     if (!std::regex_match(id,std::regex("M[0-9]+"))) throw std::runtime_error("invalid merge node");
     Json node=readJson((work/"merge_rows"/(id+".json")).string()); const std::string sha=node.at("descriptor_sha256");

@@ -2,6 +2,8 @@
 # Edit HistogramCollection to point to the downloaded collection.
 #   ./FinalAnalysis/final_analysis.sh all --config FinalAnalysis/config/pipeline_histograms.yaml
 Pipeline:
+  # The delivered collection.yaml, or better its compact twin (final_analysis.sh compact, see the README): the same
+  # checked content without the DATA packages' per-source records, for passes in minutes.
   HistogramCollection: /path/to/downloaded/collection/collection.yaml
   AnalysisSettings: analysis.yaml
   UseCollectionSamples: 1  # response and inclusive-QA names from the collection
@@ -9,6 +11,7 @@ Pipeline:
   SystematicsSettings: none
   Variations: none
   ExpectedFigures: none  # supply an exact figure inventory when qualifying coverage
+  Parallel: 3  # how many variations' analyses run at once (each also runs its results as separate processes)
 
 # analysis.yaml owns binning, iterations, corrections, bootstrap and closure.
 # Later offline studies can add Analysis variations and SystematicsSettings.

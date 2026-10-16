@@ -43,3 +43,8 @@ CANONICAL_PLOT_PROVENANCE.md
 **/logs/
 **/histograms/
 TreeProduction/*_AUDIT.md
+
+# Local figure deliveries and machine-specific qualification evidence.
+/IAN/
+/FinalAnalysis/.physics/
+/FinalAnalysis/plot_physics_qualification.json

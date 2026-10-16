@@ -1,41 +1,61 @@
-# One command from scored eventTrees to histogram packages, results, IAN figures and tables:
-#   ./FinalAnalysis/final_analysis.sh all --config /path/to/copied/pipeline.yaml
-# Paths are relative to this configuration. The output directory must be new.
+# Run: ./FinalAnalysis/final_analysis.sh all --config /absolute/path/to/copied/pipeline.yaml
+# Materialize every @TOKEN@ from validated collection/recipe manifests before running.
+# Nominal remains the accepted smnom R04 collection (fixed pp in-situ reference 0.916).
+# Its analysis settings keep BackgroundCorrelation and PurityScale equal to [1, 1],
+# and must retain nominal inclusive samples for rbkg QA. Compare numerical objects and
+# provenance with the pinned page basis (nominal.root SHA prefix 2db7a609); record raw SHA separately.
+# DATA JES collections use exactly 1/0.907 (up) and 1/0.923 (down); AuAu JES is deferred by Justin.
+# Named detector components use a separate typed raw-grid collection, with nominal DATA and
+# full nominal sample coverage. Its top-level response recipe is empty, as required by NamedResponse.h.
+# Every saved selection collection must contain coherent DATA + photonjet SIM for its selection,
+# including its smnom response; other systems retain nominal inputs. Inclusive samples are optional
+# there and are excluded through existing QA settings to avoid irrelevant selection-coverage checks.
+# Only rbkg consumes nominal inclusive-SIM QA. Purity nonclosure is a diagnostic, outside the band.
+# EMS recalculates calibration-dependent selection and couples the same scale to jet EM fraction.
+# JER/EMR use their named shared draws, seed480. Timing is deferred and contributes no zero placeholder.
+# No eventTree reduction, per-selection inclusive production or centrality-off inclusive production.
 Pipeline:
-  InputCollection: /path/to/inputs.yaml
-  ReductionSettings: /path/to/copied/treetohists.yaml
-  AnalysisSettings: /path/to/copied/analysis.yaml
-  SystematicsSettings: /path/to/copied/pipeline_systematics.yaml
-  OutputDirectory: ./outputs/analysis_v1
+  HistogramCollection: '@SMNOM_R04_COLLECTION@'
+  AnalysisSettings: '@SMNOM_R04_ANALYSIS_SETTINGS@'
+  SystematicsSettings: pipeline_systematics.yaml
+  OutputDirectory: ./outputs/smnom_r04_v1
   Parallel: 1
-
-  # List exact PNG names relative to fig/ to require figure coverage. 'none' runs the
-  # components but reports coverage UNQUALIFIED; it cannot certify the IAN inventory.
-  ExpectedFigures: /path/to/required_figures.txt
-  Variations: [prior_p15, prior_p05, prior_exp2, k_minus, k_plus, combinatoric_flat, rbkg, purity_nonclosure, jes_up, jes_down]
-prior_p15:
+  UseCollectionSamples: 1
+  ExpectedFigures: '@REQUIRED_FIGURES@'
+  Variations:
+  - prior_half
+  - k_minus
+  - k_plus
+  - sideband_low
+  - sideband_mid
+  - rbkg
+  - purity_nonclosure
+  - jes_up
+  - jes_down
+  - smjer_low
+  - smjer_high
+  - smemr_low
+  - smemr_high
+  - smems_low
+  - smems_high
+  - centralityoff
+  - pp_tight_plus005
+  - pp_lower_minus010
+  - pp_gap01
+  - pp_gap10
+  - auau_tight60
+  - auau_tight80
+  - auau_lower02
+  - auau_upper90
+  - auau_iso70
+  - auau_iso90
+prior_half:
   Analysis:
     Prior:
-
-      # Overrides change existing settings; misspelled or absent keys fail.
-      Power: 1.5
-prior_p05:
-  Analysis:
-    Prior:
-      Power: 0.5
-prior_exp2:
-  Analysis:
-    Prior:
-      Form: exp2
-combinatoric_flat:
-  Analysis:
-    Combinatoric:
-      Shape: flat
+      Fraction: 0.5
 k_minus:
   Analysis:
     pp:
-
-      # Freeze the nominal rule's selected iterations before taking its bracket.
       PairIterations: nominal-1
       PhotonIterations: nominal-1
     auau_cent0_20:
@@ -61,10 +81,21 @@ k_plus:
     auau_cent50_80:
       PairIterations: nominal+1
       PhotonIterations: nominal+1
+sideband_low:
+  Analysis:
+    Combinatoric:
+      Sideband:
+      - 0.8
+      - 2.062
+sideband_mid:
+  Analysis:
+    Combinatoric:
+      Sideband:
+      - 0.982
+      - 2.258
 rbkg:
   Analysis:
     pp:
-
       BackgroundCorrelation: qa
     auau_cent0_20:
       BackgroundCorrelation: qa
@@ -83,17 +114,315 @@ purity_nonclosure:
     auau_cent50_80:
       PurityScale: qa
 jes_up:
-  Reduction:
-    Fill:
-
-      # Only response-changing variations reread the same pinned eventTree population.
-      ResponseVariation: jet_scale=1.03 seed=1
+  HistogramCollection: '@JES_UP_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
 jes_down:
-  Reduction:
-    Fill:
-      ResponseVariation: jet_scale=0.97 seed=1
-
-# To start from an existing histogram collection instead, replace InputCollection
-# and ReductionSettings with Pipeline.HistogramCollection. Omit response-changing
-# variations unless their separately qualified histogram packages are supplied.
-# SystematicsSettings and Variations may both be 'none' for a nominal-only run.
+  HistogramCollection: '@JES_DOWN_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+pp_tight_plus005:
+  HistogramCollection: '@PP_TIGHT_PLUS005_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+pp_lower_minus010:
+  HistogramCollection: '@PP_LOWER_MINUS010_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+pp_gap01:
+  HistogramCollection: '@PP_GAP01_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+pp_gap10:
+  HistogramCollection: '@PP_GAP10_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+auau_tight60:
+  HistogramCollection: '@AUAU_TIGHT60_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+auau_tight80:
+  HistogramCollection: '@AUAU_TIGHT80_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+auau_lower02:
+  HistogramCollection: '@AUAU_LOWER02_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+auau_upper90:
+  HistogramCollection: '@AUAU_UPPER90_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+auau_iso70:
+  HistogramCollection: '@AUAU_ISO70_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+auau_iso90:
+  HistogramCollection: '@AUAU_ISO90_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+smjer_low:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smjer_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_low seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: smjer_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_low seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: smjer_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_low seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: smjer_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_low seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+smjer_high:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smjer_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_high seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: smjer_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_high seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: smjer_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_high seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: smjer_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_high seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+smemr_low:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smemr_low
+      ResponseRecipe: photon_resolution=ppg18_low jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: smemr_low
+      ResponseRecipe: photon_resolution=ppg18_low jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: smemr_low
+      ResponseRecipe: photon_resolution=ppg18_low jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: smemr_low
+      ResponseRecipe: photon_resolution=ppg18_low jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+smemr_high:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smemr_high
+      ResponseRecipe: photon_resolution=ppg18_high jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: smemr_high
+      ResponseRecipe: photon_resolution=ppg18_high jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: smemr_high
+      ResponseRecipe: photon_resolution=ppg18_high jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: smemr_high
+      ResponseRecipe: photon_resolution=ppg18_high jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+smems_low:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smems_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=0.9852
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: smems_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=0.9852
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: smems_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=0.9852
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: smems_low
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=0.9852
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+smems_high:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smems_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=1.0148
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: smems_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=1.0148
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: smems_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=1.0148
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: smems_high
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=ems_selection_response
+        em_scale=1.0148
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+centralityoff:
+  HistogramCollection: '@NATIVE_RESPONSE_GRID_COLLECTION@'
+  Analysis:
+    QA:
+      Mode: measurement_inputs
+      PhotonIDModels: none
+      PP:
+        Inclusive: none
+      AuAu:
+        Inclusive: none
+    pp:
+      ResponseComponent: smnom
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+      ResponseGridSHA256: '@GRID_PP_SHA256@'
+    auau_cent0_20:
+      ResponseComponent: centralityoff
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+        centrality_weight=off
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent20_50:
+      ResponseComponent: centralityoff
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+        centrality_weight=off
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'
+    auau_cent50_80:
+      ResponseComponent: centralityoff
+      ResponseRecipe: photon_resolution=ppg18_nominal jet_resolution=sphenix_pp2026_nominal seed=480 photon_selection=response_only
+        centrality_weight=off
+      ResponseGridSHA256: '@GRID_AUAU_SHA256@'

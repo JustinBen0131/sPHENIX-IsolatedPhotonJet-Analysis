@@ -1,3 +1,4 @@
+#include "../../../TreeToHists/src/ScientificProducerEvidence.h"
 /**
  * @file Output.cc
  * Write one eventTree per source, directly from the in-memory event records.
@@ -17,11 +18,15 @@
  */
 #include "../PhotonJetTree.h"
 #include "Production.h"
+#include "PrimaryShowerDefinition.h"
+#include "SourceScientificDefinitions.h"
+#include "../../../TreeToHists/src/NativeModelDefinition.h"
 #include "../EventTree.h"
 
 #include <nlohmann/json.hpp>
 
 #include <TH1D.h>
+#include <TH2.h>
 #include <TROOT.h>
 
 #include <algorithm>
@@ -72,6 +77,8 @@ class DirectEventWriter
   std::unique_ptr<TH1D> centrality;  // Au+Au simulation: hist/SIM/h_centrality
   std::int64_t nextEntry;            // the source entry the next event must have
   std::set<std::string> filledReserved;
+  std::set<std::string> primaryScientificDefinitions; // observed native calculation arguments
+  std::map<std::string,std::set<std::string>> namedScientificDefinitions;
   std::set<std::string> truthMissPaths;  // the decision paths of the file's truth misses
   std::map<std::string, std::int64_t> invalidUnsubtractedJes;  // Au+Au: per unsubtracted view
   // What the file's events held. A file constant that describes rows exists only
@@ -704,6 +711,9 @@ void fillShowerViews(photonjet::DirectEventWriter& d, const photonjet::Config& c
 void fillPhoton(photonjet::DirectEventWriter& d, const photonjet::Config& config, const photonjet::EventRecord& event,
                 const photonjet::PhotonRecord& r)
 {
+  d.primaryScientificDefinitions.insert(photonjet_science::primaryShowerDefinition(r).dump());
+  for(const auto& view:r.showerShapes)
+    d.namedScientificDefinitions[view.definitionName].insert(photonjet_science::namedShowerDefinition(view).dump());
   fillNpbBranches(d, config, r);
   d.put("pho_ppg12_tower_mask_state", r.ppg12TowerMaskState);
   d.put("pho_ppg12_source_eligible", r.ppg12TowerMaskState == 0 ? 1 : 0);
@@ -1766,6 +1776,44 @@ void PhotonJetTree::writeCompletionMetadata()
     }
     meta["trigger_run_info"] = table;
   }
+  // New typed metadata is evidence only: it neither alters the eventTree
+  // branch schema nor changes a stored value, selection, weight or model.
+  json nativeWitnesses={{"models",json::object()}};
+  const auto lookupWitness=[](const TH1* h) {
+    if(!h)return photonjet_science::unknown("configured lookup is not loaded");
+    json axes=json::array(),values=json::array();
+    for(const TAxis* axis:{h->GetXaxis(),h->GetYaxis()}) {
+      if(axes.size()>=std::size_t(h->GetDimension()))break;
+      json edges=json::array();for(int i=1;i<=axis->GetNbins()+1;++i)edges.push_back(axis->GetBinLowEdge(i));axes.push_back(edges);
+    }
+    for(int i=0;i<h->GetNcells();++i)values.push_back(h->GetBinContent(i));
+    return photonjet_science::portable(json{{"axes",axes},{"flow_cells_included",true},{"values",values}});
+  };
+  if(m_vertexReweight)nativeWitnesses["vertex_weight"]={{"function","TH1::Interpolate"},{"lookup",lookupWitness(m_vertexReweight)}};
+  if(m_ppg12TowerMask)nativeWitnesses["tower_mask"]=lookupWitness(m_ppg12TowerMask);
+  for(const auto& model:m_config.photon.models)if(!model.file.empty()) {
+    // File digest is an evidence binding only; the tree values below are the physics definition.
+    if(photonjet::production::fileSha256(model.file)!=model.sha256)
+      throw std::runtime_error("model changed before native definition capture: "+model.scoreName);
+    auto function=photonjet_science::readRBDTDefinition(model.file,"myBDT",model.features);
+    if(photonjet::production::fileSha256(model.file)!=model.sha256)
+      throw std::runtime_error("model changed during native definition capture: "+model.scoreName);
+    nativeWitnesses["models"][model.scoreName]=function;
+    if(model.scoreName==m_config.photon.preselection.npbScoreName)nativeWitnesses["npb_model"]=function;
+  }
+  if(!m_config.photon.nominalId.modelFile.empty()) {
+    const auto& id=m_config.photon.nominalId;
+    if(photonjet::production::fileSha256(id.modelFile)!=id.modelSha256)
+      throw std::runtime_error("nominal model changed before native definition capture");
+    nativeWitnesses["nominal_model"]=photonjet_science::readRBDTDefinition(id.modelFile,"myBDT",id.featureOrder);
+    if(photonjet::production::fileSha256(id.modelFile)!=id.modelSha256)
+      throw std::runtime_error("nominal model changed during native definition capture");
+  }
+  meta["native_source_witness"]=photonjet_science::compiledProducerWitness();
+  meta["native_source_ancestry"]={{"schema","NativeProducerAncestryV1"},{"state","unknown"},
+    {"reason","external reconstruction and DST ancestry have not been completely recorded"},{"inputs",json::array()}};
+  meta["scientific_definitions"]=photonjet_science::sourceDefinitions(m_config,d.primaryScientificDefinitions,nativeWitnesses);
+  meta["scientific_definitions"]["shower_feature_views"]=photonjet_science::namedShowerDefinitions(d.namedScientificDefinitions);
   for (auto it = meta.begin(); it != meta.end(); ++it) d.writer.text("meta/" + it.key(), it.value().dump());
   std::ostringstream text;
   appendLine(text, "completion_status", m_aborted ? "aborted" : "complete");

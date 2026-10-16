@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "Preselection.h"
 #include <TFile.h>
 #include <TH1.h>
 #include <TObjString.h>
@@ -36,6 +37,7 @@
 #include <TTreeReaderValue.h>
 #include <RVersion.h>
 #include <TMVA/RBDT.hxx>
+#include "NativeModelDefinition.h"
 /* === Selection =======================================================================================================
    Photon + recoil-jet selection on eventTree v1: photon ID and isolation regions, the event-leading
    photon of each region, and its recoil jets. */
@@ -61,6 +63,39 @@ struct IDCell {
   }
 };
 
+/* The jet radius of this fill (the setting Fill.JetRadius): 0.2, 0.3 or 0.4. It names the collections read from the
+   trees (jet0N, jetunsub0N, truthjet0N), bounds the recoil jets to |eta| < 1.1 - R (0.9, 0.8, 0.7) and is the
+   Delta R of the nearby-truth-jet test. Set before any Profile is made; every Profile takes it when it is made.
+   The stitching of a jet sample is not a choice of this fill: it stays on truthjet04, the collection its windows
+   were generated on. */
+inline double configuredJetRadius = 0.4;
+inline void configureJetRadius(double radius) {
+  if (radius != 0.2 && radius != 0.3 && radius != 0.4) throw std::runtime_error("the jet radius is 0.2, 0.3 or 0.4");
+  configuredJetRadius = radius;
+}
+inline const char* jetRadiusTag(double radius) { return radius == 0.2 ? "02" : radius == 0.3 ? "03" : "04"; }
+inline int jetRadiusIndex(double radius) { return radius == 0.2 ? 0 : radius == 0.3 ? 1 : 2; }
+inline double jetAbsEtaMaxOf(double radius) { return radius == 0.2 ? 0.9 : radius == 0.3 ? 0.8 : 0.7; }
+
+/* The in-situ jet energy scale of DATA (the settings Fill.DataJetScale.pp and Fill.DataJetScale.auau): the factor the
+   pT of every DATA jet is multiplied by before any cut, 1 over the photon+jet balance of DATA against simulation
+   (PPG18 measures 0.916 at R = 0.4 in p+p and divides the DATA jet pT by it). 1 leaves the jets as the trees hold
+   them. Simulation is never scaled. */
+inline double configuredDataJetScale = 1.0;
+/* The values of one event times a factor; factor 1 returns them untouched. */
+class ScaledValues {
+ public:
+  template <class Values>
+  ScaledValues(const Values& values, double factor) : v_(values.GetSize()) {
+    for (std::size_t i = 0; i < v_.size(); ++i) v_[i] = factor == 1.0 ? values[i] : values[i] * factor;
+  }
+  std::size_t GetSize() const { return v_.size(); }
+  double operator[](std::size_t i) const { return v_[i]; }
+
+ private:
+  std::vector<double> v_;
+};
+
 /* Every selection parameter. Profiles below are the only sanctioned settings. */
 struct Profile {
   std::string name;
@@ -77,8 +112,14 @@ struct Profile {
   /* isolation witness: index 0 is R = 0.3, 1 is R = 0.4 (meta rules isolation_witnesses) */
   int isolationRadiusIndex = 1;
   int isolationSubtraction = 1;  /* producer isolation method: 1 pp topocluster, 2 Au+Au calorimeter SUB1 */
-  /* recoil jets (the analysis collection jet04 = anti-kT R = 0.4) */
-  double jetPtMin = 5.0, jetAbsEtaMax = 0.7, overlapDeltaR = 0.4, deltaPhiMin = 7.0 * M_PI / 8.0;
+  /* recoil jets: the anti-kT collection of the configured radius (jet04 for R = 0.4), |eta| < 1.1 - R */
+  double jetRadius = configuredJetRadius;
+  double jetPtMin = 5.0, jetAbsEtaMax = jetAbsEtaMaxOf(jetRadius), overlapDeltaR = 0.4, deltaPhiMin = 7.0 * M_PI / 8.0;
+  /* A branch of the analysis jets: jetBranch("jet", "pt") is jet04_pt at R = 0.4; "jetunsub" and "truthjet" alike. */
+  std::string jetBranch(const std::string& collection, const std::string& leaf) const {
+    return collection + jetRadiusTag(jetRadius) + "_" + leaf;
+  }
+  std::string jetCollection(const std::string& collection) const { return collection + jetRadiusTag(jetRadius); }
   /* Regions from the augmented classes pho_id_class and pho_iso_class, computed once at conversion from the frozen
      photon-ID and isolation packages, instead of the score surfaces and the stored witness thresholds. */
   bool augmentedClasses = false;
@@ -88,6 +129,7 @@ struct Profile {
   double sidebandGap = std::numeric_limits<double>::quiet_NaN();  /* GeV from the isolation threshold to the sideband */
   /* Resolved YAML selections evaluate the primitives, never historical producer labels. */
   bool configured = false, isolationFromWitness = true, verifyNominalID = false, verifyNominalIsolation = false;
+  bool simulation = false, ppIsolationParity = false;
   Line isolationThreshold{0.0, 0.0};  /* pp: ET, AuAu: centrality */
   double isolationCentMin = 0.0, isolationCentMax = 80.0;
   std::string scoreBranch = "pho_bdt_score", stateBranch = "pho_bdt_state";
@@ -131,6 +173,7 @@ inline Profile nominal(System system) {
   p.name = "nominal";
   if (system == System::pp) {
     p.vertexAbsZMax = 60.0;
+    p.ppIsolationParity = true;
   } else {
     p.augmentedClasses = true;
     p.isolationRadiusIndex = 0;  /* R = 0.3, applied through pho_iso_class */
@@ -168,13 +211,19 @@ struct PhotonClass {
   }
 };
 
-template <class Values, class Ints, class Scores>
-PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centrality, const Scores& score, const Ints& state,
+inline double analysisIsolation(const Profile& p,double raw) {
+  return p.system==System::pp && p.ppIsolationParity && p.simulation ? 1.2*raw+0.1 : raw;
+}
+
+template <class Values, class Ints, class Scores, class States>
+PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centrality, const Scores& score, const States& state,
                         const Values& cone, const Values& threshold, const Values& sideband, const Ints& method,
                         const Ints& role, const Ints& idClass, const Ints& isoClass) {
   PhotonClass c;
   const std::size_t w = 2 * i + p.isolationRadiusIndex;
   c.witness = role[w] == 0 && method[w] == p.isolationSubtraction && std::isfinite(cone[w]);
+  const double isolation=analysisIsolation(p,cone[w]);
+  const bool withinNonIsolated=p.system!=System::pp || !p.ppIsolationParity || isolation<20.;
   if (p.configured) {
     c.scored = (p.optionalID || state[i] == 1) && std::isfinite(score[i]);
     if (c.scored) {
@@ -205,7 +254,7 @@ PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centr
                              : cut + p.sidebandGap;
     c.witness = c.witness && std::isfinite(cut) && std::isfinite(upper) && upper >= cut;
     if (c.witness) {
-      c.isoCode = cone[w] < cut ? kIsoIsolated : cone[w] > upper ? kIsoNonIsolated : kIsoGap;
+      c.isoCode = isolation < cut ? kIsoIsolated : isolation > upper && withinNonIsolated ? kIsoNonIsolated : kIsoGap;
       c.isolated = c.isoCode == kIsoIsolated;
       c.nonIsolated = c.isoCode == kIsoNonIsolated;
     }
@@ -238,8 +287,8 @@ PhotonClass photonClass(const Profile& p, std::size_t i, double et, double centr
   c.tight = score[i] > tightCut;
   c.nonTight = low < score[i] && score[i] < high;
   if (c.witness && std::isfinite(threshold[w]) && std::isfinite(sideband[w])) {
-    c.isolated = cone[w] < threshold[w];
-    c.nonIsolated = cone[w] > (std::isnan(p.sidebandGap) ? sideband[w] : threshold[w] + p.sidebandGap);
+    c.isolated = isolation < threshold[w];
+    c.nonIsolated = isolation > (std::isnan(p.sidebandGap) ? sideband[w] : threshold[w] + p.sidebandGap) && withinNonIsolated;
   }
   return c;
 }
@@ -261,21 +310,30 @@ inline bool photonKinematics(const Profile& p, double vz, double et, double eta,
 /* One event-local photon index per ABCD region; -1 means no eligible leader.
    Equal ET keeps the later encounter, matching the established >= rule.
    All candidate arrays must share the same photon ordering. */
-template <class Energies, class Values, class Ints, class Scores>
-std::array<long, 4> regionLeaders(const Profile& p, double vz, double centrality, std::size_t n, const Energies& et,
-                                  const Values& eta, const Values& phi, const Scores& score, const Ints& presel,
-                                  const Ints& state, const Values& cone, const Values& threshold, const Values& sideband,
+template <class Energies, class ClassificationEnergies, class Values, class Ints, class Scores, class Preselection, class States, class WitnessValues>
+std::array<long, 4> regionLeadersWithClassification(const Profile& p, double vz, double centrality, std::size_t n, const Energies& et,
+                                  const ClassificationEnergies& classificationEt, const Values& eta, const Values& phi, const Scores& score, const Preselection& presel,
+                                  const States& state, const WitnessValues& cone, const WitnessValues& threshold, const WitnessValues& sideband,
                                   const Ints& method, const Ints& role, const Ints& idClass, const Ints& isoClass) {
   std::array<long, 4> leader{-1, -1, -1, -1};
   for (std::size_t i = 0; i < n; ++i) {
     if (presel[i] != 1) continue;
     if (!photonKinematics(p, vz, et[i], eta[i], phi[i])) continue;
     const Region r =
-        photonClass(p, i, et[i], centrality, score, state, cone, threshold, sideband, method, role, idClass, isoClass).region();
+        photonClass(p, i, classificationEt[i], centrality, score, state, cone, threshold, sideband, method, role, idClass, isoClass).region();
     if (r == kNone) continue;
     if (leader[r] < 0 || et[i] >= et[leader[r]]) leader[r] = static_cast<long>(i);
   }
   return leader;
+}
+
+/* Nominal and whole-selection callers retain exactly the original contract. */
+template <class Energies, class Values, class Ints, class Scores, class Preselection, class States, class WitnessValues>
+std::array<long, 4> regionLeaders(const Profile& p, double vz, double centrality, std::size_t n, const Energies& et,
+    const Values& eta, const Values& phi, const Scores& score, const Preselection& presel, const States& state,
+    const WitnessValues& cone, const WitnessValues& threshold, const WitnessValues& sideband,
+    const Ints& method, const Ints& role, const Ints& idClass, const Ints& isoClass) {
+  return regionLeadersWithClassification(p,vz,centrality,n,et,et,eta,phi,score,presel,state,cone,threshold,sideband,method,role,idClass,isoClass);
 }
 
 /* Kinematics use GeV and radians. The same recoil decision feeds measurement,
@@ -378,6 +436,21 @@ struct Ownership {
   bool contains(double x) const { return x >= low && x < high; }
 };
 inline Ownership configuredOwnership;
+
+/* The producer's event class as this package accepts it (evt_terminal_status: 0 none, 1 trigger, 2 vz, 3 minimum bias,
+   4 stitch, 5 centrality; the first that applies, recorded by TreeProduction and never applied there).
+   Class 0 is an analysis event. Class 4 is one too for a sample this package stitches by its leading truth-jet pT: the
+   producer's embedded jet windows (12-20, 20+, 30+, 40+ GeV) are another partition than
+   config/auau_embedded_stitching.json (12-21, 21-31, 31-41, 41+), and requiring both leaves 20-21 GeV to no sample.
+   The sample's own window (OwnershipGate) then decides. A class-4 event was classed before the producer's centrality
+   test, so its centrality must lie in the producer's 0-80% here. Every other class stays a rejection, and so does
+   class 4 for a photon sample (both partitions split at 20 GeV), for p+p and for DATA. */
+constexpr double kProducerCentralityLow = 0.0, kProducerCentralityHigh = 80.0;
+inline bool acceptedEventClass(int terminalStatus, double centrality, const Ownership& ownership = configuredOwnership) {
+  if (terminalStatus == 0) return true;
+  return terminalStatus == 4 && ownership.owner == Ownership::Owner::leadingTruthJet &&
+         centrality >= kProducerCentralityLow && centrality < kProducerCentralityHigh;
+}
 
 /* The ownership test of one fill's reader, made beside its other branches (before the first Next()). */
 class OwnershipGate {
@@ -646,6 +719,8 @@ inline Profile configuredProfile(const char* legacyName, System system, const ch
   SelectionJson j; stream >> j;
   if (j.at("schema") != "PhotonJetSelectionV1" || j.at("version") != 1)
     throw std::runtime_error("unsupported resolved selection");
+  if(!j.contains("preselection") || j.at("preselection")!=canonicalPreselection())
+    throw std::runtime_error("missing or noncanonical NPB preselection definition");
   Profile p = nominal(system);
   const auto& s = j.at("systems").at(system == System::pp ? "pp" : "auau");
   auto line = [](const SelectionJson& v) {
@@ -686,6 +761,10 @@ inline Profile configuredProfile(const char* legacyName, System system, const ch
   p.verifyNominalID = s.at("verify_nominal_id").get<bool>();
   p.verifyNominalIsolation = s.at("verify_nominal_isolation").get<bool>();
   const auto& iso = s.at("isolation");
+  if (system==System::pp && (!iso.contains("simulation_scale") || iso.at("simulation_scale")!=1.2 ||
+      !iso.contains("simulation_shift_gev") || iso.at("simulation_shift_gev")!=0.1 ||
+      !iso.contains("non_isolated_max_gev") || iso.at("non_isolated_max_gev")!=20.))
+    throw std::runtime_error("pp isolation needs the declared PPG12 SIM transform and20GeV sideband maximum");
   const double radius = iso.at("radius").get<double>();
   if (radius != 0.3 && radius != 0.4) throw std::runtime_error("isolation radius is not a retained witness");
   p.isolationRadiusIndex = radius == 0.3 ? 0 : 1;
@@ -705,6 +784,7 @@ inline Profile configuredProfile(const char* legacyName, System system, const ch
 }
 
 inline Profile validateSelectionInput(TFile& file, Profile p) {
+  p.simulation=isSimulation(file);
   if (!p.configured) return p;
   const auto resolved = SelectionJson::parse(p.selectionJson);
   const auto& s = resolved.at("systems").at(p.system==System::pp ? "pp" : "auau");
@@ -833,6 +913,7 @@ class PhotonScores {
   std::unique_ptr<TTreeReaderValue<int>> record_,ready_,vertexValid_,terminal_;
   std::vector<Cell> cells_;
   SelectionJson domain_;
+  SelectionJson scientificFunctions_=SelectionJson::array();
   std::unique_ptr<NativeFeatureMetadata> metadata_;
   size_t stride_=0;
   bool auau_=false;
@@ -852,7 +933,7 @@ class PhotonScores {
     if (auau_ && std::isfinite(cent) && cent!=std::round(cent)) throw std::runtime_error("native model centrality is not an integer bin");
     const bool event=metadata_->code(entry_,"evt_record",**record_)==0 &&
       metadata_->code(entry_,"evt_nodes_ready",**ready_)==1 && metadata_->code(entry_,"vtx_valid",**vertexValid_)==1 &&
-      metadata_->code(entry_,"evt_terminal_status",**terminal_)==0;
+      acceptedEventClass(metadata_->code(entry_,"evt_terminal_status",**terminal_),cent);
     std::vector<float> input(stride_);
     for (size_t i=0;i<n;++i) {
       if (nativeCandidate_ && !nativeCandidate_(i)) continue;
@@ -900,12 +981,36 @@ class PhotonScores {
     vertex_=std::make_unique<TTreeReaderValue<double>>(reader,"vtx_z");centrality_=std::make_unique<TTreeReaderValue<double>>(reader,"cent_value");
     record_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_record");ready_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_nodes_ready");
     vertexValid_=std::make_unique<TTreeReaderValue<int>>(reader,"vtx_valid");terminal_=std::make_unique<TTreeReaderValue<int>>(reader,"evt_terminal_status");
-    for (const auto &cell : native.at("cells")) cells_.push_back({cell.at("et")[0],cell.at("et")[1],cell.at("centrality")[0],cell.at("centrality")[1],
-      std::make_unique<BDT>(cell.at("key").get<std::string>(),cell.at("file").get<std::string>())});
+    for (const auto &cell : native.at("cells")) {
+      cells_.push_back({cell.at("et")[0],cell.at("et")[1],cell.at("centrality")[0],cell.at("centrality")[1],
+        std::make_unique<BDT>(cell.at("key").get<std::string>(),cell.at("file").get<std::string>())});
+      const auto actual=photonjet_science::loadedRBDTDefinition(*cells_.back().model,contract.at("order"));
+      if(cell.contains("scientific_function") && cell.at("scientific_function")!=actual)
+        throw std::runtime_error("loaded model function differs from the planned scientific witness");
+      scientificFunctions_.push_back({{"et",cell.at("et")},{"centrality",cell.at("centrality")},{"function",actual}});
+    }
     if (cells_.empty()) throw std::runtime_error("native model has no cells");
   }
   size_t GetSize() const {return saved_ ? saved_->GetSize() : et_->GetSize();}
+  const SelectionJson& scientificFunctions() const {return scientificFunctions_;}
   double operator[](size_t i) const {if (saved_) return (*saved_)[i];evaluate();return values_.at(i);}
+  std::map<std::string,double> cacheInputs(size_t i) const {
+    if(saved_ || !metadata_ || !et_)return {};
+    const size_t n=et_->GetSize();if(i>=n)throw std::runtime_error("native cache feature index outside photons");
+    if(stride_>14)throw std::runtime_error("native cache cannot retain more than14model inputs");
+    if(features_->GetSize()!=n*7*stride_ || finite_->GetSize()!=n*7)return {};
+    const size_t view=metadata_->view(reader_.GetCurrentEntry());
+    const auto encoded=(*finite_)[7*i+view];
+    std::map<std::string,double> result{{"native_model_encoded_feature_state",encoded}};
+    try {result["native_model_feature_state"]=metadata_->code(reader_.GetCurrentEntry(),"shv_finite_feature_state",encoded);}
+    catch(const std::runtime_error&) {
+      // The scorer already requires a valid mapping inside its domain. Outside
+      // that domain, archive the encoded state without adding a new event veto.
+      evaluate();if(std::isfinite(values_.at(i)))throw;
+    }
+    for(size_t j=0;j<stride_;++j)result["native_model_input_"+std::to_string(j)]=(*features_)[(7*i+view)*stride_+j];
+    return result;
+  }
 };
 
 template <class Values, class Ints, class Scores>
@@ -1001,7 +1106,9 @@ class AuAuTreeWeightCopies {
   }
   void check() const {
     if (!z_) return;
-    const bool weighted=**record_==0 && **ready_==1 && **terminal_==0 && ownership_->owned();
+    /* The tree writer weights the events this package accepts and owns: the same rule, acceptedEventClass, so a
+       jet event of producer class 4 inside its sample's window carries its weight in the tree as well. */
+    const bool weighted=**record_==0 && **ready_==1 && acceptedEventClass(**terminal_,**cent_) && ownership_->owned();
     if (**sampleValid_!=1 || **vertexValid_!=(weighted ? 1 : 0) || **xsec_!=**slice_)
       throw std::runtime_error("tree AuAu weight state differs from the configured weight");
     if (!weighted) {
@@ -1192,7 +1299,7 @@ class PpSimulationGate {
    a fixed bit index. Absence/disablement is a valid empty stream; missing or
    ambiguous metadata is an error. The mask is applied to scaled event bits. */
 inline ULong64_t dataTriggerMask(TFile& file, const std::string& key) {
-  const std::string name = key=="photon4" ? "Photon 4 GeV + MBD NS >= 1" :
+  const std::string name = key=="photon4" ? "Photon 4 GeV" :
                           key=="photon12" ? "Photon 12 GeV + MBD NS >= 2, vtx < 150 cm" : "";
   if(name.empty()) throw std::runtime_error("unknown nominal DATA trigger: "+key);
   const auto table = SelectionJson::parse(metaText(file,file.Get("meta/trigger_selection") ?
@@ -1255,8 +1362,6 @@ namespace photonjet {
 /* Truth photon acceptance of the reference response: |eta| below this. The reference keeps it apart from the reco
    photon window (Profile::photonAbsEtaMax); both are 0.7. */
 constexpr double kTruthPhotonAbsEtaMax = 0.7;
-/* Analysis jet radius (collections jet04 and truthjet04). The nearby-truth-jet test uses it as its Delta R. */
-constexpr double kAnalysisJetRadius = 0.4;
 /* truthpho_source_role of an analysis-signal truth photon. */
 constexpr int kSignalSourceRole = 1;
 /* The analysis truth signal, recorded by the producer as source role 1: a valid Geant4 photon of a prompt class below
@@ -1342,12 +1447,12 @@ inline std::vector<std::pair<std::size_t, std::size_t>> greedyJetMatch(std::vect
   return taken;
 }
 
-/* True when a truth jet (truthjet04) above the threshold lies within matchDeltaR of the reco jet. A selected reco
-   recoil of a matched photon without such a jet is combinatoric. Fiducial and recoil cuts are not applied to the
-   truth jet: they belong to the observable, not to the label. */
+/* True when a truth jet of the analysis radius above the threshold lies within matchDeltaR (the jet radius) of the
+   reco jet. A selected reco recoil of a matched photon without such a jet is combinatoric. Fiducial and recoil cuts
+   are not applied to the truth jet: they belong to the observable, not to the label. */
 template <class Values>
 bool nearbyTruthJet(double threshold, double recoEta, double recoPhi, const Values& pt, const Values& eta,
-                    const Values& phi, std::size_t n, double matchDeltaR = kAnalysisJetRadius) {
+                    const Values& phi, std::size_t n, double matchDeltaR) {
   for (std::size_t t = 0; t < n; ++t) {
     if (!(std::isfinite(pt[t]) && std::isfinite(eta[t]) && std::isfinite(phi[t]))) continue;
     if (pt[t] >= threshold && deltaR(eta[t], phi[t], recoEta, recoPhi) < matchDeltaR) return true;

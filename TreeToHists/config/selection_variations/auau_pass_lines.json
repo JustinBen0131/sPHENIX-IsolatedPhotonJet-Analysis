@@ -1,0 +1,67 @@
+{
+  "schema": "PhotonJetWorkingPointLinesV1",
+  "coordinate": "centrality_percent",
+  "qa_input": "nominal_qa.root",
+  "qa_cpp_source": "FinalAnalysis/src/QA.cc (retained derivation version)",
+  "retained_source_sha256": "c1bc484ba13a4c1962c4aa7ee9d79376ebe1b875079d0b14d299f0d765c2e194",
+  "qa_source_sha256": "ac6e307a94f4089269366e90877c985baef45f7eb3dfd0efc6b93cf2f4058619",
+  "qa_cpp_sha256": "8b7819161179a88e9d538cb699fc80b556a14cc3ce97aa4bea98c62341916565",
+  "native_helpers_sha256": "0aca6be494cea21f33be3baee4667677675c414d7aa524908f68d2f8474a3b6e",
+  "existing_derivation_sha256": "e2c914728dd746fb5f3f3440293242be4c7295e91cf4ee6a1f809765886eb08b",
+  "historical_report_sha256": "8adc35237f0722f712603dd0a4aaccbc3f6c7402116057a7ebecca4a3a72e4f6",
+  "historical_mislabeled_qa_source_sha256": "c8b6a6280f388fc6ae12398e0582c042a4a8d82cc106d4b1b305105ce652c43e",
+  "lines": {
+    "bdt60": {
+      "intercept": 0.7878400773821884,
+      "slope_per_percent": 0.0008914194639945061
+    },
+    "bdt70": {
+      "intercept": 0.7271262500094734,
+      "slope_per_percent": 0.0011585440145489856
+    },
+    "bdt80": {
+      "intercept": 0.632344067109779,
+      "slope_per_percent": 0.0016043684170035637
+    },
+    "bdt90": {
+      "intercept": 0.46809236175472213,
+      "slope_per_percent": 0.0021303250671328242
+    },
+    "isolation60": {
+      "intercept": 0.6702820569457778,
+      "slope_per_percent": -0.0010118527351678495
+    },
+    "isolation70": {
+      "intercept": 1.726993718566947,
+      "slope_per_percent": -0.010849579302572599
+    },
+    "isolation80": {
+      "intercept": 3.059196113029283,
+      "slope_per_percent": -0.02356487430593699
+    },
+    "isolation90": {
+      "intercept": 5.055510312973271,
+      "slope_per_percent": -0.04291948901038252
+    }
+  },
+  "saved_level_parity": {
+    "bdt70": true,
+    "bdt80": true,
+    "bdt90": true,
+    "isolation70": true,
+    "isolation80": true,
+    "isolation90": true
+  },
+  "existing_derivation_parity": {
+    "bdt60": 184,
+    "bdt70": 184,
+    "bdt80": 184,
+    "bdt90": 184,
+    "isolation60": 184,
+    "isolation70": 184,
+    "isolation80": 184,
+    "isolation90": 184
+  },
+  "limits": "Pass-specific derivation on the retained weighted signal population; final production population/weight applicability and uncertainty prescription remain separate.",
+  "provenance_note": "The original report used the QA.cc digest in its QA input field. qa_source_sha256 identifies the retained ROOT input; the original mislabeled digest is preserved separately."
+}
