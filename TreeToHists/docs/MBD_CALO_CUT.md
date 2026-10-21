@@ -1,6 +1,6 @@
 # Au+Au MBD–calorimeter core cut
 
-The canonical `mbd_calo_cubic_20261020` definition keeps the main correlation band independently for DATA, photon+jet SIM and inclusive-jet SIM. It uses the frozen [calibration](../config/mbd_calo_cubic_20261020.json) with [MbdCaloCoreCut.h](../src/MbdCaloCoreCut.h). Loading this calibration reproduces the black boundaries of the accepted before/after figure; a fresh fit creates a different calibration.
+The canonical `mbd_calo_cubic_20261020` definition keeps the main correlation band independently for DATA, photon+jet SIM and inclusive-jet SIM. The self-contained [MbdCaloCoreCut.h](../src/MbdCaloCoreCut.h) includes all three sets of frozen coefficients. Loading the appropriate sample reproduces the black boundaries of the accepted before/after figure; a fresh fit creates a different calibration.
 
 ## Apply the frozen cut
 
@@ -12,13 +12,12 @@ sigma(Q) = b0 + b1*x + b2*x*x + b3*x*x*x
 keep: 0 <= Q < 2120, sigma(Q) > 0, abs(E - mu(Q)) <= 3.5*sigma(Q)
 ```
 
-ROOT and the environment's `nlohmann/json.hpp` are required. From the repository root, load the appropriate family once, then apply it after the baseline event selection:
+Copy the header into a ROOT project, or include it from this repository. No JSON file or JSON library is required. Load the appropriate family once, then apply it after the baseline event selection:
 
 ```cpp
 #include "TreeToHists/src/MbdCaloCoreCut.h"
 
-const auto cut = mbdcalo::loadCalibration(
-    "TreeToHists/config/mbd_calo_cubic_20261020.json", "data");
+const auto cut = mbdcalo::loadCalibration("data");
 // Use "phosim" for photon+jet SIM, "jetsim" for inclusive-jet SIM.
 // Inside the event loop, after the baseline selection:
 if (!cut.pass(mbdChargeSum, totalCaloEnergyGeV)) continue;
@@ -36,6 +35,8 @@ Apply the minimum-bias classifier and **|z_vtx| < 10 cm** in all three samples, 
 2. Fit a Gaussian to the core within approximately 1.3 seed widths, expanding to at least five energy bins. ROOT `TH1::Fit("LISQRN0")` uses bin-integrated Poisson likelihood. Amplitude, mean and width are constrained around the mode seed.
 3. Fit the slice means and widths versus Q/1000 with separate `TGraphErrors` cubics, using their fit uncertainties. `SQNR0` obtains the weighted linear least-squares seed; `SQNR0F` refits all four free coefficients with Minuit2/Migrad, tolerance 1e-6 and at most 100000 function calls. Require status 0, a valid fit and covariance status 3.
 4. Freeze the resulting coefficients before event processing. The supplied calibration rounds the accepted coefficients to eight decimal places, exactly as used for its plotted selection.
+
+The [JSON parameter record](../config/mbd_calo_cubic_20261020.json) is retained as provenance; it is not a runtime dependency. The header is the copyable application definition.
 
 Here sigma is the fitted **Gaussian core width**, not the full-population RMS. It differs from the earlier population-mean/RMS prescription.
 
