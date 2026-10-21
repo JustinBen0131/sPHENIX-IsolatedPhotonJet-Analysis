@@ -1,12 +1,14 @@
 // MbdCaloCoreCut.h: derive or apply the Au+Au MBD-calorimeter core band.
-// loadCalibration() applies the frozen sample-specific cubic definition.
+// Self-contained: loadCalibration("data"), "phosim" or "jetsim" loads the
+// frozen coefficients below. No calibration file or JSON library is needed.
+// Load once, then require cut.pass(mbdChargeSum, totalCaloEnergyGeV) per event.
 // derive() creates a new calibration from an unweighted pre-cut TH2.
 // Input: one sample's unit-count TH2, x=MBD charge, y=total calo energy [GeV],
 // native 20 x 20 bins, filled BEFORE any MBD-calo cut, AFTER MB classifier,
 // |z_vtx|<10 cm, stored centrality [0,80), sample ownership/quality gates,
 // and DATA scaled trigger: Photon 12 GeV + MBD NS >= 2, vtx < 150 cm.
 // No physics, centrality or vertex weights. Call independently for each family.
-// Derive first, freeze the resulting functions, then apply in the event loop.
+// derive() is for a new calibration; loadCalibration() reproduces the frozen cut.
 // Core sigma differs from the original full-population RMS prescription.
 // Numerical convergence alone does not qualify model adequacy or physics closure.
 #pragma once
@@ -23,8 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <fstream>
-#include <nlohmann/json.hpp>
+#include <array>
 
 namespace mbdcalo {
 struct Band {
@@ -90,32 +91,33 @@ inline Band derive(TH2& h, const std::string& name) {
   auto sigma=polynomial(width,widthError,"_sigma");
   return Band{std::move(mu),std::move(sigma),1000*x.front(),1000*x.back(),domainHigh};
 }
-// Load once per sample before the event loop. Unknown samples, malformed
-// calibrations and non-finite parameters throw; invalid event values fail pass().
-// Sample keys: data, phosim (photon+jet), jetsim (inclusive jet).
-inline Band loadCalibration(const std::string& path, const std::string& sample) {
-  std::ifstream input(path);
-  if (!input) throw std::runtime_error("Cannot open MBD-calo calibration: "+path);
-  nlohmann::json calibration; input >> calibration;
-  if (calibration.at("schema")!="MbdCaloCubicCalibrationV1" ||
-      calibration.at("degree")!=3 || calibration.at("multiplier")!=3.5 ||
-      calibration.at("charge_scale")!=1000. ||
-      calibration.at("valid_charge_domain")!=nlohmann::json::array({0.,2120.}))
-    throw std::invalid_argument("Unsupported MBD-calo calibration contract");
-  const auto& family=calibration.at("samples").at(sample);
-  auto function=[&](const char* key) {
-    const auto coefficients=family.at(key).get<std::vector<double>>();
-    if (coefficients.size()!=4 || !std::all_of(coefficients.begin(),coefficients.end(),
-                                             [](double p){return std::isfinite(p);}))
-      throw std::invalid_argument("Expected four finite cubic coefficients");
-    auto f=std::make_shared<TF1>(("mbdcalo_"+sample+"_"+key).c_str(),"pol3",0.,2.12);
+// Frozen mbd_calo_cubic_20261020: Q/1000 cubics, mean +/- 3.5 core sigma.
+// Load once before the event loop; each family uses its own fitted coefficients.
+// Unknown sample keys throw. pass() rejects non-finite or out-of-domain events.
+inline Band loadCalibration(const std::string& sample) {
+  std::array<double,4> mean, sigma;
+  double fitHigh;
+  if (sample=="data") {
+    mean = {{37.74396713, 422.12296297, 509.88784983, -147.54815561}};
+    sigma = {{17.49664184, 58.92212451, 56.44770643, -31.74978374}};
+    fitHigh = 2110.0;
+  }
+  else if (sample=="phosim") {
+    mean = {{30.07645580, 591.17568846, 328.09305475, -78.92053693}};
+    sigma = {{18.33594272, 93.79209401, -7.17806247, -7.86362368}};
+    fitHigh = 1970.0;
+  }
+  else if (sample=="jetsim") {
+    mean = {{41.95544342, 597.35734209, 319.05521941, -75.23903719}};
+    sigma = {{25.91486124, 74.04522062, 12.02248690, -13.63297638}};
+    fitHigh = 1970.0;
+  }
+  else throw std::invalid_argument("MBD-calo sample must be data, phosim or jetsim");
+  auto function=[&](const std::array<double,4>& coefficients,const char* suffix) {
+    auto f=std::make_shared<TF1>(("mbdcalo_"+sample+suffix).c_str(),"pol3",0.,2.12);
     f->SetParameters(coefficients.data());
     return f;
   };
-  const auto support=family.at("fit_charge_support").get<std::vector<double>>();
-  if (support.size()!=2 || !std::isfinite(support[0]) || !std::isfinite(support[1]) ||
-      support[0]<0 || support[0]>=support[1] || support[1]>=2120)
-    throw std::invalid_argument("Invalid fitted charge support");
-  return Band{function("mean"),function("sigma"),support[0],support[1],2120.};
+  return Band{function(mean,"_mean"),function(sigma,"_sigma"),50.,fitHigh,2120.};
 }
 } // namespace mbdcalo
