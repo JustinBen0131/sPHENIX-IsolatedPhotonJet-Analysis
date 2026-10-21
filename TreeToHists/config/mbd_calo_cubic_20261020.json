@@ -1,0 +1,92 @@
+{
+  "schema": "MbdCaloCubicCalibrationV1",
+  "version": "mbd_calo_cubic_20261020",
+  "degree": 3,
+  "charge_scale": 1000.0,
+  "multiplier": 3.5,
+  "valid_charge_domain": [
+    0.0,
+    2120.0
+  ],
+  "charge_domain_upper_exclusive": true,
+  "energy_units": "GeV",
+  "boundary_inclusive": true,
+  "centrality_changed": false,
+  "samples": {
+    "data": {
+      "mean": [
+        37.74396713,
+        422.12296297,
+        509.88784983,
+        -147.54815561
+      ],
+      "sigma": [
+        17.49664184,
+        58.92212451,
+        56.44770643,
+        -31.74978374
+      ],
+      "fit_charge_support": [
+        50.0,
+        2110.0
+      ],
+      "binned_rejected_percent": 1.519757492730742
+    },
+    "phosim": {
+      "mean": [
+        30.0764558,
+        591.17568846,
+        328.09305475,
+        -78.92053693
+      ],
+      "sigma": [
+        18.33594272,
+        93.79209401,
+        -7.17806247,
+        -7.86362368
+      ],
+      "fit_charge_support": [
+        50.0,
+        1970.0
+      ],
+      "binned_rejected_percent": 0.5927322632615312
+    },
+    "jetsim": {
+      "mean": [
+        41.95544342,
+        597.35734209,
+        319.05521941,
+        -75.23903719
+      ],
+      "sigma": [
+        25.91486124,
+        74.04522062,
+        12.0224869,
+        -13.63297638
+      ],
+      "fit_charge_support": [
+        50.0,
+        1970.0
+      ],
+      "binned_rejected_percent": 0.5467951654762941
+    }
+  },
+  "baseline": {
+    "minimum_bias_classifier": "pass",
+    "abs_vertex_cm_max_exclusive": 10.0,
+    "stored_centrality_percent": [
+      0.0,
+      80.0
+    ],
+    "data_scaled_trigger": "Photon 12 GeV + MBD NS >= 2, vtx < 150 cm",
+    "simulation_weights": "unit event counts; no physics, centrality or vertex weights"
+  },
+  "provenance": {
+    "source_counts_sha256": "3c503ea3852a4cd1482e86c9400877f7d4c6ebd3b1346a1e0e3791a27aded6ce",
+    "accepted_selection_arrays_sha256": "dc6b565ea21e29908c0c5886a7fc067a55c2dd2af18daab7510f19357ea753d0",
+    "native_charge_bin_width": 20.0,
+    "native_energy_bin_width_GeV": 20.0,
+    "rates_application": "histogram bin centres; excludes flow bins",
+    "canonical_png_sha256": "248276faa8291cc55f481ab8d496b50ce51ba4ef179a821be56f136a15529cf5"
+  }
+}
